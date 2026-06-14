@@ -10,16 +10,28 @@
   <header class="app-header">
     <div>
       <h1>ระบบวางแผนออกตลาด KCE</h1>
-      <p>เรียงลำดับข้อมูล: ปรับปรุงปั๊ม → ตารางซ่อม → พื้นที่เซลล์ออกตลาด → รายงานยอดขาย</p>
+      <p>แสดงแผนตามสาย: ปรับปรุงปั๊ม 1 จุด/สาย/เดือน → ลูกค้าหาย → เสี่ยงหาย 5 จุด → ซื้อขายประจำ 5 จุด → วางเส้นทางวนกลับจุดเริ่มต้น</p>
     </div>
     <button id="reloadBtn" type="button">รีเฟรชข้อมูล</button>
   </header>
 
   <section class="summary-grid">
-    <div class="summary-card"><span>ทั้งหมด</span><strong id="sumAll">0</strong></div>
+    <div class="summary-card"><span>ทั้งหมดที่แสดง</span><strong id="sumAll">0</strong></div>
     <div class="summary-card urgent"><span>ปรับปรุงปั๊ม</span><strong id="sumPump">0</strong></div>
     <div class="summary-card repair"><span>ตารางซ่อม</span><strong id="sumRepair">0</strong></div>
     <div class="summary-card market"><span>พื้นที่เซลล์</span><strong id="sumMarket">0</strong></div>
+  </section>
+
+  <section class="route-card">
+    <div>
+      <h2>แผนเส้นทางแบบวงกลม</h2>
+      <p>ระบบจะเลือกจุดเริ่มต้นที่ใกล้ที่สุดจาก 4 จุด และเรียงลำดับจุดแวะให้วิ่งวนกลับจุดเริ่มต้นภายในวัน</p>
+    </div>
+    <label class="check-inline">
+      <input id="showAllToggle" type="checkbox" />
+      แสดงข้อมูลทั้งหมด ไม่ตัดเหลือเฉพาะแผน
+    </label>
+    <div id="routeSummary" class="route-summary"></div>
   </section>
 
   <section class="form-card">
@@ -75,6 +87,8 @@
       <thead>
         <tr>
           <th>ลำดับ</th>
+          <th>ลำดับวิ่ง</th>
+          <th>จุดเริ่มต้น</th>
           <th>ความสำคัญ</th>
           <th>ประเภท</th>
           <th>วันนัดหมาย</th>
@@ -93,7 +107,7 @@
         </tr>
       </thead>
       <tbody id="resultBody">
-        <tr><td colspan="16" class="loading">กำลังโหลดข้อมูล...</td></tr>
+        <tr><td colspan="18" class="loading">กำลังโหลดข้อมูล...</td></tr>
       </tbody>
     </table>
   </main>
@@ -101,4 +115,3 @@
   <script src="script.js"></script>
 </body>
 </html>
-
