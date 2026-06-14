@@ -4,13 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ระบบวางแผนออกตลาด KCE</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header class="app-header">
     <div>
       <h1>ระบบวางแผนออกตลาด KCE</h1>
-      <p>แสดงแผนตามสาย: ปรับปรุงปั๊ม 1 จุด/สาย/เดือน → ลูกค้าหาย → เสี่ยงหาย 5 จุด → ซื้อขายประจำ 5 จุด → วางเส้นทางวนกลับจุดเริ่มต้น</p>
+      <p>แสดงแผนเฉพาะเดือนปัจจุบัน: ปรับปรุงปั๊ม 1 จุด/สาย/เดือน → ลูกค้าหาย → เสี่ยงหาย 5 จุด → ซื้อขายประจำ 5 จุด → แผนที่เส้นทางวนกลับจุดเริ่มต้น</p>
     </div>
     <button id="reloadBtn" type="button">รีเฟรชข้อมูล</button>
   </header>
@@ -25,13 +26,16 @@
   <section class="route-card">
     <div>
       <h2>แผนเส้นทางแบบวงกลม</h2>
-      <p>ระบบจะเลือกจุดเริ่มต้นที่ใกล้ที่สุดจาก 4 จุด และเรียงลำดับจุดแวะให้วิ่งวนกลับจุดเริ่มต้นภายในวัน</p>
+      <p>ระบบจะแสดงเฉพาะแผนของเดือนปัจจุบันตามวันที่จริง และเลือกจุดเริ่มต้นที่ใกล้ที่สุดจาก 4 จุด</p>
+      <p class="month-note">เดือนที่แสดง: <strong id="currentMonthLabel">-</strong></p>
     </div>
     <label class="check-inline">
       <input id="showAllToggle" type="checkbox" />
       แสดงข้อมูลทั้งหมด ไม่ตัดเหลือเฉพาะแผน
     </label>
     <div id="routeSummary" class="route-summary"></div>
+    <div id="routeDetail" class="route-detail">คลิกการ์ดแผนเส้นทางด้านบน เพื่อดูรายละเอียดและแผนที่</div>
+    <div id="routeMap" class="route-map"></div>
   </section>
 
   <section class="form-card">
@@ -112,6 +116,7 @@
     </table>
   </main>
 
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="script.js"></script>
 </body>
 </html>
