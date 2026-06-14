@@ -1,1 +1,104 @@
-file:///C:/Users/USER/AppData/Local/Temp/07a0fbb5-ce37-461b-a049-cf4a15c26bb5_index%20(16).zip.bb5/index%20(16).html
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ระบบวางแผนออกตลาด KCE</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <h1>ระบบวางแผนออกตลาด KCE</h1>
+      <p>เรียงลำดับข้อมูล: ปรับปรุงปั๊ม → ตารางซ่อม → พื้นที่เซลล์ออกตลาด → รายงานยอดขาย</p>
+    </div>
+    <button id="reloadBtn" type="button">รีเฟรชข้อมูล</button>
+  </header>
+
+  <section class="summary-grid">
+    <div class="summary-card"><span>ทั้งหมด</span><strong id="sumAll">0</strong></div>
+    <div class="summary-card urgent"><span>ปรับปรุงปั๊ม</span><strong id="sumPump">0</strong></div>
+    <div class="summary-card repair"><span>ตารางซ่อม</span><strong id="sumRepair">0</strong></div>
+    <div class="summary-card market"><span>พื้นที่เซลล์</span><strong id="sumMarket">0</strong></div>
+  </section>
+
+  <section class="form-card">
+    <h2>บันทึกข้อมูลการออกตลาด</h2>
+    <form id="planForm">
+      <label>วันที่ออกตลาด<input name="visit_date" type="date" required /></label>
+      <label>ประเภทงาน
+        <select name="job_type">
+          <option value="ออกตลาด">ออกตลาด</option>
+          <option value="ปรับปรุงปั๊ม">ปรับปรุงปั๊ม</option>
+          <option value="ซ่อม">ซ่อม</option>
+          <option value="ติดตามลูกค้า">ติดตามลูกค้า</option>
+        </select>
+      </label>
+      <label>รหัสลูกค้า<input name="customer_id" placeholder="เช่น C001" /></label>
+      <label>ชื่อลูกค้า / ชื่อปั๊ม<input name="customer_name" placeholder="กรอกชื่อลูกค้า" required /></label>
+      <label>BU / สังกัด<input name="bu" placeholder="เช่น ST, KN, MUK" /></label>
+      <label>สายมิเตอร์<input name="meter" placeholder="เช่น MT-57 / TR-64" /></label>
+      <label>พื้นที่<input name="area" placeholder="ต./อ./จ." /></label>
+      <label>วัตถุประสงค์<input name="purpose" placeholder="รายละเอียดงาน" /></label>
+      <label>ผู้ประสานงาน<input name="coordinator" placeholder="ชื่อผู้ประสานงาน" /></label>
+      <label>เบอร์โทร<input name="phone" placeholder="เบอร์โทร" /></label>
+      <label>ละติจูด<input name="lat" placeholder="ละ" /></label>
+      <label>ลองจิจูด<input name="lng" placeholder="ลอง" /></label>
+      <label class="wide">หมายเหตุ<textarea name="note" placeholder="หมายเหตุเพิ่มเติม"></textarea></label>
+      <button class="submit-btn" type="submit">บันทึกลงชีต “เก็บข้อมูล”</button>
+    </form>
+    <p id="saveStatus" class="save-status"></p>
+  </section>
+
+  <section class="toolbar">
+    <input id="searchBox" placeholder="ค้นหา: ชื่อลูกค้า / รหัส / สายมิเตอร์ / พื้นที่" />
+    <select id="typeFilter">
+      <option value="">ทุกประเภท</option>
+      <option value="ปรับปรุงปั๊ม">ปรับปรุงปั๊ม</option>
+      <option value="ซ่อม">ซ่อม</option>
+      <option value="พื้นที่ออกตลาด">พื้นที่ออกตลาด</option>
+    </select>
+    <select id="statusFilter">
+      <option value="">ทุกสถานะ</option>
+      <option value="ยังไม่เริ่ม">ยังไม่เริ่ม</option>
+      <option value="ยังไม่เข้าซ่อม">ยังไม่เข้าซ่อม</option>
+      <option value="risky">risky</option>
+      <option value="dormant">dormant</option>
+      <option value="winback">winback/new</option>
+      <option value="lost">lost</option>
+      <option value="active">active</option>
+    </select>
+  </section>
+
+  <main class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>ลำดับ</th>
+          <th>ความสำคัญ</th>
+          <th>ประเภท</th>
+          <th>วันนัดหมาย</th>
+          <th>รหัสลูกค้า</th>
+          <th>ชื่อลูกค้า/ชื่อปั๊ม</th>
+          <th>สถานะ</th>
+          <th>BU</th>
+          <th>สายมิเตอร์</th>
+          <th>พื้นที่</th>
+          <th>งาน/วัตถุประสงค์</th>
+          <th>ผู้ประสานงาน</th>
+          <th>เบอร์โทร</th>
+          <th>ยอดขายลิตร</th>
+          <th>ละ</th>
+          <th>ลอง</th>
+        </tr>
+      </thead>
+      <tbody id="resultBody">
+        <tr><td colspan="16" class="loading">กำลังโหลดข้อมูล...</td></tr>
+      </tbody>
+    </table>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
+
