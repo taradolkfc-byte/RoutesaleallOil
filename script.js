@@ -1,7 +1,7 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
-// หลัง Deploy Apps Script แล้ว ให้นำ Web App URL มาใส่แทนข้อความด้านล่าง
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbz_jybKjIdUFAt44LtRnea7llQ8RbzATZTQgRqlRdFot6TbuxKcOVbqm3qjrsO4Fcxg/exec";
+// สำคัญ: ถ้าคุณใส่ URL Apps Script ไว้แล้ว ให้คัดลอก URL เดิมมาใส่ตรงนี้อีกครั้ง
+const WEB_APP_URL = "PUT_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
@@ -10,10 +10,24 @@ const SHEET_NAMES = {
   sales: "รายงานยอดขาย"
 };
 
-let allRows = [];
+// จุดเริ่มต้น 4 จุด ตามที่กำหนด
+const START_POINTS = [
+  { name: "สามทองบริการ", lat: 16.3811263508237, lng: 103.3487862676390 },
+  { name: "ปั๊ม เค.ซี.ปิโตรเลียม2006", lat: 16.7160212825713, lng: 103.0820493667620 },
+  { name: "ปั๊ม เค.ซี.จี.ปิโตรเลียม", lat: 16.4359292973822, lng: 104.6162612319160 },
+  { name: "ปั๊ม เค.ซี.กรีน เอ็นเนอร์จี", lat: 17.6294000000000, lng: 103.7675890000000 }
+];
+
+let rawRows = [];
+let plannedRows = [];
 
 function cleanText(v) { return String(v ?? "").trim(); }
 function cell(row, index) { return row[index] ?? ""; }
+function toNumber(v) {
+  const n = Number(cleanText(v).replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+function validCoord(row) { return toNumber(row.lat) !== null && toNumber(row.lng) !== null; }
 
 async function fetchSheetByIndex(sheetName) {
   const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}`;
@@ -22,7 +36,6 @@ async function fetchSheetByIndex(sheetName) {
   const text = await res.text();
   const jsonText = text.substring(text.indexOf("{"), text.lastIndexOf("}") + 1);
   const json = JSON.parse(jsonText);
-
   return json.table.rows.map(r => (r.c || []).map(c => c ? (c.f || c.v || "") : ""));
 }
 
@@ -57,40 +70,63 @@ function parseDateTH(value) {
 }
 
 function dateSortValue(d) { return d ? d.getTime() : 9999999999999; }
-function daysFromToday(d) {
-  if (!d) return 99999;
-  const today = new Date();
-  today.setHours(0,0,0,0);
-  d.setHours(0,0,0,0);
-  return Math.ceil((d - today) / 86400000);
+function monthKey(d) { return d ? `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}` : "no-date"; }
+
+function inferBU(customerId, fallback = "") {
+  const id = cleanText(customerId).toUpperCase();
+  if (id.startsWith("ST")) return "ST";
+  if (id.startsWith("KN")) return "KN";
+  if (id.startsWith("MUK")) return "MUK";
+  if (id.startsWith("WNN")) return "WNN";
+  if (id.startsWith("KCG")) return "KCG";
+  return cleanText(fallback);
+}
+
+function normalizeMeter(v) {
+  const s = cleanText(v).toUpperCase();
+  const m = s.match(/(?:MT|TR)?\s*-?\s*(\d{1,3})/);
+  return m ? m[1] : s;
+}
+
+function statusGroup(status) {
+  const s = cleanText(status).toLowerCase();
+  if (s.includes("lost customer") || s === "lost" || s.includes("lost")) return "ลูกค้าหาย";
+  if (s.includes("dormant")) return "ลูกค้าหายเกิน 60 วัน";
+  if (s.includes("risky")) return "ลูกค้าเสี่ยงหาย";
+  if (s.includes("active")) return "ลูกค้าซื้อขายประจำ";
+  if (s.includes("winback") || s.includes("new")) return "ลูกค้าใหม่/Winback";
+  return "อื่นๆ";
+}
+
+function marketScore(status) {
+  const group = statusGroup(status);
+  if (group === "ลูกค้าหาย") return 1;
+  if (group === "ลูกค้าหายเกิน 60 วัน") return 2;
+  if (group === "ลูกค้าเสี่ยงหาย") return 3;
+  if (group === "ลูกค้าใหม่/Winback") return 4;
+  if (group === "ลูกค้าซื้อขายประจำ") return 5;
+  return 9;
 }
 
 function getUrgencyScore(urgency, dateObj) {
   const u = cleanText(urgency);
-  const d = daysFromToday(dateObj);
+  const today = new Date(); today.setHours(0,0,0,0);
+  const d = dateObj ? Math.ceil((dateObj - today) / 86400000) : 99999;
   if (u.includes("ยาก") || u.includes("เร่งด่วน")) return d <= 3 ? 1 : 2;
   if (u.includes("ปานกลาง")) return d <= 15 ? 2 : 3;
   if (u.includes("ง่าย")) return d <= 30 ? 3 : 4;
   return 4;
 }
 
-function getMarketScore(status) {
-  const s = cleanText(status).toLowerCase();
-  if (s.includes("risky")) return 1;
-  if (s.includes("dormant")) return 2;
-  if (s.includes("winback") || s.includes("new")) return 3;
-  if (s.includes("lost")) return 4;
-  if (s.includes("active")) return 5;
-  return 6;
-}
-
 function normalizePump(rows) {
-  // Column B=1 รหัสลูกค้า, C=2 รายชื่อลูกค้า, D=3 มิเตอร์สาย, E=4 วันนัดหมาย, F=5 สถานะ, G=6 ละ, H=7 ลอง
+  // B=1 รหัสลูกค้า, C=2 รายชื่อลูกค้า, D=3 มิเตอร์สาย, E=4 วันนัดหมาย, F=5 สถานะ, G=6 ละ, H=7 ลอง
   return rows.slice(1)
     .filter(r => cleanText(cell(r,5)) !== "เสร็จ")
     .filter(r => cleanText(cell(r,5)) === "ยังไม่เริ่ม" || cleanText(cell(r,5)) !== "")
     .map(r => {
       const dateObj = parseDateTH(cell(r,4));
+      const customerId = cell(r,1);
+      const meterRaw = cell(r,3);
       return {
         sourceRank: 1,
         priority: 100,
@@ -98,30 +134,34 @@ function normalizePump(rows) {
         type: "ปรับปรุงปั๊ม",
         dateRaw: cell(r,4),
         dateObj,
-        customer_id: cell(r,1),
+        customer_id: customerId,
         customer_name: cell(r,2),
         status: cell(r,5),
-        bu: "",
-        meter: cell(r,3),
+        bu: inferBU(customerId),
+        meter: meterRaw,
+        meterKey: normalizeMeter(meterRaw),
         area: "",
         purpose: "ปรับปรุงปั๊ม",
         coordinator: "",
         phone: "",
         lat: cell(r,6),
         lng: cell(r,7),
-        sales_litre: ""
+        sales_litre: "",
+        route_group: "",
+        stop_no: "",
+        start_name: ""
       };
     });
 }
 
 function normalizeRepair(rows) {
-  // B=1 ชื่อปั๊ม, C=2 สายมิเตอร์, D=3 เขตพื้นที่, E=4 ซ่อมบำรุง, G=6 ผู้ประสานงาน, H=7 เบอร์โทร, I=8 วันนัดหมาย, J=9 ความเร่งด่วน, K=10 สถานะ, L=11 ละ, M=12 ลอง
   return rows.slice(1)
     .filter(r => cleanText(cell(r,10)) !== "เสร็จ")
     .filter(r => cleanText(cell(r,10)) === "ยังไม่เข้าซ่อม" || cleanText(cell(r,10)) !== "")
     .map(r => {
       const dateObj = parseDateTH(cell(r,8));
       const urgentScore = getUrgencyScore(cell(r,9), dateObj);
+      const meterRaw = cell(r,2);
       return {
         sourceRank: 2,
         priority: 200 + urgentScore,
@@ -133,26 +173,31 @@ function normalizeRepair(rows) {
         customer_name: cell(r,1),
         status: cell(r,10),
         bu: "",
-        meter: cell(r,2),
+        meter: meterRaw,
+        meterKey: normalizeMeter(meterRaw),
         area: cell(r,3),
         purpose: cell(r,4),
         coordinator: cell(r,6),
         phone: cell(r,7),
         lat: cell(r,11),
         lng: cell(r,12),
-        sales_litre: ""
+        sales_litre: "",
+        route_group: "",
+        stop_no: "",
+        start_name: ""
       };
     });
 }
 
 function normalizeMarket(rows) {
-  // A=0 customer_id, B=1 customer_name, C=2 ละ, D=3 ลอง, E=4 BU/branch, F=5 สายมิเตอร์/branch, K=10 status
+  // A=0 customer_id, B=1 customer_name, C=2 ละ, D=3 ลอง, E=4 BU, F=5 สายมิเตอร์, K=10 status
   return rows.slice(1).map(r => {
     const status = cell(r,10);
+    const meterRaw = cell(r,5);
     return {
       sourceRank: 3,
-      priority: 300 + getMarketScore(status),
-      priorityLabel: status || "พื้นที่ออกตลาด",
+      priority: 300 + marketScore(status),
+      priorityLabel: statusGroup(status),
       type: "พื้นที่ออกตลาด",
       dateRaw: "",
       dateObj: null,
@@ -160,20 +205,23 @@ function normalizeMarket(rows) {
       customer_name: cell(r,1),
       status,
       bu: cell(r,4),
-      meter: cell(r,5),
+      meter: meterRaw,
+      meterKey: normalizeMeter(meterRaw),
       area: cell(r,4),
       purpose: "ติดตามสถานะลูกค้า",
       coordinator: "",
       phone: "",
       lat: cell(r,2),
       lng: cell(r,3),
-      sales_litre: ""
+      sales_litre: "",
+      route_group: "",
+      stop_no: "",
+      start_name: ""
     };
   }).filter(r => r.customer_id || r.customer_name);
 }
 
 function buildSalesMap(rows) {
-  // B=1 branch, C=2 channel, D=3 channel_type, F=5 actual_litre
   const map = new Map();
   rows.slice(1).forEach(r => {
     const branch = cleanText(cell(r,1));
@@ -182,10 +230,8 @@ function buildSalesMap(rows) {
     const litre = Number(String(cell(r,5)).replace(/,/g,"")) || 0;
     if (!["รถมิเตอร์", "รถเทรลเลอร์"].includes(channel)) return;
     if (!["MT", "TR"].includes(type)) return;
-    const key1 = `${branch}|${type}`.toLowerCase();
-    const key2 = `${branch}`.toLowerCase();
-    map.set(key1, (map.get(key1) || 0) + litre);
-    map.set(key2, (map.get(key2) || 0) + litre);
+    map.set(`${branch}|${type}`.toLowerCase(), (map.get(`${branch}|${type}`.toLowerCase()) || 0) + litre);
+    map.set(`${branch}`.toLowerCase(), (map.get(`${branch}`.toLowerCase()) || 0) + litre);
   });
   return map;
 }
@@ -194,32 +240,130 @@ function enrichSales(rows, salesRows) {
   const salesMap = buildSalesMap(salesRows);
   return rows.map(r => {
     const meter = cleanText(r.meter);
-    const type = meter.includes("TR") ? "TR" : meter.includes("MT") ? "MT" : "";
-    const key1 = `${meter}|${type}`.toLowerCase();
-    const key2 = `${meter}`.toLowerCase();
-    const litre = salesMap.get(key1) || salesMap.get(key2) || "";
+    const type = meter.toUpperCase().includes("TR") ? "TR" : meter.toUpperCase().includes("MT") ? "MT" : "";
+    const litre = salesMap.get(`${meter}|${type}`.toLowerCase()) || salesMap.get(`${meter}`.toLowerCase()) || "";
     return {...r, sales_litre: litre ? litre.toLocaleString("th-TH") : ""};
   });
 }
 
+function chooseOnePumpPerMeterPerMonth(pumpRows) {
+  const today = new Date(); today.setHours(0,0,0,0);
+  const groups = new Map();
+  pumpRows.forEach(r => {
+    const key = `${r.bu || "ไม่ระบุ"}|${r.meterKey}|${monthKey(r.dateObj)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  });
+
+  const selected = [];
+  groups.forEach(list => {
+    const future = list.filter(x => x.dateObj && x.dateObj >= today)
+      .sort((a,b) => dateSortValue(a.dateObj) - dateSortValue(b.dateObj));
+    const pastOrNoDate = [...list].sort((a,b) => dateSortValue(b.dateObj) - dateSortValue(a.dateObj));
+    selected.push(future[0] || pastOrNoDate[0]);
+  });
+  return selected.sort((a,b) => dateSortValue(a.dateObj) - dateSortValue(b.dateObj));
+}
+
+function haversine(a, b) {
+  const R = 6371;
+  const lat1 = Number(a.lat) * Math.PI / 180;
+  const lat2 = Number(b.lat) * Math.PI / 180;
+  const dLat = (Number(b.lat) - Number(a.lat)) * Math.PI / 180;
+  const dLng = (Number(b.lng) - Number(a.lng)) * Math.PI / 180;
+  const x = Math.sin(dLat/2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng/2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
+}
+
+function nearestStart(point) {
+  if (!validCoord(point)) return START_POINTS[0];
+  return START_POINTS
+    .map(s => ({...s, distance: haversine(s, {lat: toNumber(point.lat), lng: toNumber(point.lng)})}))
+    .sort((a,b) => a.distance - b.distance)[0];
+}
+
+function orderCircularRoute(start, points) {
+  const remaining = points.filter(validCoord).map(p => ({...p}));
+  const noCoord = points.filter(p => !validCoord(p));
+  const ordered = [];
+  let current = { lat: start.lat, lng: start.lng };
+  while (remaining.length) {
+    let bestIndex = 0;
+    let bestDistance = Infinity;
+    remaining.forEach((p, i) => {
+      const d = haversine(current, {lat: toNumber(p.lat), lng: toNumber(p.lng)});
+      if (d < bestDistance) { bestDistance = d; bestIndex = i; }
+    });
+    const next = remaining.splice(bestIndex, 1)[0];
+    ordered.push(next);
+    current = { lat: toNumber(next.lat), lng: toNumber(next.lng) };
+  }
+  return [...ordered, ...noCoord];
+}
+
+function takeByStatusForMeter(marketRows, pump) {
+  const sameMeter = marketRows.filter(m => {
+    if (m.meterKey !== pump.meterKey) return false;
+    // ถ้ามี BU ตรงกันให้เอา BU เดียวกันก่อน แต่ถ้า BU ของปั๊มเป็น KCG/ไม่ระบุ ให้ยอมให้สายเดียวกันแสดงได้
+    if (!pump.bu || pump.bu === "KCG") return true;
+    return !m.bu || cleanText(m.bu).toUpperCase() === cleanText(pump.bu).toUpperCase();
+  });
+
+  const lost = sameMeter.filter(x => ["ลูกค้าหาย", "ลูกค้าหายเกิน 60 วัน"].includes(statusGroup(x.status))).slice(0, 5);
+  const risky = sameMeter.filter(x => statusGroup(x.status) === "ลูกค้าเสี่ยงหาย").slice(0, 5);
+  const active = sameMeter.filter(x => statusGroup(x.status) === "ลูกค้าซื้อขายประจำ").slice(0, 5);
+  const winback = sameMeter.filter(x => statusGroup(x.status) === "ลูกค้าใหม่/Winback").slice(0, 5);
+
+  return [...lost, ...risky, ...active, ...winback];
+}
+
+function buildPlannedRows(pumpRows, repairRows, marketRows) {
+  const selectedPumps = chooseOnePumpPerMeterPerMonth(pumpRows);
+  const output = [];
+
+  selectedPumps.forEach((pump, groupIndex) => {
+    const relatedMarkets = takeByStatusForMeter(marketRows, pump);
+    const routeId = `${groupIndex + 1}. ${pump.bu || "BU-?"} สาย ${pump.meterKey} เดือน ${pump.dateRaw || "ไม่ระบุวันที่"}`;
+    const start = nearestStart(pump);
+    const ordered = orderCircularRoute(start, [pump, ...relatedMarkets]);
+
+    ordered.forEach((row, idx) => {
+      output.push({
+        ...row,
+        route_group: routeId,
+        stop_no: `${idx + 1}/${ordered.length}`,
+        start_name: start.name,
+        priorityLabel: idx === 0 && row.type === "ปรับปรุงปั๊ม" ? "1-ปรับปรุงปั๊ม" : row.priorityLabel
+      });
+    });
+  });
+
+  // ตารางซ่อมยังแสดงต่อท้าย เพราะเป็นเงื่อนไขลำดับ 2 แต่ไม่ได้เอาเข้ากลุ่มเส้นทางปรับปรุงปั๊ม
+  const repairs = repairRows.map(r => ({...r, route_group: "ตารางซ่อม", stop_no: "-", start_name: "-"}));
+  return [...output, ...repairs];
+}
+
 async function loadData() {
   const tbody = document.getElementById("resultBody");
-  tbody.innerHTML = `<tr><td colspan="16" class="loading">กำลังโหลดข้อมูล...</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="18" class="loading">กำลังโหลดข้อมูล...</td></tr>`;
   try {
-    const [pumpRows, repairRows, marketRows, salesRows] = await Promise.all([
+    const [pumpRowsRaw, repairRowsRaw, marketRowsRaw, salesRows] = await Promise.all([
       fetchSheetByIndex(SHEET_NAMES.pump),
       fetchSheetByIndex(SHEET_NAMES.repair),
       fetchSheetByIndex(SHEET_NAMES.market),
       fetchSheetByIndex(SHEET_NAMES.sales)
     ]);
 
-    let rows = [...normalizePump(pumpRows), ...normalizeRepair(repairRows), ...normalizeMarket(marketRows)];
-    rows = enrichSales(rows, salesRows);
-    rows.sort((a,b) => (a.sourceRank - b.sourceRank) || (a.priority - b.priority) || (dateSortValue(a.dateObj) - dateSortValue(b.dateObj)) || cleanText(a.customer_name).localeCompare(cleanText(b.customer_name), "th"));
-    allRows = rows;
+    const pumpRows = normalizePump(pumpRowsRaw);
+    const repairRows = normalizeRepair(repairRowsRaw);
+    const marketRows = normalizeMarket(marketRowsRaw);
+
+    rawRows = enrichSales([...pumpRows, ...repairRows, ...marketRows], salesRows)
+      .sort((a,b) => (a.sourceRank - b.sourceRank) || dateSortValue(a.dateObj) - dateSortValue(b.dateObj));
+    plannedRows = enrichSales(buildPlannedRows(pumpRows, repairRows, marketRows), salesRows);
     renderTable();
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="16" class="loading">เกิดข้อผิดพลาด: ${escapeHtml(err.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="18" class="loading">เกิดข้อผิดพลาด: ${escapeHtml(err.message)}</td></tr>`;
   }
 }
 
@@ -230,18 +374,45 @@ function escapeHtml(str) {
 function priorityClass(row) {
   if (row.sourceRank === 1) return "p1";
   if (row.sourceRank === 2) return row.priority <= 202 ? "p1" : "p2";
-  if (row.sourceRank === 3) return row.priority <= 302 ? "p3" : "p4";
+  if (row.sourceRank === 3) {
+    const g = statusGroup(row.status);
+    if (g.includes("หาย")) return "p2";
+    if (g.includes("เสี่ยง")) return "p3";
+    return "p4";
+  }
   return "p4";
+}
+
+function renderRouteSummary(rows) {
+  const box = document.getElementById("routeSummary");
+  const groups = new Map();
+  rows.filter(r => r.route_group && r.route_group !== "ตารางซ่อม").forEach(r => {
+    if (!groups.has(r.route_group)) groups.set(r.route_group, []);
+    groups.get(r.route_group).push(r);
+  });
+
+  if (!groups.size) {
+    box.innerHTML = `<div class="route-item">ยังไม่มีข้อมูลแผนเส้นทาง</div>`;
+    return;
+  }
+
+  box.innerHTML = Array.from(groups.entries()).slice(0, 12).map(([name, list]) => {
+    const first = list[0];
+    const routeNames = list.map(x => x.customer_name || x.customer_id).filter(Boolean).join(" → ");
+    return `<div class="route-item"><strong>${escapeHtml(name)}</strong><br><span>เริ่ม: ${escapeHtml(first.start_name || "-")}</span><br><small>${escapeHtml(routeNames)} → ${escapeHtml(first.start_name || "จุดเริ่มต้น")}</small></div>`;
+  }).join("");
 }
 
 function renderTable() {
   const search = cleanText(document.getElementById("searchBox").value).toLowerCase();
   const type = cleanText(document.getElementById("typeFilter").value);
   const status = cleanText(document.getElementById("statusFilter").value).toLowerCase();
+  const showAll = document.getElementById("showAllToggle").checked;
   const tbody = document.getElementById("resultBody");
 
-  const rows = allRows.filter(r => {
-    const text = `${r.customer_id} ${r.customer_name} ${r.meter} ${r.area} ${r.status}`.toLowerCase();
+  let rows = showAll ? rawRows : plannedRows;
+  rows = rows.filter(r => {
+    const text = `${r.route_group} ${r.customer_id} ${r.customer_name} ${r.meter} ${r.area} ${r.status} ${r.bu}`.toLowerCase();
     return (!type || r.type === type) && (!status || cleanText(r.status).toLowerCase().includes(status)) && (!search || text.includes(search));
   });
 
@@ -250,14 +421,18 @@ function renderTable() {
   document.getElementById("sumRepair").textContent = rows.filter(r => r.type === "ซ่อม").length;
   document.getElementById("sumMarket").textContent = rows.filter(r => r.type === "พื้นที่ออกตลาด").length;
 
+  renderRouteSummary(showAll ? plannedRows : rows);
+
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="16" class="loading">ไม่พบข้อมูลตามเงื่อนไข</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="18" class="loading">ไม่พบข้อมูลตามเงื่อนไข</td></tr>`;
     return;
   }
 
   tbody.innerHTML = rows.map((r,i) => `
     <tr>
       <td>${i + 1}</td>
+      <td>${escapeHtml(r.stop_no) || "-"}</td>
+      <td>${escapeHtml(r.start_name) || "-"}</td>
       <td><span class="badge ${priorityClass(r)}">${escapeHtml(r.priorityLabel)}</span></td>
       <td>${escapeHtml(r.type)}</td>
       <td>${escapeHtml(r.dateRaw) || "-"}</td>
@@ -311,6 +486,7 @@ document.getElementById("planForm").addEventListener("submit", saveForm);
 document.getElementById("searchBox").addEventListener("input", renderTable);
 document.getElementById("typeFilter").addEventListener("change", renderTable);
 document.getElementById("statusFilter").addEventListener("change", renderTable);
+document.getElementById("showAllToggle").addEventListener("change", renderTable);
 document.getElementById("reloadBtn").addEventListener("click", loadData);
 
 loadData();
