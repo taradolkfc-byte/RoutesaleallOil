@@ -15,13 +15,24 @@ button { border:0; border-radius:10px; padding:11px 16px; font-weight:700; curso
 .route-card { display:grid; grid-template-columns: 1fr auto; gap:14px; align-items:start; }
 .route-card h2 { margin:0 0 6px; }
 .route-card p { margin:0; color:#6b7280; }
+.month-note { margin-top:6px !important; color:#0b3b70 !important; }
 .check-inline { display:flex; align-items:center; gap:8px; padding:10px 12px; border:1px solid #d1d5db; border-radius:12px; white-space:nowrap; font-weight:700; }
 .check-inline input { width:auto; margin:0; }
 .route-summary { grid-column: 1 / -1; display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap:10px; }
 .route-item { border:1px solid #e5e7eb; background:#f9fafb; border-radius:12px; padding:12px; line-height:1.45; }
+.route-button { text-align:left; color:#1f2937; font-weight:400; cursor:pointer; width:100%; }
+.route-button:hover, .route-button.active { border-color:#0b3b70; box-shadow:0 0 0 3px rgba(11,59,112,.12); background:#fff; }
 .route-item strong { color:#0b3b70; }
 .route-item span { color:#374151; font-weight:700; }
 .route-item small { color:#6b7280; }
+.route-detail { grid-column:1 / -1; border:1px solid #dbe4f0; border-radius:14px; padding:14px; background:#ffffff; }
+.detail-head { display:flex; justify-content:space-between; gap:12px; align-items:center; margin-bottom:10px; }
+.detail-head h3 { margin:0 0 4px; color:#0b3b70; }
+.detail-head p { margin:0; }
+.map-link { display:inline-block; text-decoration:none; background:#16a34a; color:#fff; padding:10px 14px; border-radius:10px; font-weight:700; white-space:nowrap; }
+.detail-table-wrap { overflow:auto; }
+.detail-table { min-width:900px; font-size:13px; }
+.route-map { grid-column:1 / -1; height:460px; border-radius:16px; border:1px solid #d1d5db; overflow:hidden; background:#eef2f7; }
 .form-card h2 { margin:0 0 14px; }
 form { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
 label { font-size:13px; font-weight:700; color:#374151; }
@@ -42,4 +53,4 @@ tr:nth-child(even) td { background:#f9fafb; }
 .p3 { background:#fef3c7; color:#92400e; }
 .p4 { background:#dcfce7; color:#166534; }
 .loading { text-align:center; padding:30px; color:#6b7280; }
-@media (max-width:900px){ .app-header{display:block;} .summary-grid{grid-template-columns:1fr 1fr;} form{grid-template-columns:1fr;} .wide{grid-column:span 1;} .toolbar{grid-template-columns:1fr;} .route-card{grid-template-columns:1fr;} .route-summary{grid-template-columns:1fr;} }
+@media (max-width:900px){ .app-header{display:block;} .summary-grid{grid-template-columns:1fr 1fr;} form{grid-template-columns:1fr;} .wide{grid-column:span 1;} .toolbar{grid-template-columns:1fr;} .route-card{grid-template-columns:1fr;} .route-summary{grid-template-columns:1fr;} .detail-head{display:block;} .map-link{margin-top:10px;} .route-map{height:360px;} }
