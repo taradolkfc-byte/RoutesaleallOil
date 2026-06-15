@@ -62,3 +62,20 @@ tr:nth-child(even) td { background:#f9fafb; }
   form{grid-template-columns:1fr;} .wide{grid-column:span 1;} .toolbar{grid-template-columns:1fr;}
   table{min-width:1200px; font-size:12px;} th{top:0;} th,td{padding:8px;}
 }
+
+/* ===== Check-in GPS + Map marker update ===== */
+.checkin-btn { background:#16a34a; min-height:42px; align-self:end; }
+.checkin-btn:disabled { opacity:.65; cursor:not-allowed; }
+.route-number-icon span {
+  width:30px; height:30px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+  background:#2563eb; color:white; font-weight:800; border:3px solid #fff; box-shadow:0 2px 8px rgba(15,23,42,.35);
+  font-size:14px;
+}
+.route-start-icon span {
+  min-width:46px; height:30px; border-radius:999px; padding:0 8px; display:flex; align-items:center; justify-content:center;
+  background:#16a34a; color:white; font-weight:900; border:3px solid #fff; box-shadow:0 2px 8px rgba(15,23,42,.35);
+  font-size:12px; white-space:nowrap;
+}
+.leaflet-marker-icon.route-start-icon,
+.leaflet-marker-icon.route-number-icon { background:transparent; border:0; }
+@media (max-width:900px){ .checkin-btn{width:100%;} }
