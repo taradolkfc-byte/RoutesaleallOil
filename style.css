@@ -1,7 +1,7 @@
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
 body { margin:0; font-family: Tahoma, Arial, sans-serif; background:#f3f6fb; color:#1f2937; }
-.app-header { display:flex; justify-content:space-between; gap:16px; align-items:center; padding:22px 24px; background:linear-gradient(135deg,#0b3b70,#1565ad); color:#fff; position:sticky; top:0; z-index:1000; }
+.app-header { display:flex; justify-content:space-between; gap:16px; align-items:center; padding:22px 24px; background:linear-gradient(135deg,#0b3b70,#1565ad); color:#fff; position:relative; z-index:10; }
 .app-header h1 { margin:0 0 6px; font-size:26px; }
 .app-header p { margin:0; opacity:.92; line-height:1.45; }
 button, .map-link { border:0; border-radius:10px; padding:11px 16px; font-weight:700; cursor:pointer; background:#f97316; color:#fff; text-decoration:none; display:inline-block; }
@@ -44,7 +44,7 @@ textarea { min-height:74px; resize:vertical; }
 .table-wrap { overflow:auto; padding:0; }
 table { width:100%; border-collapse:collapse; min-width:1450px; font-size:13px; }
 th, td { border-bottom:1px solid #e5e7eb; padding:10px; text-align:left; vertical-align:top; }
-th { background:#0b3b70; color:white; position:sticky; top:86px; z-index:2; }
+th { background:#0b3b70; color:white; position:sticky; top:0; z-index:5; }
 tr:nth-child(even) td { background:#f9fafb; }
 .badge { display:inline-block; padding:5px 9px; border-radius:999px; font-weight:700; white-space:nowrap; }
 .p1 { background:#fee2e2; color:#991b1b; }
@@ -79,3 +79,11 @@ tr:nth-child(even) td { background:#f9fafb; }
 .leaflet-marker-icon.route-start-icon,
 .leaflet-marker-icon.route-number-icon { background:transparent; border:0; }
 @media (max-width:900px){ .checkin-btn{width:100%;} }
+
+
+/* ===== Final route/table fixes 20260615-06 ===== */
+.route-metrics { margin-top:6px !important; color:#166534 !important; font-weight:700; }
+.table-wrap { max-height:70vh; overflow:auto; }
+.table-wrap table thead th { position:sticky; top:0; z-index:10; box-shadow:0 1px 0 rgba(255,255,255,.2); }
+.detail-table th { position:static !important; top:auto !important; }
+@media (max-width:900px){ .table-wrap{max-height:65vh;} }
