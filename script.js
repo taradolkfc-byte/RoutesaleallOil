@@ -1,13 +1,14 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
 // URL Apps Script ของคุณ
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbz_jybKjIdUFAt44LtRnea7llQ8RbzATZTQgRqIRdFot6TbuxKcOVbqm3qjrsO4Fcxg/exec";
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbz_jybKjIdUFAt44LtRnea7IIQ8RbzATZTQgRqIRdFot6TbuxKcOVbqm3qjrsO4Fcxg/exec";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
   repair: "ตารางซ่อม",
   market: "พื้นที่เซลล์ออกตลาด",
-  sales: "รายงานยอดขาย"
+  sales: "รายงานยอดขาย",
+  saved: "เก็บข้อมูล"
 };
 
 const START_POINTS = [
@@ -23,21 +24,24 @@ let currentRouteGroups = new Map();
 let selectedRouteKey = "";
 let routeMap = null;
 let routeLayer = null;
+let visitedSet = { ids: new Set(), names: new Set() };
 
 function cleanText(v) { return String(v ?? "").trim(); }
+function norm(v) { return cleanText(v).toLowerCase().replace(/\s+/g, " "); }
 function cell(row, index) { return row[index] ?? ""; }
 function toNumber(v) {
   const n = Number(cleanText(v).replace(/,/g, ""));
   return Number.isFinite(n) ? n : null;
 }
-function validCoord(row) {
-  return toNumber(row.lat) !== null && toNumber(row.lng) !== null;
-}
+function validCoord(row) { return toNumber(row.lat) !== null && toNumber(row.lng) !== null; }
 
-async function fetchSheetByIndex(sheetName) {
+async function fetchSheetByIndex(sheetName, optional = false) {
   const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}&cachebust=${Date.now()}`;
   const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`โหลดชีต ${sheetName} ไม่ได้`);
+  if (!res.ok) {
+    if (optional) return [];
+    throw new Error(`โหลดชีต ${sheetName} ไม่ได้`);
+  }
   const text = await res.text();
   const jsonText = text.substring(text.indexOf("{"), text.lastIndexOf("}") + 1);
   const json = JSON.parse(jsonText);
@@ -52,16 +56,14 @@ function parseDateTH(value) {
   const gviz = txt.match(/Date\((\d+),(\d+),(\d+)/);
   if (gviz) return new Date(Number(gviz[1]), Number(gviz[2]), Number(gviz[3]));
 
-  // รองรับ 14/06/69 หรือ 06/14/2026 แบบระวัง
   const parts = txt.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
   if (parts) {
-    let a = Number(parts[1]);
-    let b = Number(parts[2]);
+    let day = Number(parts[1]);
+    let month = Number(parts[2]);
     let y = Number(parts[3]);
     if (y < 100) y += 2500;
     if (y > 2400) y -= 543;
-    // ถ้าตัวแรก > 12 ให้ถือเป็น dd/mm/yyyy, ถ้าไม่ใช่ก็ใช้ dd/mm ตามไทย
-    return new Date(y, b - 1, a);
+    return new Date(y, month - 1, day);
   }
 
   const months = {
@@ -107,9 +109,7 @@ function inCurrentThaiMonth(d) {
   return t >= monthStart() && t < nextMonthStart();
 }
 function dateSortValue(d) { return d ? d.getTime() : 9999999999999; }
-function thaiMonthYearLabel() {
-  return thaiNow().toLocaleDateString("th-TH", { month: "long", year: "numeric" });
-}
+function thaiMonthYearLabel() { return thaiNow().toLocaleDateString("th-TH", { month: "long", year: "numeric" }); }
 
 function inferBU(customerId, fallback = "") {
   const id = cleanText(customerId).toUpperCase();
@@ -150,6 +150,27 @@ function getUrgencyScore(urgency, dateObj) {
   if (u.includes("ปานกลาง")) return d <= 15 ? 2 : 3;
   if (u.includes("ง่าย")) return d <= 30 ? 3 : 4;
   return 4;
+}
+
+function isVisited(row) {
+  const id = norm(row.customer_id);
+  const name = norm(row.customer_name);
+  return (id && visitedSet.ids.has(id)) || (name && visitedSet.names.has(name));
+}
+function buildVisitedSet(savedRows) {
+  const ids = new Set();
+  const names = new Set();
+  savedRows.slice(1).forEach(r => {
+    // รองรับทั้งชีตที่มีหัวตาราง 9 คอลัมน์เดิม และ 14 คอลัมน์ใหม่
+    const visitDate = parseDateTH(cell(r, 1)) || parseDateTH(cell(r, 0));
+    if (visitDate && !inCurrentThaiMonth(visitDate)) return;
+
+    const idCandidates = [cell(r, 2), cell(r, 3)];
+    const nameCandidates = [cell(r, 3), cell(r, 4)];
+    idCandidates.map(norm).filter(Boolean).forEach(x => ids.add(x));
+    nameCandidates.map(norm).filter(Boolean).forEach(x => names.add(x));
+  });
+  return { ids, names };
 }
 
 function normalizePump(rows) {
@@ -223,7 +244,8 @@ function chooseOnePumpPerMeterCurrentMonth(pumpRows) {
   const today = thaiNow();
   const monthRows = pumpRows
     .filter(r => inCurrentThaiMonth(r.dateObj))
-    .filter(r => cleanText(r.status) !== "เสร็จ");
+    .filter(r => cleanText(r.status) !== "เสร็จ")
+    .filter(r => !isVisited(r));
 
   const groups = new Map();
   monthRows.forEach(r => {
@@ -238,9 +260,9 @@ function chooseOnePumpPerMeterCurrentMonth(pumpRows) {
     const latest = [...list].sort((a,b) => dateSortValue(b.dateObj) - dateSortValue(a.dateObj));
     selected.push(upcoming[0] || latest[0]);
   });
-
   return selected.filter(Boolean).sort((a,b) => dateSortValue(a.dateObj) - dateSortValue(b.dateObj));
 }
+
 function haversine(a, b) {
   const R = 6371;
   const lat1 = Number(a.lat) * Math.PI / 180;
@@ -250,9 +272,16 @@ function haversine(a, b) {
   const x = Math.sin(dLat/2)**2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
 }
-function nearestStart(point) {
-  if (!validCoord(point)) return START_POINTS[0];
-  return START_POINTS.map(s => ({ ...s, distance: haversine(s, { lat: toNumber(point.lat), lng: toNumber(point.lng) }) })).sort((a,b) => a.distance - b.distance)[0];
+function bestStartForRoute(points) {
+  const valid = points.filter(validCoord);
+  if (!valid.length) return START_POINTS[0];
+
+  // เลือกจุดเริ่มต้นที่ระยะเฉลี่ยใกล้ “ทุกจุดในแผน” ที่สุด ไม่ใช่ดูแค่ปั๊มปรับปรุงจุดเดียว
+  return START_POINTS.map(s => {
+    const avg = valid.reduce((sum, p) => sum + haversine(s, { lat: toNumber(p.lat), lng: toNumber(p.lng) }), 0) / valid.length;
+    const nearest = Math.min(...valid.map(p => haversine(s, { lat: toNumber(p.lat), lng: toNumber(p.lng) })));
+    return { ...s, score: avg + (nearest * 0.15) };
+  }).sort((a,b) => a.score - b.score)[0];
 }
 function orderCircularRoute(start, points) {
   const remaining = points.filter(validCoord).map(p => ({...p}));
@@ -272,11 +301,15 @@ function orderCircularRoute(start, points) {
   return [...ordered, ...noCoord];
 }
 function takeByStatusForMeter(marketRows, pump) {
-  const sameMeter = marketRows.filter(m => {
-    if (m.meterKey !== pump.meterKey) return false;
-    if (!pump.bu || pump.bu === "KCG") return true;
-    return !m.bu || cleanText(m.bu).toUpperCase() === cleanText(pump.bu).toUpperCase();
-  });
+  const sameMeter = marketRows
+    .filter(m => m.meterKey === pump.meterKey)
+    .filter(m => !isVisited(m))
+    .filter(m => {
+      if (!pump.bu || pump.bu === "KCG") return true;
+      return !m.bu || cleanText(m.bu).toUpperCase() === cleanText(pump.bu).toUpperCase();
+    })
+    .sort((a,b) => marketScore(a.status) - marketScore(b.status));
+
   const lost = sameMeter.filter(x => ["ลูกค้าหาย", "ลูกค้าหายเกิน 60 วัน"].includes(statusGroup(x.status))).slice(0, 5);
   const risky = sameMeter.filter(x => statusGroup(x.status) === "ลูกค้าเสี่ยงหาย").slice(0, 5);
   const active = sameMeter.filter(x => statusGroup(x.status) === "ลูกค้าซื้อขายประจำ").slice(0, 5);
@@ -287,12 +320,13 @@ function buildPlannedRows(pumpRows, repairRows, marketRows) {
   const selectedPumps = chooseOnePumpPerMeterCurrentMonth(pumpRows);
   const output = [];
 
-  selectedPumps.forEach((pump, groupIndex) => {
+  selectedPumps.forEach(pump => {
     const relatedMarkets = takeByStatusForMeter(marketRows, pump);
     const routeDate = pump.dateObj ? pump.dateObj.toLocaleDateString("th-TH", { day: "numeric", month: "long", year: "2-digit" }) : pump.dateRaw;
     const routeId = `${pump.bu || "BU-?"} สาย ${pump.meterKey} วันที่ ${routeDate}`;
-    const start = nearestStart(pump);
-    const ordered = orderCircularRoute(start, [pump, ...relatedMarkets]);
+    const routePoints = [pump, ...relatedMarkets];
+    const start = bestStartForRoute(routePoints);
+    const ordered = orderCircularRoute(start, routePoints);
     ordered.forEach((row, idx) => output.push({
       ...row,
       route_group: routeId,
@@ -302,7 +336,10 @@ function buildPlannedRows(pumpRows, repairRows, marketRows) {
     }));
   });
 
-  const repairs = repairRows.filter(r => inCurrentThaiMonth(r.dateObj)).map(r => ({ ...r, route_group: "ตารางซ่อมเดือนปัจจุบัน", stop_no: "-", start_name: "-" }));
+  const repairs = repairRows
+    .filter(r => inCurrentThaiMonth(r.dateObj))
+    .filter(r => !isVisited(r))
+    .map(r => ({ ...r, route_group: "ตารางซ่อมเดือนปัจจุบัน", stop_no: "-", start_name: "-" }));
   return [...output, ...repairs];
 }
 
@@ -311,17 +348,19 @@ async function loadData() {
   tbody.innerHTML = `<tr><td colspan="18" class="loading">กำลังโหลดข้อมูล...</td></tr>`;
   try {
     document.getElementById("currentMonthLabel").textContent = thaiMonthYearLabel();
-    const [pumpRowsRaw, repairRowsRaw, marketRowsRaw, salesRows] = await Promise.all([
+    const [pumpRowsRaw, repairRowsRaw, marketRowsRaw, salesRows, savedRows] = await Promise.all([
       fetchSheetByIndex(SHEET_NAMES.pump),
       fetchSheetByIndex(SHEET_NAMES.repair),
       fetchSheetByIndex(SHEET_NAMES.market),
-      fetchSheetByIndex(SHEET_NAMES.sales)
+      fetchSheetByIndex(SHEET_NAMES.sales),
+      fetchSheetByIndex(SHEET_NAMES.saved, true)
     ]);
+    visitedSet = buildVisitedSet(savedRows);
+
     const pumpRows = normalizePump(pumpRowsRaw);
     const repairRows = normalizeRepair(repairRowsRaw);
     const marketRows = normalizeMarket(marketRowsRaw);
 
-    // ตารางข้อมูลทั้งหมด: ยังให้ดูทั้งหมดได้ แต่แผนและแผนที่ด้านบนจะถูกล็อกเฉพาะเดือนปัจจุบันเสมอ
     rawRows = enrichSales([...pumpRows, ...repairRows, ...marketRows], salesRows)
       .sort((a,b) => (a.sourceRank - b.sourceRank) || dateSortValue(a.dateObj) - dateSortValue(b.dateObj));
     plannedRows = enrichSales(buildPlannedRows(pumpRows, repairRows, marketRows), salesRows);
@@ -348,7 +387,7 @@ function priorityClass(row) {
 function routeToGoogleMapsUrl(list) {
   const valid = list.filter(validCoord);
   if (!valid.length) return "";
-  const start = START_POINTS.find(x => x.name === list[0].start_name) || nearestStart(valid[0]);
+  const start = START_POINTS.find(x => x.name === list[0].start_name) || bestStartForRoute(valid);
   const stops = [{ customer_name:start.name, lat:start.lat, lng:start.lng }, ...valid, { customer_name:start.name, lat:start.lat, lng:start.lng }];
   const coords = stops.map(p => `${toNumber(p.lat)},${toNumber(p.lng)}`);
   const origin = coords[0];
@@ -356,10 +395,10 @@ function routeToGoogleMapsUrl(list) {
   const waypoints = coords.slice(1, -1).join("|");
   return `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&waypoints=${encodeURIComponent(waypoints)}&travelmode=driving`;
 }
-function renderRouteSummary(planRowsForMonth) {
+function renderRouteSummary(rows) {
   const box = document.getElementById("routeSummary");
   const groups = new Map();
-  planRowsForMonth.filter(r => r.route_group && !r.route_group.includes("ตารางซ่อม")).forEach(r => {
+  rows.filter(r => r.route_group && !r.route_group.includes("ตารางซ่อม")).forEach(r => {
     if (!groups.has(r.route_group)) groups.set(r.route_group, []);
     groups.get(r.route_group).push(r);
   });
@@ -368,7 +407,7 @@ function renderRouteSummary(planRowsForMonth) {
   const keys = Array.from(groups.keys());
   if (!keys.length) {
     selectedRouteKey = "";
-    box.innerHTML = `<div class="route-item">เดือน ${escapeHtml(thaiMonthYearLabel())} ยังไม่มีข้อมูลปรับปรุงปั๊มสำหรับวางแผน</div>`;
+    box.innerHTML = `<div class="route-item">เดือน ${escapeHtml(thaiMonthYearLabel())} ยังไม่มีข้อมูลปรับปรุงปั๊มสำหรับวางแผน หรือจุดในเดือนนี้ถูกบันทึกออกตลาดแล้ว</div>`;
     renderRouteDetail([]);
     return;
   }
@@ -378,7 +417,7 @@ function renderRouteSummary(planRowsForMonth) {
     const first = list[0];
     const routeNames = list.map(x => x.customer_name || x.customer_id).filter(Boolean).join(" → ");
     const active = name === selectedRouteKey ? " active" : "";
-    return `<button class="route-item route-button${active}" data-route-key="${escapeHtml(name)}" type="button"><strong>${idx + 1}. ${escapeHtml(name)}</strong><br><span>เริ่ม: ${escapeHtml(first.start_name || "-")}</span><br><small>${escapeHtml(routeNames)} → ${escapeHtml(first.start_name || "จุดเริ่มต้น")}</small></button>`;
+    return `<button class="route-item route-button${active}" data-route-key="${escapeHtml(name)}" type="button"><strong>${idx + 1}. ${escapeHtml(name)}</strong><br><span>เริ่ม/วนกลับ: ${escapeHtml(first.start_name || "-")}</span><br><small>${escapeHtml(routeNames)} → ${escapeHtml(first.start_name || "จุดเริ่มต้น")}</small></button>`;
   }).join("");
   box.querySelectorAll(".route-button").forEach(btn => btn.addEventListener("click", () => {
     selectedRouteKey = btn.dataset.routeKey;
@@ -393,7 +432,7 @@ function renderRouteDetail(list) {
     renderMap([]);
     return;
   }
-  const start = START_POINTS.find(x => x.name === list[0].start_name) || nearestStart(list[0]);
+  const start = START_POINTS.find(x => x.name === list[0].start_name) || bestStartForRoute(list);
   const googleUrl = routeToGoogleMapsUrl(list);
   const rows = list.map((r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.customer_name || "-")}</td><td>${escapeHtml(r.type || "-")}</td><td>${escapeHtml(r.status || "-")}</td><td>${escapeHtml(r.lat || "-")}, ${escapeHtml(r.lng || "-")}</td></tr>`).join("");
   detail.innerHTML = `
@@ -422,7 +461,7 @@ function renderMap(list) {
     setTimeout(() => routeMap.invalidateSize(), 200);
     return;
   }
-  const start = START_POINTS.find(x => x.name === list[0].start_name) || nearestStart(valid[0]);
+  const start = START_POINTS.find(x => x.name === list[0].start_name) || bestStartForRoute(valid);
   const points = [{ ...start, customer_name:start.name, type:"จุดเริ่มต้น", status:"เริ่ม/กลับ" }, ...valid, { ...start, customer_name:start.name, type:"จุดเริ่มต้น", status:"วนกลับ" }];
   const latlngs = points.map(p => [toNumber(p.lat), toNumber(p.lng)]);
   L.polyline(latlngs, { weight: 5 }).addTo(routeLayer);
@@ -441,7 +480,6 @@ function renderTable() {
   const showAll = document.getElementById("showAllToggle").checked;
   const tbody = document.getElementById("resultBody");
 
-  // สำคัญ: การ์ดแผนและแผนที่ด้านบนใช้ plannedRows เท่านั้น จึงไม่มีเดือนอื่นหลุดขึ้นมา
   renderRouteSummary(plannedRows);
 
   let rows = showAll ? rawRows : plannedRows;
@@ -481,9 +519,10 @@ async function saveForm(e) {
   status.style.color = "#92400e";
   try {
     await fetch(WEB_APP_URL, { method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify(data) });
-    status.textContent = "บันทึกข้อมูลเรียบร้อยแล้ว";
+    status.textContent = "บันทึกข้อมูลเรียบร้อยแล้ว ระบบจะตัดจุดนี้ออกจากแผนเมื่อรีเฟรชข้อมูล";
     status.style.color = "#166534";
     e.target.reset();
+    setTimeout(loadData, 900);
   } catch (err) {
     status.textContent = `บันทึกไม่สำเร็จ: ${err.message}`;
     status.style.color = "#dc2626";
