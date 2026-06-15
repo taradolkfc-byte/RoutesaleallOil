@@ -437,8 +437,12 @@ function renderRouteDetail(list) {
   const rows = list.map((r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.customer_name || "-")}</td><td>${escapeHtml(r.type || "-")}</td><td>${escapeHtml(r.status || "-")}</td><td>${escapeHtml(r.lat || "-")}, ${escapeHtml(r.lng || "-")}</td></tr>`).join("");
   detail.innerHTML = `
     <div class="detail-head">
-      <div><h3>${escapeHtml(selectedRouteKey)}</h3><p>จุดเริ่มต้น/วนกลับ: <strong>${escapeHtml(start.name)}</strong></p></div>
-      ${googleUrl ? `<a class="map-link" href="${googleUrl}" target="_blank" rel="noopener">เปิดเส้นทางใน Google Maps</a>` : ""}
+      <div>
+        <h3>${escapeHtml(selectedRouteKey)}</h3>
+        <p>จุดเริ่มต้น/วนกลับ: <strong>${escapeHtml(start.name)}</strong></p>
+        <p id="routeMetrics" class="route-metrics">กำลังคำนวณเส้นทางตามถนนจริง...</p>
+      </div>
+      ${googleUrl ? `<a class="map-link" href="${googleUrl}" target="_blank" rel="noopener">เปิดเส้นทางจริง/เวลาที่ดีที่สุดใน Google Maps</a>` : ""}
     </div>
     <div class="detail-table-wrap"><table class="detail-table"><thead><tr><th>ลำดับ</th><th>ชื่อปั๊ม/ลูกค้า</th><th>ประเภท</th><th>สถานะ</th><th>พิกัด</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   renderMap(list);
@@ -462,10 +466,44 @@ function makeStartIcon(label) {
   });
 }
 
-function renderMap(list) {
+
+function formatKm(km) {
+  if (!Number.isFinite(km)) return "-";
+  return km >= 10 ? `${km.toFixed(1)} กม.` : `${km.toFixed(2)} กม.`;
+}
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds)) return "-";
+  const min = Math.round(seconds / 60);
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  if (h <= 0) return `${m} นาที`;
+  return `${h} ชม. ${m} นาที`;
+}
+async function getOsrmRoute(points) {
+  // ใช้ OSRM เพื่อวาดเส้นตามถนนจริงในแผนที่บนหน้าเว็บ
+  // หมายเหตุ: OSRM ไม่มีข้อมูลจราจรแบบเรียลไทม์ ดังนั้นเวลา “ดีที่สุด” ให้กดปุ่ม Google Maps เพื่อใช้เวลาจราจรจริงบนมือถือ
+  const valid = points.filter(p => Number.isFinite(toNumber(p.lat)) && Number.isFinite(toNumber(p.lng)));
+  if (valid.length < 2 || valid.length > 25) return null;
+  const coords = valid.map(p => `${toNumber(p.lng)},${toNumber(p.lat)}`).join(";");
+  const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) return null;
+  const data = await res.json();
+  const route = data.routes && data.routes[0];
+  if (!route || !route.geometry || !route.geometry.coordinates) return null;
+  return {
+    latlngs: route.geometry.coordinates.map(c => [c[1], c[0]]),
+    distanceKm: route.distance / 1000,
+    durationSec: route.duration
+  };
+}
+
+async function renderMap(list) {
   const mapEl = document.getElementById("routeMap");
+  const metricsEl = document.getElementById("routeMetrics");
   if (!window.L) {
     mapEl.innerHTML = "ไม่สามารถโหลดแผนที่ได้ กรุณาตรวจสอบอินเทอร์เน็ต";
+    if (metricsEl) metricsEl.textContent = "ไม่สามารถโหลดแผนที่ได้";
     return;
   }
   if (!routeMap) {
@@ -477,13 +515,15 @@ function renderMap(list) {
   const valid = list.filter(validCoord);
   if (!valid.length) {
     routeMap.setView([16.5, 103.8], 8);
+    if (metricsEl) metricsEl.textContent = "ยังไม่มีพิกัดสำหรับคำนวณเส้นทาง";
     setTimeout(() => routeMap.invalidateSize(), 200);
     return;
   }
   const start = START_POINTS.find(x => x.name === list[0].start_name) || bestStartForRoute(valid);
   const points = [{ ...start, customer_name:start.name, type:"จุดเริ่มต้น", status:"เริ่ม/กลับ" }, ...valid, { ...start, customer_name:start.name, type:"จุดเริ่มต้น", status:"วนกลับ" }];
   const latlngs = points.map(p => [toNumber(p.lat), toNumber(p.lng)]);
-  L.polyline(latlngs, { weight: 5 }).addTo(routeLayer);
+
+  // Marker: จุดเริ่มต้นสีเขียว และจุดลูกค้าเป็นตัวเลขตามลำดับ
   points.forEach((p, idx) => {
     const isStart = idx === 0 || idx === points.length - 1;
     const label = idx === 0 ? "เริ่ม" : idx === points.length - 1 ? "กลับ" : String(idx);
@@ -491,8 +531,26 @@ function renderMap(list) {
     L.marker([toNumber(p.lat), toNumber(p.lng)], { icon }).addTo(routeLayer)
       .bindPopup(`<strong>${label}. ${escapeHtml(p.customer_name || p.name || "-")}</strong><br>${escapeHtml(p.type || "-")}<br>${escapeHtml(p.status || "-")}`);
   });
+
   routeMap.fitBounds(latlngs, { padding: [30, 30] });
   setTimeout(() => routeMap.invalidateSize(), 250);
+
+  // วาดเส้นทางตามถนนจริงด้วย OSRM ถ้าโหลดไม่ได้จะ fallback เป็นเส้นตรง
+  try {
+    const routed = await getOsrmRoute(points);
+    if (routeLayer && routed && routed.latlngs.length) {
+      L.polyline(routed.latlngs, { weight: 5 }).addTo(routeLayer);
+      routeMap.fitBounds(routed.latlngs, { padding: [30, 30] });
+      if (metricsEl) {
+        metricsEl.textContent = `ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (กด Google Maps เพื่อดูเวลาจราจรจริง/เส้นทางดีที่สุด)`;
+      }
+      return;
+    }
+  } catch (err) {
+    // ไม่ต้องหยุดระบบ ถ้า OSRM ไม่ตอบกลับ
+  }
+  L.polyline(latlngs, { weight: 5, dashArray: "8,8" }).addTo(routeLayer);
+  if (metricsEl) metricsEl.textContent = "แสดงเส้นเชื่อมแบบประมาณการ กด Google Maps เพื่อดูเส้นทางจริงและเวลาที่ดีที่สุด";
 }
 function renderTable() {
   const search = cleanText(document.getElementById("searchBox").value).toLowerCase();
@@ -595,7 +653,7 @@ async function checkInGps() {
     const form = document.getElementById("planForm");
     form.elements.lat.value = lat;
     form.elements.lng.value = lng;
-    if (!form.elements.visit_date.value) form.elements.visit_date.value = todayInputValue();
+    form.elements.visit_date.value = todayInputValue();
     const area = await reverseGeocode(lat, lng);
     if (area) form.elements.area.value = area;
     status.textContent = `เช็คอินสำเร็จ: ${area || "ได้พิกัดแล้ว"} (${lat}, ${lng})`;
