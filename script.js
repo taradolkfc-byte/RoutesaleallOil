@@ -12,11 +12,21 @@ const SHEET_NAMES = {
 };
 
 const START_POINTS = [
-  { name: "สามทองบริการ", lat: 16.3811263508237, lng: 103.3487862676390, aliases: ["สามทองบริการ"] },
-  { name: "ปั๊ม เค.ซี.ปิโตรเลียม2006", lat: 16.7160212825713, lng: 103.0820493667620, aliases: ["เค.ซี.ปิโตรเลียม2006", "ปั๊ม เค.ซี.ปิโตรเลียม2006"] },
-  { name: "ปั๊ม เค.ซี.จี.ปิโตรเลียม", lat: 16.4359292973822, lng: 104.6162612319160, aliases: ["เค.ซี.จี.ปิโตรเลียม", "ปั๊ม เค.ซี.จี.ปิโตรเลียม", "KCG"] },
-  { name: "ปั๊ม เค.ซี.กรีน เอ็นเนอร์จี", lat: 17.6294000000000, lng: 103.7675890000000, aliases: ["เค.ซี. กรีน เอ็นเนอร์จี", "เค.ซี.กรีน เอ็นเนอร์จี", "ปั๊ม เค.ซี.กรีน เอ็นเนอร์จี"] }
+  { name: "สามทองบริการ", lat: 16.3811263508237, lng: 103.3487862676390, bu: "ST" },
+  { name: "ปั๊ม เค.ซี.ปิโตรเลียม2006", alias: "เค.ซี.ปิโตรเลียม2006", lat: 16.7160212825713, lng: 103.0820493667620, bu: "KN" },
+  { name: "ปั๊ม เค.ซี.จี.ปิโตรเลียม", alias: "เค.ซี.จี.ปิโตรเลียม", lat: 16.4359292973822, lng: 104.6162612319160, bu: "MUK" },
+  { name: "ปั๊ม เค.ซี.กรีน เอ็นเนอร์จี", alias: "เค.ซี. กรีน เอ็นเนอร์จี", lat: 17.6294000000000, lng: 103.7675890000000, bu: "WNN" }
 ];
+
+const START_POINT_BU_MAP = {
+  "สามทองบริการ": "ST",
+  "เค.ซี.ปิโตรเลียม2006": "KN",
+  "ปั๊ม เค.ซี.ปิโตรเลียม2006": "KN",
+  "เค.ซี.จี.ปิโตรเลียม": "MUK",
+  "ปั๊ม เค.ซี.จี.ปิโตรเลียม": "MUK",
+  "เค.ซี. กรีน เอ็นเนอร์จี": "WNN",
+  "ปั๊ม เค.ซี.กรีน เอ็นเนอร์จี": "WNN"
+};
 
 const CHECKIN_RADIUS_METER = 100;
 const MAX_PLAN_DAYS = 7;
@@ -130,6 +140,36 @@ function getPlanSettings() {
   if (!Number.isFinite(days)) days = 1;
   days = Math.max(1, Math.min(MAX_PLAN_DAYS, days));
   return { mode, days };
+}
+
+function getSelectedStartPointName() {
+  const el = document.getElementById("startPointInput");
+  const value = cleanText(el ? el.value : "");
+  if (!value || value === "อัตโนมัติ") return "";
+  return value;
+}
+
+function getSelectedStartPoint() {
+  const selected = getSelectedStartPointName();
+  if (!selected) return null;
+  const key = norm(selected);
+  return START_POINTS.find(p =>
+    norm(p.name) === key ||
+    norm(p.alias || "") === key ||
+    key.includes(norm(p.alias || p.name)) ||
+    norm(p.name).includes(key)
+  ) || null;
+}
+
+function getSelectedStartBU() {
+  const point = getSelectedStartPoint();
+  if (point && point.bu) return point.bu;
+  const selected = getSelectedStartPointName();
+  return START_POINT_BU_MAP[selected] || "";
+}
+
+function startForRoute(points) {
+  return getSelectedStartPoint() || bestStartForRoute(points);
 }
 
 function inferBU(customerId, fallback = "") {
@@ -308,26 +348,6 @@ function bestStartForRoute(points) {
     return { ...s, score: avg + (nearest * 0.15) };
   }).sort((a,b) => a.score - b.score)[0];
 }
-function getManualStartPoint(points = []) {
-  const input = document.getElementById("startPointInput");
-  const value = norm(input ? input.value : "");
-  if (!value || value === "อัตโนมัติ" || value === "auto") return bestStartForRoute(points);
-
-  const predefined = START_POINTS.find(sp => {
-    const names = [sp.name, ...(sp.aliases || [])].map(norm);
-    return names.some(n => n === value || n.includes(value) || value.includes(n));
-  });
-  if (predefined) return predefined;
-
-  // ถ้าพิมพ์ชื่อจุดเริ่มเองและชื่อนั้นมีอยู่ในข้อมูลลูกค้า ให้ใช้พิกัดลูกค้านั้นเป็นจุดเริ่ม
-  const source = [...rawRows, ...plannedRows].find(r => {
-    const text = norm(`${r.customer_name || ""} ${r.customer_id || ""}`);
-    return validCoord(r) && text && (text.includes(value) || value.includes(text));
-  });
-  if (source) return { name: source.customer_name || source.customer_id || input.value, lat: toNumber(source.lat), lng: toNumber(source.lng), custom: true };
-
-  return bestStartForRoute(points);
-}
 function orderCircularRoute(start, points) {
   const remaining = points.filter(validCoord).map(p => ({...p}));
   const noCoord = points.filter(p => !validCoord(p));
@@ -346,8 +366,10 @@ function orderCircularRoute(start, points) {
   return [...ordered, ...noCoord];
 }
 function takeByStatusForMeter(marketRows, pump) {
+  const selectedBU = getSelectedStartBU();
   const sameMeter = marketRows
     .filter(m => m.meterKey === pump.meterKey)
+    .filter(m => !selectedBU || cleanText(m.bu).toUpperCase() === selectedBU.toUpperCase())
     .filter(m => !isVisited(m))
     .filter(m => {
       if (!pump.bu || pump.bu === "KCG") return true;
@@ -362,7 +384,9 @@ function takeByStatusForMeter(marketRows, pump) {
   return [...lost, ...risky, ...active, ...winback];
 }
 function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
-  const selectedPumps = chooseOnePumpPerMeterCurrentMonth(pumpRows);
+  const selectedBU = getSelectedStartBU();
+  const selectedPumps = chooseOnePumpPerMeterCurrentMonth(pumpRows)
+    .filter(p => !selectedBU || cleanText(p.bu).toUpperCase() === selectedBU.toUpperCase());
   const output = [];
 
   selectedPumps.forEach(pump => {
@@ -370,7 +394,7 @@ function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
     const routeDate = pump.dateObj ? pump.dateObj.toLocaleDateString("th-TH", { day: "numeric", month: "long", year: "2-digit" }) : pump.dateRaw;
     const routeId = `${pump.bu || "BU-?"} สาย ${pump.meterKey} วันที่ ${routeDate}`;
     const routePoints = [pump, ...relatedMarkets];
-    const start = getManualStartPoint(routePoints);
+    const start = startForRoute(routePoints);
     const ordered = orderCircularRoute(start, routePoints);
     ordered.forEach((row, idx) => output.push({
       ...row,
@@ -392,7 +416,9 @@ function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
 
 function buildNormalPlanRows(marketRows, planDays) {
   const today = thaiNow();
+  const selectedBU = getSelectedStartBU();
   const candidates = marketRows
+    .filter(r => !selectedBU || cleanText(r.bu).toUpperCase() === selectedBU.toUpperCase())
     .filter(r => !isVisited(r))
     .filter(validCoord)
     .sort((a,b) => (marketScore(a.status) - marketScore(b.status)) || cleanText(a.bu).localeCompare(cleanText(b.bu), "th") || cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), "th"));
@@ -414,7 +440,7 @@ function buildNormalPlanRows(marketRows, planDays) {
       if (!chunk.length) continue;
       const planDate = addDaysTH(today, dayIndex);
       const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
-      const start = getManualStartPoint(chunk);
+      const start = startForRoute(chunk);
       const ordered = orderCircularRoute(start, chunk);
       ordered.forEach((row, idx) => output.push({
         ...row,
@@ -654,10 +680,12 @@ function renderTable() {
 
   renderRouteSummary(plannedRows);
 
+  const selectedBU = getSelectedStartBU();
   let rows = showAll ? rawRows : plannedRows;
   rows = rows.filter(r => {
     const text = `${r.route_group} ${r.customer_id} ${r.customer_name} ${r.meter} ${r.area} ${r.status} ${r.bu}`.toLowerCase();
-    return (!type || r.type === type) && (!status || cleanText(r.status).toLowerCase().includes(status)) && (!search || text.includes(search));
+    const buOk = !selectedBU || cleanText(r.bu).toUpperCase() === selectedBU.toUpperCase() || cleanText(r.start_name);
+    return buOk && (!type || r.type === type) && (!status || cleanText(r.status).toLowerCase().includes(status)) && (!search || text.includes(search));
   });
 
   document.getElementById("sumAll").textContent = rows.length;
@@ -812,9 +840,9 @@ document.getElementById("searchBox").addEventListener("input", renderTable);
 document.getElementById("typeFilter").addEventListener("change", renderTable);
 document.getElementById("statusFilter").addEventListener("change", renderTable);
 document.getElementById("showAllToggle").addEventListener("change", renderTable);
+if (document.getElementById("startPointInput")) document.getElementById("startPointInput").addEventListener("change", loadData);
 if (document.getElementById("planMode")) document.getElementById("planMode").addEventListener("change", loadData);
 if (document.getElementById("planDays")) document.getElementById("planDays").addEventListener("change", loadData);
-if (document.getElementById("startPointInput")) document.getElementById("startPointInput").addEventListener("change", loadData);
 document.getElementById("reloadBtn").addEventListener("click", loadData);
 document.getElementById("checkinBtn").addEventListener("click", checkInGps);
 loadData();
