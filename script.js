@@ -1,7 +1,7 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
 // สำคัญ: ถ้าคุณใส่ URL Apps Script ไว้แล้ว ให้คัดลอก URL เดิมมาใส่ตรงนี้อีกครั้ง
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbz_jybKjIdUFAt44LtRnea7llQ8RbzATZTQgRqlRdFot6TbuxKcOVbqm3qjrsO4Fcxg/exec";
+const WEB_APP_URL = "PUT_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
@@ -20,6 +20,10 @@ const START_POINTS = [
 
 let rawRows = [];
 let plannedRows = [];
+let currentRouteGroups = new Map();
+let selectedRouteKey = "";
+let routeMap = null;
+let routeLayer = null;
 
 function cleanText(v) { return String(v ?? "").trim(); }
 function cell(row, index) { return row[index] ?? ""; }
@@ -70,7 +74,24 @@ function parseDateTH(value) {
 }
 
 function dateSortValue(d) { return d ? d.getTime() : 9999999999999; }
-function monthKey(d) { return d ? `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}` : "no-date"; }
+
+// ใช้วันที่จริงของประเทศไทย เพื่อกรองเฉพาะเดือนปัจจุบันเท่านั้น
+function thaiNow() {
+  const now = new Date();
+  const th = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
+  th.setHours(0,0,0,0);
+  return th;
+}
+function monthKey(d) {
+  if (!d || Number.isNaN(d.getTime())) return "no-date";
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+}
+function currentMonthKey() { return monthKey(thaiNow()); }
+function isCurrentMonth(d) { return !!d && monthKey(d) === currentMonthKey(); }
+function thaiMonthYearLabel() {
+  return thaiNow().toLocaleDateString("th-TH", { month: "long", year: "numeric" });
+}
+function isSameCurrentMonthRow(r) { return r.dateObj && isCurrentMonth(r.dateObj); }
 
 function inferBU(customerId, fallback = "") {
   const id = cleanText(customerId).toUpperCase();
@@ -110,7 +131,7 @@ function marketScore(status) {
 
 function getUrgencyScore(urgency, dateObj) {
   const u = cleanText(urgency);
-  const today = new Date(); today.setHours(0,0,0,0);
+  const today = thaiNow();
   const d = dateObj ? Math.ceil((dateObj - today) / 86400000) : 99999;
   if (u.includes("ยาก") || u.includes("เร่งด่วน")) return d <= 3 ? 1 : 2;
   if (u.includes("ปานกลาง")) return d <= 15 ? 2 : 3;
@@ -246,22 +267,36 @@ function enrichSales(rows, salesRows) {
   });
 }
 
-function chooseOnePumpPerMeterPerMonth(pumpRows) {
-  const today = new Date(); today.setHours(0,0,0,0);
+function chooseOnePumpPerMeterCurrentMonth(pumpRows) {
+  // สำคัญ: แสดงเฉพาะปั๊มที่อยู่ในเดือนปัจจุบันเท่านั้น เช่น มิ.ย. ก็เอาเฉพาะ 1-30 มิ.ย.
+  const today = thaiNow();
+  const monthRows = pumpRows
+    .filter(r => isCurrentMonth(r.dateObj))
+    .filter(r => cleanText(r.status) !== "เสร็จ");
+
   const groups = new Map();
-  pumpRows.forEach(r => {
-    const key = `${r.bu || "ไม่ระบุ"}|${r.meterKey}|${monthKey(r.dateObj)}`;
+  monthRows.forEach(r => {
+    const key = `${r.bu || "ไม่ระบุ"}|${r.meterKey}|${currentMonthKey()}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(r);
   });
 
   const selected = [];
   groups.forEach(list => {
-    const future = list.filter(x => x.dateObj && x.dateObj >= today)
+    // 1 สาย/BU/เดือน แสดงแค่ 1 ปั๊ม
+    // ถ้ามีวันตั้งแต่วันนี้ขึ้นไป ให้เลือกวันที่ใกล้ที่สุดก่อน
+    // ถ้าเลยวันมาแล้วทั้งเดือน ให้เลือกวันที่ล่าสุดในเดือนนั้น
+    const future = list
+      .filter(x => x.dateObj && x.dateObj >= today)
       .sort((a,b) => dateSortValue(a.dateObj) - dateSortValue(b.dateObj));
-    const pastOrNoDate = [...list].sort((a,b) => dateSortValue(b.dateObj) - dateSortValue(a.dateObj));
-    selected.push(future[0] || pastOrNoDate[0]);
+
+    const latestInCurrentMonth = [...list]
+      .sort((a,b) => dateSortValue(b.dateObj) - dateSortValue(a.dateObj));
+
+    const one = future[0] || latestInCurrentMonth[0];
+    if (one) selected.push(one);
   });
+
   return selected.sort((a,b) => dateSortValue(a.dateObj) - dateSortValue(b.dateObj));
 }
 
@@ -318,7 +353,7 @@ function takeByStatusForMeter(marketRows, pump) {
 }
 
 function buildPlannedRows(pumpRows, repairRows, marketRows) {
-  const selectedPumps = chooseOnePumpPerMeterPerMonth(pumpRows);
+  const selectedPumps = chooseOnePumpPerMeterCurrentMonth(pumpRows);
   const output = [];
 
   selectedPumps.forEach((pump, groupIndex) => {
@@ -338,8 +373,8 @@ function buildPlannedRows(pumpRows, repairRows, marketRows) {
     });
   });
 
-  // ตารางซ่อมยังแสดงต่อท้าย เพราะเป็นเงื่อนไขลำดับ 2 แต่ไม่ได้เอาเข้ากลุ่มเส้นทางปรับปรุงปั๊ม
-  const repairs = repairRows.map(r => ({...r, route_group: "ตารางซ่อม", stop_no: "-", start_name: "-"}));
+  // ตารางซ่อมแสดงเฉพาะเดือนปัจจุบัน เพื่อให้หน้าแผนเป็นข้อมูลเดือนเดียวกัน
+  const repairs = repairRows.filter(r => isCurrentMonth(r.dateObj)).map(r => ({...r, route_group: "ตารางซ่อม", stop_no: "-", start_name: "-"}));
   return [...output, ...repairs];
 }
 
@@ -347,6 +382,8 @@ async function loadData() {
   const tbody = document.getElementById("resultBody");
   tbody.innerHTML = `<tr><td colspan="18" class="loading">กำลังโหลดข้อมูล...</td></tr>`;
   try {
+    const monthEl = document.getElementById("currentMonthLabel");
+    if (monthEl) monthEl.textContent = thaiMonthYearLabel();
     const [pumpRowsRaw, repairRowsRaw, marketRowsRaw, salesRows] = await Promise.all([
       fetchSheetByIndex(SHEET_NAMES.pump),
       fetchSheetByIndex(SHEET_NAMES.repair),
@@ -383,6 +420,19 @@ function priorityClass(row) {
   return "p4";
 }
 
+function routeToGoogleMapsUrl(list) {
+  const valid = list.filter(validCoord);
+  if (!valid.length) return "";
+  const start = START_POINTS.find(x => x.name === list[0].start_name) || nearestStart(valid[0]);
+  const stops = [{customer_name:start.name, lat:start.lat, lng:start.lng}, ...valid, {customer_name:start.name, lat:start.lat, lng:start.lng}];
+  const coords = stops.map(p => `${toNumber(p.lat)},${toNumber(p.lng)}`);
+  if (coords.length <= 2) return `https://www.google.com/maps/search/?api=1&query=${coords[0]}`;
+  const origin = coords[0];
+  const destination = coords[coords.length - 1];
+  const waypoints = coords.slice(1, -1).join("|");
+  return `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&waypoints=${encodeURIComponent(waypoints)}&travelmode=driving`;
+}
+
 function renderRouteSummary(rows) {
   const box = document.getElementById("routeSummary");
   const groups = new Map();
@@ -391,16 +441,92 @@ function renderRouteSummary(rows) {
     groups.get(r.route_group).push(r);
   });
 
-  if (!groups.size) {
-    box.innerHTML = `<div class="route-item">ยังไม่มีข้อมูลแผนเส้นทาง</div>`;
+  currentRouteGroups = groups;
+  const keys = Array.from(groups.keys());
+  if (!keys.length) {
+    selectedRouteKey = "";
+    box.innerHTML = `<div class="route-item">เดือน ${escapeHtml(thaiMonthYearLabel())} ยังไม่มีข้อมูลแผนเส้นทางจากตารางปรับปรุงปั๊ม</div>`;
+    renderRouteDetail([]);
     return;
   }
 
-  box.innerHTML = Array.from(groups.entries()).slice(0, 12).map(([name, list]) => {
+  if (!selectedRouteKey || !groups.has(selectedRouteKey)) selectedRouteKey = keys[0];
+
+  box.innerHTML = keys.map((name, idx) => {
+    const list = groups.get(name);
     const first = list[0];
     const routeNames = list.map(x => x.customer_name || x.customer_id).filter(Boolean).join(" → ");
-    return `<div class="route-item"><strong>${escapeHtml(name)}</strong><br><span>เริ่ม: ${escapeHtml(first.start_name || "-")}</span><br><small>${escapeHtml(routeNames)} → ${escapeHtml(first.start_name || "จุดเริ่มต้น")}</small></div>`;
+    const active = name === selectedRouteKey ? " active" : "";
+    return `<button class="route-item route-button${active}" data-route-key="${escapeHtml(name)}" type="button"><strong>${idx + 1}. ${escapeHtml(name)}</strong><br><span>เริ่ม: ${escapeHtml(first.start_name || "-")}</span><br><small>${escapeHtml(routeNames)} → ${escapeHtml(first.start_name || "จุดเริ่มต้น")}</small></button>`;
   }).join("");
+
+  box.querySelectorAll(".route-button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      selectedRouteKey = btn.dataset.routeKey;
+      renderRouteSummary(rows);
+    });
+  });
+
+  renderRouteDetail(groups.get(selectedRouteKey) || []);
+}
+
+function renderRouteDetail(list) {
+  const detail = document.getElementById("routeDetail");
+  if (!list.length) {
+    detail.innerHTML = "คลิกการ์ดแผนเส้นทางด้านบน เพื่อดูรายละเอียดและแผนที่";
+    renderMap([]);
+    return;
+  }
+
+  const start = START_POINTS.find(x => x.name === list[0].start_name) || nearestStart(list[0]);
+  const googleUrl = routeToGoogleMapsUrl(list);
+  const rows = list.map((r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.customer_name || "-")}</td><td>${escapeHtml(r.type || "-")}</td><td>${escapeHtml(r.status || "-")}</td><td>${escapeHtml(r.lat || "-")}, ${escapeHtml(r.lng || "-")}</td></tr>`).join("");
+
+  detail.innerHTML = `
+    <div class="detail-head">
+      <div><h3>${escapeHtml(selectedRouteKey)}</h3><p>จุดเริ่มต้น/วนกลับ: <strong>${escapeHtml(start.name)}</strong></p></div>
+      ${googleUrl ? `<a class="map-link" href="${googleUrl}" target="_blank" rel="noopener">เปิดเส้นทางใน Google Maps</a>` : ""}
+    </div>
+    <div class="detail-table-wrap"><table class="detail-table"><thead><tr><th>ลำดับ</th><th>ชื่อปั๊ม/ลูกค้า</th><th>ประเภท</th><th>สถานะ</th><th>พิกัด</th></tr></thead><tbody>${rows}</tbody></table></div>
+  `;
+  renderMap(list);
+}
+
+function renderMap(list) {
+  const mapEl = document.getElementById("routeMap");
+  if (!window.L) {
+    mapEl.innerHTML = "ไม่สามารถโหลดแผนที่ได้ กรุณาตรวจสอบอินเทอร์เน็ต";
+    return;
+  }
+  if (!routeMap) {
+    routeMap = L.map("routeMap");
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap"
+    }).addTo(routeMap);
+  }
+  if (routeLayer) routeLayer.remove();
+  routeLayer = L.layerGroup().addTo(routeMap);
+
+  const valid = list.filter(validCoord);
+  if (!valid.length) {
+    routeMap.setView([16.5, 103.8], 8);
+    return;
+  }
+
+  const start = START_POINTS.find(x => x.name === list[0].start_name) || nearestStart(valid[0]);
+  const points = [{...start, customer_name:start.name, type:"จุดเริ่มต้น", status:"เริ่ม/กลับ"}, ...valid, {...start, customer_name:start.name, type:"จุดเริ่มต้น", status:"วนกลับ"}];
+  const latlngs = points.map(p => [toNumber(p.lat), toNumber(p.lng)]);
+
+  L.polyline(latlngs, { weight: 4 }).addTo(routeLayer);
+  points.forEach((p, idx) => {
+    const label = idx === 0 ? "เริ่ม" : idx === points.length - 1 ? "กลับ" : String(idx);
+    L.marker([toNumber(p.lat), toNumber(p.lng)]).addTo(routeLayer)
+      .bindPopup(`<strong>${label}. ${escapeHtml(p.customer_name || p.name || "-")}</strong><br>${escapeHtml(p.type || "-")}<br>${escapeHtml(p.status || "-")}`);
+  });
+
+  routeMap.fitBounds(latlngs, { padding: [28, 28] });
+  setTimeout(() => routeMap.invalidateSize(), 150);
 }
 
 function renderTable() {
