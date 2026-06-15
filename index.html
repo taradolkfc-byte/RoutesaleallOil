@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ระบบวางแผนออกตลาด KCE</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="style.css?v=20260615-08" />
+  <link rel="stylesheet" href="style.css?v=20260615-09" />
 </head>
 <body>
   <header class="app-header">
@@ -30,6 +30,16 @@
         <p>คลิกการ์ดแผนแต่ละสายเพื่อดูรายละเอียดและแผนที่ทันที</p>
         <p class="month-note">เดือนที่แสดง: <strong id="currentMonthLabel">-</strong></p>
         <div class="plan-controls">
+          <label>จุดเริ่ม
+            <input id="startPointInput" list="startPointList" placeholder="อัตโนมัติ หรือเลือกจุดเริ่ม" />
+            <datalist id="startPointList">
+              <option value="อัตโนมัติ"></option>
+              <option value="สามทองบริการ"></option>
+              <option value="เค.ซี.ปิโตรเลียม2006"></option>
+              <option value="เค.ซี.จี.ปิโตรเลียม"></option>
+              <option value="เค.ซี. กรีน เอ็นเนอร์จี"></option>
+            </datalist>
+          </label>
           <label>โหมดวางแผน
             <select id="planMode">
               <option value="pump">ตามแผนปรับปรุงปั๊ม</option>
@@ -148,6 +158,6 @@
   </main>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="script.js?v=20260615-08"></script>
+  <script src="script.js?v=20260615-09"></script>
 </body>
 </html>
