@@ -94,3 +94,9 @@ tr:nth-child(even) td { background:#f9fafb; }
 .plan-controls label { color:#0f172a; font-weight:700; font-size:13px; }
 .plan-controls select { margin-top:5px; }
 @media (max-width:900px){ .plan-controls{grid-template-columns:1fr;} }
+
+/* ===== Start point selector update 20260615-09 ===== */
+.plan-controls { display:flex; gap:10px; flex-wrap:wrap; align-items:end; margin-top:10px; }
+.plan-controls label { min-width:180px; color:#0f172a; }
+.plan-controls input, .plan-controls select { min-width:180px; background:#fff; }
+@media (max-width:900px){ .plan-controls{display:grid; grid-template-columns:1fr;} .plan-controls label,.plan-controls input,.plan-controls select{min-width:0;width:100%;} }
