@@ -18,6 +18,10 @@ const START_POINTS = [
   { name: "ปั๊ม เค.ซี.กรีน เอ็นเนอร์จี", lat: 17.6294000000000, lng: 103.7675890000000 }
 ];
 
+const CHECKIN_RADIUS_METER = 100;
+const MAX_PLAN_DAYS = 7;
+const MAX_STOPS_PER_DAY = 16;
+
 let rawRows = [];
 let plannedRows = [];
 let currentRouteGroups = new Map();
@@ -110,6 +114,23 @@ function inCurrentThaiMonth(d) {
 }
 function dateSortValue(d) { return d ? d.getTime() : 9999999999999; }
 function thaiMonthYearLabel() { return thaiNow().toLocaleDateString("th-TH", { month: "long", year: "numeric" }); }
+function addDaysTH(d, days) {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  x.setDate(x.getDate() + days);
+  return x;
+}
+function thaiDateLabel(d) {
+  return d.toLocaleDateString("th-TH", { weekday:"short", day:"numeric", month:"long", year:"2-digit" });
+}
+function getPlanSettings() {
+  const modeEl = document.getElementById("planMode");
+  const daysEl = document.getElementById("planDays");
+  const mode = modeEl ? modeEl.value : "pump";
+  let days = daysEl ? Number(daysEl.value) : 1;
+  if (!Number.isFinite(days)) days = 1;
+  days = Math.max(1, Math.min(MAX_PLAN_DAYS, days));
+  return { mode, days };
+}
 
 function inferBU(customerId, fallback = "") {
   const id = cleanText(customerId).toUpperCase();
@@ -161,12 +182,16 @@ function buildVisitedSet(savedRows) {
   const ids = new Set();
   const names = new Set();
   savedRows.slice(1).forEach(r => {
-    // รองรับทั้งชีตที่มีหัวตาราง 9 คอลัมน์เดิม และ 14 คอลัมน์ใหม่
     const visitDate = parseDateTH(cell(r, 1)) || parseDateTH(cell(r, 0));
     if (visitDate && !inCurrentThaiMonth(visitDate)) return;
 
-    const idCandidates = [cell(r, 2), cell(r, 3)];
-    const nameCandidates = [cell(r, 3), cell(r, 4)];
+    // โครงสร้างชีตใหม่: 0 วันที่บันทึก, 1 วันที่ออกตลาด, 2 ประเภท, 3 รหัส, 4 ชื่อ, ... 14 สถานะเข้าพบ
+    // ถ้าเป็นข้อมูลเก่าไม่มีคอลัมน์สถานะ ให้ถือว่า “สำเร็จ” เพื่อไม่ให้จุดเก่ากลับมาในแผน
+    const visitStatus = cleanText(cell(r, 14) || cell(r, 15) || "สำเร็จ");
+    if (visitStatus && visitStatus !== "สำเร็จ") return;
+
+    const idCandidates = [cell(r, 3), cell(r, 2)];
+    const nameCandidates = [cell(r, 4), cell(r, 3)];
     idCandidates.map(norm).filter(Boolean).forEach(x => ids.add(x));
     nameCandidates.map(norm).filter(Boolean).forEach(x => names.add(x));
   });
@@ -283,25 +308,13 @@ function bestStartForRoute(points) {
     return { ...s, score: avg + (nearest * 0.15) };
   }).sort((a,b) => a.score - b.score)[0];
 }
-function routeDistanceFromStart(start, order) {
-  if (!order.length) return 0;
-  let total = 0;
-  let current = { lat: start.lat, lng: start.lng };
-  order.forEach(p => {
-    total += haversine(current, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
-    current = { lat: toNumber(p.lat), lng: toNumber(p.lng) };
-  });
-  total += haversine(current, { lat: start.lat, lng: start.lng });
-  return total;
-}
-
-function nearestNeighborOrder(start, points) {
-  const remaining = points.map(p => ({...p}));
+function orderCircularRoute(start, points) {
+  const remaining = points.filter(validCoord).map(p => ({...p}));
+  const noCoord = points.filter(p => !validCoord(p));
   const ordered = [];
   let current = { lat: start.lat, lng: start.lng };
   while (remaining.length) {
-    let bestIndex = 0;
-    let bestDistance = Infinity;
+    let bestIndex = 0, bestDistance = Infinity;
     remaining.forEach((p, i) => {
       const d = haversine(current, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
       if (d < bestDistance) { bestDistance = d; bestIndex = i; }
@@ -310,101 +323,7 @@ function nearestNeighborOrder(start, points) {
     ordered.push(next);
     current = { lat: toNumber(next.lat), lng: toNumber(next.lng) };
   }
-  return ordered;
-}
-
-function angularSweepOrders(points) {
-  if (!points.length) return [[]];
-  const center = {
-    lat: points.reduce((sum, p) => sum + toNumber(p.lat), 0) / points.length,
-    lng: points.reduce((sum, p) => sum + toNumber(p.lng), 0) / points.length
-  };
-  const withAngle = points.map(p => ({
-    ...p,
-    __angle: Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng)
-  }));
-  const cw = [...withAngle].sort((a,b) => a.__angle - b.__angle);
-  const ccw = [...cw].reverse();
-  const variants = [];
-  [cw, ccw].forEach(list => {
-    for (let i = 0; i < list.length; i++) {
-      variants.push([...list.slice(i), ...list.slice(0, i)].map(({__angle, ...p}) => p));
-    }
-  });
-  return variants;
-}
-
-function twoOptClosedRoute(start, order) {
-  if (order.length < 4) return order;
-  let best = order.map(p => ({...p}));
-  let improved = true;
-  let guard = 0;
-  while (improved && guard < 80) {
-    improved = false;
-    guard++;
-    const currentBestDistance = routeDistanceFromStart(start, best);
-    outer:
-    for (let i = 0; i < best.length - 1; i++) {
-      for (let k = i + 1; k < best.length; k++) {
-        const candidate = [
-          ...best.slice(0, i),
-          ...best.slice(i, k + 1).reverse(),
-          ...best.slice(k + 1)
-        ];
-        const candidateDistance = routeDistanceFromStart(start, candidate);
-        if (candidateDistance + 0.001 < currentBestDistance) {
-          best = candidate;
-          improved = true;
-          break outer;
-        }
-      }
-    }
-  }
-  return best;
-}
-
-function rowName(row) {
-  return norm(`${row.customer_name || ""} ${row.customer_id || ""} ${row.area || ""}`);
-}
-
-function movePointAfter(order, anchorKeywords, movingKeywords) {
-  const hasAll = (text, words) => words.every(w => text.includes(norm(w)));
-  const anchorIndex = order.findIndex(p => hasAll(rowName(p), anchorKeywords));
-  const movingIndex = order.findIndex(p => hasAll(rowName(p), movingKeywords));
-  if (anchorIndex < 0 || movingIndex < 0 || anchorIndex === movingIndex) return order;
-  const next = [...order];
-  const [moving] = next.splice(movingIndex, 1);
-  const anchorNewIndex = next.findIndex(p => hasAll(rowName(p), anchorKeywords));
-  next.splice(anchorNewIndex + 1, 0, moving);
-  return next;
-}
-
-function applyRouteBusinessRules(order) {
-  // กติกาเฉพาะพื้นที่ที่ผู้ใช้แจ้ง: ให้จุดใกล้กันต่อกัน เพื่อลดการย้อนกลับมาเก็บจุดเดิม
-  let next = [...order];
-  next = movePointAfter(next, ["ที่ทำการผู้ใหญ่บ้าน"], ["ยิ่ง", "เจริญ"]);
-  next = movePointAfter(next, ["ทุ่งเจริญ"], ["ยิ่ง", "เจริญ"]);
-  next = movePointAfter(next, ["สหกรณ์การเกษตร", "แก้มลิง"], ["กลุ่มทำนาหลักเมือง"]);
-  return next;
-}
-
-function orderCircularRoute(start, points) {
-  const validPoints = points.filter(validCoord).map(p => ({...p}));
-  const noCoord = points.filter(p => !validCoord(p));
-  if (validPoints.length <= 2) return [...validPoints, ...noCoord];
-
-  // สร้างหลายคำตอบเริ่มต้น แล้วเลือกเส้นทางที่วนกลับจุดเริ่มต้นสั้นที่สุด
-  const candidates = [
-    nearestNeighborOrder(start, validPoints),
-    ...angularSweepOrders(validPoints)
-  ].map(order => twoOptClosedRoute(start, order));
-
-  let best = candidates
-    .sort((a,b) => routeDistanceFromStart(start, a) - routeDistanceFromStart(start, b))[0];
-
-  // ปรับตามกติกาหน้างานที่ระบุ แล้วทำ 2-opt ซ้ำแบบอ่อน ๆ
-  best = applyRouteBusinessRules(best);
-  return [...best, ...noCoord];
+  return [...ordered, ...noCoord];
 }
 function takeByStatusForMeter(marketRows, pump) {
   const sameMeter = marketRows
@@ -422,7 +341,7 @@ function takeByStatusForMeter(marketRows, pump) {
   const winback = sameMeter.filter(x => statusGroup(x.status) === "ลูกค้าใหม่/Winback").slice(0, 5);
   return [...lost, ...risky, ...active, ...winback];
 }
-function buildPlannedRows(pumpRows, repairRows, marketRows) {
+function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
   const selectedPumps = chooseOnePumpPerMeterCurrentMonth(pumpRows);
   const output = [];
 
@@ -435,6 +354,8 @@ function buildPlannedRows(pumpRows, repairRows, marketRows) {
     const ordered = orderCircularRoute(start, routePoints);
     ordered.forEach((row, idx) => output.push({
       ...row,
+      plan_day: 1,
+      plan_date: pump.dateObj || thaiNow(),
       route_group: routeId,
       stop_no: `${idx + 1}/${ordered.length}`,
       start_name: start.name,
@@ -445,8 +366,54 @@ function buildPlannedRows(pumpRows, repairRows, marketRows) {
   const repairs = repairRows
     .filter(r => inCurrentThaiMonth(r.dateObj))
     .filter(r => !isVisited(r))
-    .map(r => ({ ...r, route_group: "ตารางซ่อมเดือนปัจจุบัน", stop_no: "-", start_name: "-" }));
+    .map(r => ({ ...r, plan_day: 1, plan_date: r.dateObj || thaiNow(), route_group: "ตารางซ่อมเดือนปัจจุบัน", stop_no: "-", start_name: "-" }));
   return [...output, ...repairs];
+}
+
+function buildNormalPlanRows(marketRows, planDays) {
+  const today = thaiNow();
+  const candidates = marketRows
+    .filter(r => !isVisited(r))
+    .filter(validCoord)
+    .sort((a,b) => (marketScore(a.status) - marketScore(b.status)) || cleanText(a.bu).localeCompare(cleanText(b.bu), "th") || cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), "th"));
+
+  const groups = new Map();
+  candidates.forEach(r => {
+    const key = `${r.bu || "ไม่ระบุ"}|${r.meterKey || "ไม่ระบุ"}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  });
+
+  const output = [];
+  groups.forEach((list, key) => {
+    const [bu, meterKey] = key.split("|");
+    const maxItems = Math.min(list.length, planDays * MAX_STOPS_PER_DAY);
+    const usable = list.slice(0, maxItems);
+    for (let dayIndex = 0; dayIndex < planDays; dayIndex++) {
+      const chunk = usable.slice(dayIndex * MAX_STOPS_PER_DAY, (dayIndex + 1) * MAX_STOPS_PER_DAY);
+      if (!chunk.length) continue;
+      const planDate = addDaysTH(today, dayIndex);
+      const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
+      const start = bestStartForRoute(chunk);
+      const ordered = orderCircularRoute(start, chunk);
+      ordered.forEach((row, idx) => output.push({
+        ...row,
+        plan_day: dayIndex + 1,
+        plan_date: planDate,
+        route_group: routeId,
+        stop_no: `${idx + 1}/${ordered.length}`,
+        start_name: start.name,
+        priorityLabel: row.priorityLabel || statusGroup(row.status)
+      }));
+    }
+  });
+  return output;
+}
+
+function buildPlannedRows(pumpRows, repairRows, marketRows) {
+  const { mode, days } = getPlanSettings();
+  if (mode === "normal") return buildNormalPlanRows(marketRows, days);
+  return buildPumpPlanRows(pumpRows, repairRows, marketRows);
 }
 
 async function loadData() {
@@ -513,7 +480,7 @@ function renderRouteSummary(rows) {
   const keys = Array.from(groups.keys());
   if (!keys.length) {
     selectedRouteKey = "";
-    box.innerHTML = `<div class="route-item">เดือน ${escapeHtml(thaiMonthYearLabel())} ยังไม่มีข้อมูลปรับปรุงปั๊มสำหรับวางแผน หรือจุดในเดือนนี้ถูกบันทึกออกตลาดแล้ว</div>`;
+    box.innerHTML = `<div class="route-item">ยังไม่มีข้อมูลสำหรับวางแผน หรือจุดถูกบันทึกสำเร็จแล้ว</div>`;
     renderRouteDetail([]);
     return;
   }
@@ -704,7 +671,7 @@ async function saveForm(e) {
   status.style.color = "#92400e";
   try {
     await fetch(WEB_APP_URL, { method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify(data) });
-    status.textContent = "บันทึกข้อมูลเรียบร้อยแล้ว ระบบจะตัดจุดนี้ออกจากแผนเมื่อรีเฟรชข้อมูล";
+    status.textContent = "บันทึกข้อมูลเรียบร้อยแล้ว: ถ้าสถานะเป็น “สำเร็จ” ระบบจะตัดจุดนี้ออกจากแผน แต่ถ้าไม่สำเร็จจะนำกลับมาวางแผนใหม่";
     status.style.color = "#166534";
     e.target.reset();
     setTimeout(loadData, 900);
@@ -742,6 +709,38 @@ async function reverseGeocode(lat, lng) {
     return "";
   }
 }
+function distanceMeter(lat1, lng1, lat2, lng2) {
+  return haversine({ lat: lat1, lng: lng1 }, { lat: lat2, lng: lng2 }) * 1000;
+}
+
+function findNearestCustomer(lat, lng) {
+  const customers = rawRows.filter(validCoord);
+  let nearest = null;
+  customers.forEach(c => {
+    const d = distanceMeter(lat, lng, toNumber(c.lat), toNumber(c.lng));
+    if (d <= CHECKIN_RADIUS_METER && (!nearest || d < nearest.distance)) {
+      nearest = { ...c, distance: d };
+    }
+  });
+  return nearest;
+}
+
+function fillFormFromCustomer(form, customer) {
+  form.elements.job_type.value = "ออกตลาด";
+  form.elements.customer_id.value = customer.customer_id || "";
+  form.elements.customer_name.value = customer.customer_name || "";
+  form.elements.bu.value = customer.bu || inferBU(customer.customer_id, customer.bu);
+  form.elements.meter.value = customer.meter || "";
+  form.elements.area.value = customer.area || form.elements.area.value || "";
+  form.elements.purpose.value = customer.purpose || "ติดตามสถานะลูกค้า";
+}
+
+function unlockManualCustomerFields(form) {
+  ["customer_id", "customer_name", "bu", "meter"].forEach(name => {
+    if (form.elements[name]) form.elements[name].readOnly = false;
+  });
+}
+
 async function checkInGps() {
   const status = document.getElementById("saveStatus");
   const btn = document.getElementById("checkinBtn");
@@ -760,10 +759,22 @@ async function checkInGps() {
     form.elements.lat.value = lat;
     form.elements.lng.value = lng;
     form.elements.visit_date.value = todayInputValue();
+    if (form.elements.visit_status && !form.elements.visit_status.value) form.elements.visit_status.value = "สำเร็จ";
+
     const area = await reverseGeocode(lat, lng);
     if (area) form.elements.area.value = area;
-    status.textContent = `เช็คอินสำเร็จ: ${area || "ได้พิกัดแล้ว"} (${lat}, ${lng})`;
-    status.style.color = "#166534";
+
+    const customer = findNearestCustomer(Number(lat), Number(lng));
+    if (customer) {
+      fillFormFromCustomer(form, customer);
+      if (!form.elements.area.value && customer.area) form.elements.area.value = customer.area;
+      status.textContent = `เช็คอินสำเร็จ: พบลูกค้าในรัศมี ${Math.round(customer.distance)} เมตร - ${customer.customer_name || customer.customer_id}`;
+      status.style.color = "#166534";
+    } else {
+      unlockManualCustomerFields(form);
+      status.textContent = `เช็คอินสำเร็จ: อยู่นอกเขตลูกค้า ${CHECKIN_RADIUS_METER} เมตร ระบบเติมพื้นที่/พิกัดให้แล้ว กรุณากรอกรหัสลูกค้า ชื่อปั๊ม BU และสายมิเตอร์เอง`;
+      status.style.color = "#92400e";
+    }
     btn.disabled = false;
   }, err => {
     let msg = "ไม่สามารถดึง GPS ได้";
@@ -781,6 +792,8 @@ document.getElementById("searchBox").addEventListener("input", renderTable);
 document.getElementById("typeFilter").addEventListener("change", renderTable);
 document.getElementById("statusFilter").addEventListener("change", renderTable);
 document.getElementById("showAllToggle").addEventListener("change", renderTable);
+if (document.getElementById("planMode")) document.getElementById("planMode").addEventListener("change", loadData);
+if (document.getElementById("planDays")) document.getElementById("planDays").addEventListener("change", loadData);
 document.getElementById("reloadBtn").addEventListener("click", loadData);
 document.getElementById("checkinBtn").addEventListener("click", checkInGps);
 loadData();
