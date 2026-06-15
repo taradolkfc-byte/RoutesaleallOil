@@ -12,10 +12,10 @@ const SHEET_NAMES = {
 };
 
 const START_POINTS = [
-  { name: "สามทองบริการ", lat: 16.3811263508237, lng: 103.3487862676390 },
-  { name: "ปั๊ม เค.ซี.ปิโตรเลียม2006", lat: 16.7160212825713, lng: 103.0820493667620 },
-  { name: "ปั๊ม เค.ซี.จี.ปิโตรเลียม", lat: 16.4359292973822, lng: 104.6162612319160 },
-  { name: "ปั๊ม เค.ซี.กรีน เอ็นเนอร์จี", lat: 17.6294000000000, lng: 103.7675890000000 }
+  { name: "สามทองบริการ", lat: 16.3811263508237, lng: 103.3487862676390, aliases: ["สามทองบริการ"] },
+  { name: "ปั๊ม เค.ซี.ปิโตรเลียม2006", lat: 16.7160212825713, lng: 103.0820493667620, aliases: ["เค.ซี.ปิโตรเลียม2006", "ปั๊ม เค.ซี.ปิโตรเลียม2006"] },
+  { name: "ปั๊ม เค.ซี.จี.ปิโตรเลียม", lat: 16.4359292973822, lng: 104.6162612319160, aliases: ["เค.ซี.จี.ปิโตรเลียม", "ปั๊ม เค.ซี.จี.ปิโตรเลียม", "KCG"] },
+  { name: "ปั๊ม เค.ซี.กรีน เอ็นเนอร์จี", lat: 17.6294000000000, lng: 103.7675890000000, aliases: ["เค.ซี. กรีน เอ็นเนอร์จี", "เค.ซี.กรีน เอ็นเนอร์จี", "ปั๊ม เค.ซี.กรีน เอ็นเนอร์จี"] }
 ];
 
 const CHECKIN_RADIUS_METER = 100;
@@ -308,6 +308,26 @@ function bestStartForRoute(points) {
     return { ...s, score: avg + (nearest * 0.15) };
   }).sort((a,b) => a.score - b.score)[0];
 }
+function getManualStartPoint(points = []) {
+  const input = document.getElementById("startPointInput");
+  const value = norm(input ? input.value : "");
+  if (!value || value === "อัตโนมัติ" || value === "auto") return bestStartForRoute(points);
+
+  const predefined = START_POINTS.find(sp => {
+    const names = [sp.name, ...(sp.aliases || [])].map(norm);
+    return names.some(n => n === value || n.includes(value) || value.includes(n));
+  });
+  if (predefined) return predefined;
+
+  // ถ้าพิมพ์ชื่อจุดเริ่มเองและชื่อนั้นมีอยู่ในข้อมูลลูกค้า ให้ใช้พิกัดลูกค้านั้นเป็นจุดเริ่ม
+  const source = [...rawRows, ...plannedRows].find(r => {
+    const text = norm(`${r.customer_name || ""} ${r.customer_id || ""}`);
+    return validCoord(r) && text && (text.includes(value) || value.includes(text));
+  });
+  if (source) return { name: source.customer_name || source.customer_id || input.value, lat: toNumber(source.lat), lng: toNumber(source.lng), custom: true };
+
+  return bestStartForRoute(points);
+}
 function orderCircularRoute(start, points) {
   const remaining = points.filter(validCoord).map(p => ({...p}));
   const noCoord = points.filter(p => !validCoord(p));
@@ -350,7 +370,7 @@ function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
     const routeDate = pump.dateObj ? pump.dateObj.toLocaleDateString("th-TH", { day: "numeric", month: "long", year: "2-digit" }) : pump.dateRaw;
     const routeId = `${pump.bu || "BU-?"} สาย ${pump.meterKey} วันที่ ${routeDate}`;
     const routePoints = [pump, ...relatedMarkets];
-    const start = bestStartForRoute(routePoints);
+    const start = getManualStartPoint(routePoints);
     const ordered = orderCircularRoute(start, routePoints);
     ordered.forEach((row, idx) => output.push({
       ...row,
@@ -394,7 +414,7 @@ function buildNormalPlanRows(marketRows, planDays) {
       if (!chunk.length) continue;
       const planDate = addDaysTH(today, dayIndex);
       const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
-      const start = bestStartForRoute(chunk);
+      const start = getManualStartPoint(chunk);
       const ordered = orderCircularRoute(start, chunk);
       ordered.forEach((row, idx) => output.push({
         ...row,
@@ -794,6 +814,7 @@ document.getElementById("statusFilter").addEventListener("change", renderTable);
 document.getElementById("showAllToggle").addEventListener("change", renderTable);
 if (document.getElementById("planMode")) document.getElementById("planMode").addEventListener("change", loadData);
 if (document.getElementById("planDays")) document.getElementById("planDays").addEventListener("change", loadData);
+if (document.getElementById("startPointInput")) document.getElementById("startPointInput").addEventListener("change", loadData);
 document.getElementById("reloadBtn").addEventListener("click", loadData);
 document.getElementById("checkinBtn").addEventListener("click", checkInGps);
 loadData();
