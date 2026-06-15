@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ระบบวางแผนออกตลาด KCE</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="style.css?v=20260615-04" />
+  <link rel="stylesheet" href="style.css?v=20260615-05" />
 </head>
 <body>
   <header class="app-header">
@@ -55,14 +55,31 @@
       </label>
       <label>รหัสลูกค้า<input name="customer_id" placeholder="เช่น C001" /></label>
       <label>ชื่อลูกค้า / ชื่อปั๊ม<input name="customer_name" placeholder="กรอกชื่อลูกค้า" required /></label>
-      <label>BU / สังกัด<input name="bu" placeholder="เช่น ST, KN, MUK" /></label>
-      <label>สายมิเตอร์<input name="meter" placeholder="เช่น MT-57 / TR-64" /></label>
+      <label>BU / สังกัด
+        <input name="bu" list="buList" placeholder="พิมพ์หรือเลือก เช่น ST, KN, MUK" />
+        <datalist id="buList">
+          <option value="ST"></option>
+          <option value="KN"></option>
+          <option value="MUK"></option>
+          <option value="WNN"></option>
+          <option value="KCG"></option>
+        </datalist>
+      </label>
+      <label>สายมิเตอร์
+        <input name="meter" list="meterList" placeholder="พิมพ์หรือเลือก เช่น MT-57 / TR-64" />
+        <datalist id="meterList">
+          <option value="MT-49"></option><option value="MT-55"></option><option value="MT-57"></option><option value="MT-58"></option>
+          <option value="MT-60"></option><option value="MT-61"></option><option value="MT-65"></option><option value="MT-67"></option>
+          <option value="MT-71"></option><option value="MT-72"></option><option value="TR-64"></option><option value="TR-68"></option><option value="TR-70"></option><option value="TR-73"></option>
+        </datalist>
+      </label>
       <label>พื้นที่<input name="area" placeholder="ต./อ./จ." /></label>
       <label>วัตถุประสงค์<input name="purpose" placeholder="รายละเอียดงาน" /></label>
       <label>ผู้ประสานงาน<input name="coordinator" placeholder="ชื่อผู้ประสานงาน" /></label>
       <label>เบอร์โทร<input name="phone" placeholder="เบอร์โทร" /></label>
       <label>ละติจูด<input name="lat" placeholder="ละ" /></label>
       <label>ลองจิจูด<input name="lng" placeholder="ลอง" /></label>
+      <button id="checkinBtn" class="checkin-btn" type="button">เช็คอิน GPS</button>
       <label class="wide">หมายเหตุ<textarea name="note" placeholder="หมายเหตุเพิ่มเติม"></textarea></label>
       <button class="submit-btn" type="submit">บันทึกลงชีต “เก็บข้อมูล”</button>
     </form>
@@ -103,6 +120,6 @@
   </main>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="script.js?v=20260615-04"></script>
+  <script src="script.js?v=20260615-05"></script>
 </body>
 </html>
