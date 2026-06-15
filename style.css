@@ -54,3 +54,7 @@ tr:nth-child(even) td { background:#f9fafb; }
 .p4 { background:#dcfce7; color:#166534; }
 .loading { text-align:center; padding:30px; color:#6b7280; }
 @media (max-width:900px){ .app-header{display:block;} .summary-grid{grid-template-columns:1fr 1fr;} form{grid-template-columns:1fr;} .wide{grid-column:span 1;} .toolbar{grid-template-columns:1fr;} .route-card{grid-template-columns:1fr;} .route-summary{grid-template-columns:1fr;} .detail-head{display:block;} .map-link{margin-top:10px;} .route-map{height:360px;} }
+.route-item.route-button { background:#f9fafb; border:1px solid #e5e7eb; }
+.route-detail { min-height:90px; }
+.route-map { display:block; }
+.leaflet-container { font-family: Tahoma, Arial, sans-serif; }
