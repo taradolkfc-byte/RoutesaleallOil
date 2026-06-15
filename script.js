@@ -443,6 +443,25 @@ function renderRouteDetail(list) {
     <div class="detail-table-wrap"><table class="detail-table"><thead><tr><th>ลำดับ</th><th>ชื่อปั๊ม/ลูกค้า</th><th>ประเภท</th><th>สถานะ</th><th>พิกัด</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   renderMap(list);
 }
+function makeNumberIcon(number) {
+  return L.divIcon({
+    className: "route-number-icon",
+    html: `<span>${number}</span>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 15],
+    popupAnchor: [0, -15]
+  });
+}
+function makeStartIcon(label) {
+  return L.divIcon({
+    className: "route-start-icon",
+    html: `<span>${label}</span>`,
+    iconSize: [46, 30],
+    iconAnchor: [23, 15],
+    popupAnchor: [0, -16]
+  });
+}
+
 function renderMap(list) {
   const mapEl = document.getElementById("routeMap");
   if (!window.L) {
@@ -466,8 +485,10 @@ function renderMap(list) {
   const latlngs = points.map(p => [toNumber(p.lat), toNumber(p.lng)]);
   L.polyline(latlngs, { weight: 5 }).addTo(routeLayer);
   points.forEach((p, idx) => {
+    const isStart = idx === 0 || idx === points.length - 1;
     const label = idx === 0 ? "เริ่ม" : idx === points.length - 1 ? "กลับ" : String(idx);
-    L.marker([toNumber(p.lat), toNumber(p.lng)]).addTo(routeLayer)
+    const icon = isStart ? makeStartIcon(idx === 0 ? "เริ่ม" : "กลับ") : makeNumberIcon(idx);
+    L.marker([toNumber(p.lat), toNumber(p.lng)], { icon }).addTo(routeLayer)
       .bindPopup(`<strong>${label}. ${escapeHtml(p.customer_name || p.name || "-")}</strong><br>${escapeHtml(p.type || "-")}<br>${escapeHtml(p.status || "-")}`);
   });
   routeMap.fitBounds(latlngs, { padding: [30, 30] });
@@ -529,10 +550,73 @@ async function saveForm(e) {
   }
 }
 
+function todayInputValue() {
+  const d = thaiNow();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function buildAreaText(address = {}) {
+  const tambon = address.suburb || address.quarter || address.village || address.hamlet || address.neighbourhood || "";
+  const amphoe = address.city_district || address.county || address.city || address.town || address.municipality || "";
+  const province = address.state || address.province || "";
+  const parts = [];
+  if (tambon) parts.push(`ต.${tambon.replace(/^ตำบล\s*/, "")}`);
+  if (amphoe) parts.push(`อ.${amphoe.replace(/^อำเภอ\s*/, "")}`);
+  if (province) parts.push(`จ.${province.replace(/^จังหวัด\s*/, "")}`);
+  return parts.join(" ") || address.display_name || "";
+}
+async function reverseGeocode(lat, lng) {
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}&zoom=18&addressdetails=1&accept-language=th`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("reverse geocode failed");
+    const data = await res.json();
+    return buildAreaText(data.address || {}) || data.display_name || "";
+  } catch (err) {
+    return "";
+  }
+}
+async function checkInGps() {
+  const status = document.getElementById("saveStatus");
+  const btn = document.getElementById("checkinBtn");
+  if (!navigator.geolocation) {
+    status.textContent = "อุปกรณ์นี้ไม่รองรับ GPS / Location";
+    status.style.color = "#dc2626";
+    return;
+  }
+  status.textContent = "กำลังดึงพิกัด GPS กรุณาอนุญาตตำแหน่งบนโทรศัพท์...";
+  status.style.color = "#92400e";
+  btn.disabled = true;
+  navigator.geolocation.getCurrentPosition(async pos => {
+    const lat = pos.coords.latitude.toFixed(14);
+    const lng = pos.coords.longitude.toFixed(14);
+    const form = document.getElementById("planForm");
+    form.elements.lat.value = lat;
+    form.elements.lng.value = lng;
+    if (!form.elements.visit_date.value) form.elements.visit_date.value = todayInputValue();
+    const area = await reverseGeocode(lat, lng);
+    if (area) form.elements.area.value = area;
+    status.textContent = `เช็คอินสำเร็จ: ${area || "ได้พิกัดแล้ว"} (${lat}, ${lng})`;
+    status.style.color = "#166534";
+    btn.disabled = false;
+  }, err => {
+    let msg = "ไม่สามารถดึง GPS ได้";
+    if (err.code === 1) msg = "กรุณาอนุญาต Location/GPS ในเบราว์เซอร์ก่อน";
+    if (err.code === 2) msg = "ไม่พบตำแหน่ง GPS กรุณาเปิด Location บนโทรศัพท์";
+    if (err.code === 3) msg = "ดึงตำแหน่งไม่ทันเวลา กรุณาลองใหม่";
+    status.textContent = msg;
+    status.style.color = "#dc2626";
+    btn.disabled = false;
+  }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+}
+
 document.getElementById("planForm").addEventListener("submit", saveForm);
 document.getElementById("searchBox").addEventListener("input", renderTable);
 document.getElementById("typeFilter").addEventListener("change", renderTable);
 document.getElementById("statusFilter").addEventListener("change", renderTable);
 document.getElementById("showAllToggle").addEventListener("change", renderTable);
 document.getElementById("reloadBtn").addEventListener("click", loadData);
+document.getElementById("checkinBtn").addEventListener("click", checkInGps);
 loadData();
