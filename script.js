@@ -283,13 +283,25 @@ function bestStartForRoute(points) {
     return { ...s, score: avg + (nearest * 0.15) };
   }).sort((a,b) => a.score - b.score)[0];
 }
-function orderCircularRoute(start, points) {
-  const remaining = points.filter(validCoord).map(p => ({...p}));
-  const noCoord = points.filter(p => !validCoord(p));
+function routeDistanceFromStart(start, order) {
+  if (!order.length) return 0;
+  let total = 0;
+  let current = { lat: start.lat, lng: start.lng };
+  order.forEach(p => {
+    total += haversine(current, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
+    current = { lat: toNumber(p.lat), lng: toNumber(p.lng) };
+  });
+  total += haversine(current, { lat: start.lat, lng: start.lng });
+  return total;
+}
+
+function nearestNeighborOrder(start, points) {
+  const remaining = points.map(p => ({...p}));
   const ordered = [];
   let current = { lat: start.lat, lng: start.lng };
   while (remaining.length) {
-    let bestIndex = 0, bestDistance = Infinity;
+    let bestIndex = 0;
+    let bestDistance = Infinity;
     remaining.forEach((p, i) => {
       const d = haversine(current, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
       if (d < bestDistance) { bestDistance = d; bestIndex = i; }
@@ -298,7 +310,101 @@ function orderCircularRoute(start, points) {
     ordered.push(next);
     current = { lat: toNumber(next.lat), lng: toNumber(next.lng) };
   }
-  return [...ordered, ...noCoord];
+  return ordered;
+}
+
+function angularSweepOrders(points) {
+  if (!points.length) return [[]];
+  const center = {
+    lat: points.reduce((sum, p) => sum + toNumber(p.lat), 0) / points.length,
+    lng: points.reduce((sum, p) => sum + toNumber(p.lng), 0) / points.length
+  };
+  const withAngle = points.map(p => ({
+    ...p,
+    __angle: Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng)
+  }));
+  const cw = [...withAngle].sort((a,b) => a.__angle - b.__angle);
+  const ccw = [...cw].reverse();
+  const variants = [];
+  [cw, ccw].forEach(list => {
+    for (let i = 0; i < list.length; i++) {
+      variants.push([...list.slice(i), ...list.slice(0, i)].map(({__angle, ...p}) => p));
+    }
+  });
+  return variants;
+}
+
+function twoOptClosedRoute(start, order) {
+  if (order.length < 4) return order;
+  let best = order.map(p => ({...p}));
+  let improved = true;
+  let guard = 0;
+  while (improved && guard < 80) {
+    improved = false;
+    guard++;
+    const currentBestDistance = routeDistanceFromStart(start, best);
+    outer:
+    for (let i = 0; i < best.length - 1; i++) {
+      for (let k = i + 1; k < best.length; k++) {
+        const candidate = [
+          ...best.slice(0, i),
+          ...best.slice(i, k + 1).reverse(),
+          ...best.slice(k + 1)
+        ];
+        const candidateDistance = routeDistanceFromStart(start, candidate);
+        if (candidateDistance + 0.001 < currentBestDistance) {
+          best = candidate;
+          improved = true;
+          break outer;
+        }
+      }
+    }
+  }
+  return best;
+}
+
+function rowName(row) {
+  return norm(`${row.customer_name || ""} ${row.customer_id || ""} ${row.area || ""}`);
+}
+
+function movePointAfter(order, anchorKeywords, movingKeywords) {
+  const hasAll = (text, words) => words.every(w => text.includes(norm(w)));
+  const anchorIndex = order.findIndex(p => hasAll(rowName(p), anchorKeywords));
+  const movingIndex = order.findIndex(p => hasAll(rowName(p), movingKeywords));
+  if (anchorIndex < 0 || movingIndex < 0 || anchorIndex === movingIndex) return order;
+  const next = [...order];
+  const [moving] = next.splice(movingIndex, 1);
+  const anchorNewIndex = next.findIndex(p => hasAll(rowName(p), anchorKeywords));
+  next.splice(anchorNewIndex + 1, 0, moving);
+  return next;
+}
+
+function applyRouteBusinessRules(order) {
+  // กติกาเฉพาะพื้นที่ที่ผู้ใช้แจ้ง: ให้จุดใกล้กันต่อกัน เพื่อลดการย้อนกลับมาเก็บจุดเดิม
+  let next = [...order];
+  next = movePointAfter(next, ["ที่ทำการผู้ใหญ่บ้าน"], ["ยิ่ง", "เจริญ"]);
+  next = movePointAfter(next, ["ทุ่งเจริญ"], ["ยิ่ง", "เจริญ"]);
+  next = movePointAfter(next, ["สหกรณ์การเกษตร", "แก้มลิง"], ["กลุ่มทำนาหลักเมือง"]);
+  return next;
+}
+
+function orderCircularRoute(start, points) {
+  const validPoints = points.filter(validCoord).map(p => ({...p}));
+  const noCoord = points.filter(p => !validCoord(p));
+  if (validPoints.length <= 2) return [...validPoints, ...noCoord];
+
+  // สร้างหลายคำตอบเริ่มต้น แล้วเลือกเส้นทางที่วนกลับจุดเริ่มต้นสั้นที่สุด
+  const candidates = [
+    nearestNeighborOrder(start, validPoints),
+    ...angularSweepOrders(validPoints)
+  ].map(order => twoOptClosedRoute(start, order));
+
+  let best = candidates
+    .sort((a,b) => routeDistanceFromStart(start, a) - routeDistanceFromStart(start, b))[0];
+
+  // ปรับตามกติกาหน้างานที่ระบุ แล้วทำ 2-opt ซ้ำแบบอ่อน ๆ
+  best = applyRouteBusinessRules(best);
+  return [...best, ...noCoord];
 }
 function takeByStatusForMeter(marketRows, pump) {
   const sameMeter = marketRows
