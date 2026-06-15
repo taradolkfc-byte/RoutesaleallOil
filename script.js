@@ -1,7 +1,7 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
-// สำคัญ: ถ้าคุณใส่ URL Apps Script ไว้แล้ว ให้คัดลอก URL เดิมมาใส่ตรงนี้อีกครั้ง
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbz_jybKjIdUFAt44LtRnea7llQ8RbzATZTQgRqlRdFot6TbuxKcOVbqm3qjrsO4Fcxg/exec";
+// URL Apps Script ของคุณ
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbz_jybKjIdUFAt44LtRnea7llQ8RbzATZTQgRqIRdFot6TbuxKcOVbqm3qjrsO4Fcxg/exec";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
@@ -10,7 +10,6 @@ const SHEET_NAMES = {
   sales: "รายงานยอดขาย"
 };
 
-// จุดเริ่มต้น 4 จุด ตามที่กำหนด
 const START_POINTS = [
   { name: "สามทองบริการ", lat: 16.3811263508237, lng: 103.3487862676390 },
   { name: "ปั๊ม เค.ซี.ปิโตรเลียม2006", lat: 16.7160212825713, lng: 103.0820493667620 },
@@ -31,11 +30,13 @@ function toNumber(v) {
   const n = Number(cleanText(v).replace(/,/g, ""));
   return Number.isFinite(n) ? n : null;
 }
-function validCoord(row) { return toNumber(row.lat) !== null && toNumber(row.lng) !== null; }
+function validCoord(row) {
+  return toNumber(row.lat) !== null && toNumber(row.lng) !== null;
+}
 
 async function fetchSheetByIndex(sheetName) {
-  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}`;
-  const res = await fetch(url);
+  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}&cachebust=${Date.now()}`;
+  const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error(`โหลดชีต ${sheetName} ไม่ได้`);
   const text = await res.text();
   const jsonText = text.substring(text.indexOf("{"), text.lastIndexOf("}") + 1);
@@ -45,53 +46,70 @@ async function fetchSheetByIndex(sheetName) {
 
 function parseDateTH(value) {
   if (!value) return null;
-  const txt = cleanText(value);
+  if (value instanceof Date) return value;
+  const txt = cleanText(value).replace(/ปี/g, "").replace(/เดือน/g, "").trim();
 
   const gviz = txt.match(/Date\((\d+),(\d+),(\d+)/);
   if (gviz) return new Date(Number(gviz[1]), Number(gviz[2]), Number(gviz[3]));
 
-  const parts = txt.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  // รองรับ 14/06/69 หรือ 06/14/2026 แบบระวัง
+  const parts = txt.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
   if (parts) {
+    let a = Number(parts[1]);
+    let b = Number(parts[2]);
     let y = Number(parts[3]);
     if (y < 100) y += 2500;
     if (y > 2400) y -= 543;
-    return new Date(y, Number(parts[2]) - 1, Number(parts[1]));
+    // ถ้าตัวแรก > 12 ให้ถือเป็น dd/mm/yyyy, ถ้าไม่ใช่ก็ใช้ dd/mm ตามไทย
+    return new Date(y, b - 1, a);
   }
 
   const months = {
-    "ม.ค.":0,"มกราคม":0,"ก.พ.":1,"กุมภาพันธ์":1,"มี.ค.":2,"มีนาคม":2,"เม.ย.":3,"เมษายน":3,
-    "พ.ค.":4,"พฤษภาคม":4,"มิ.ย.":5,"มิถุนายน":5,"ก.ค.":6,"กรกฎาคม":6,"ส.ค.":7,"สิงหาคม":7,
-    "ก.ย.":8,"กันยายน":8,"ต.ค.":9,"ตุลาคม":9,"พ.ย.":10,"พฤศจิกายน":10,"ธ.ค.":11,"ธันวาคม":11
+    "ม.ค.":0,"มค":0,"มกราคม":0,
+    "ก.พ.":1,"กพ":1,"กุมภาพันธ์":1,
+    "มี.ค.":2,"มีค":2,"มีนาคม":2,
+    "เม.ย.":3,"เมย":3,"เมษายน":3,
+    "พ.ค.":4,"พค":4,"พฤษภาคม":4,
+    "มิ.ย.":5,"มิย":5,"มิถุนายน":5,
+    "ก.ค.":6,"กค":6,"กรกฎาคม":6,
+    "ส.ค.":7,"สค":7,"สิงหาคม":7,
+    "ก.ย.":8,"กย":8,"กันยายน":8,
+    "ต.ค.":9,"ตค":9,"ตุลาคม":9,
+    "พ.ย.":10,"พย":10,"พฤศจิกายน":10,
+    "ธ.ค.":11,"ธค":11,"ธันวาคม":11
   };
-  const th = txt.split(/\s+/);
-  if (th.length >= 3 && months[th[1]] !== undefined) {
+
+  const th = txt.split(/\s+/).filter(Boolean);
+  if (th.length >= 3) {
+    const day = Number(th[0]);
+    const monthTxt = th[1].replace(/\s/g, "");
     let y = Number(th[2]);
-    if (y < 100) y += 2500;
-    if (y > 2400) y -= 543;
-    return new Date(y, months[th[1]], Number(th[0]));
+    if (Number.isFinite(day) && months[monthTxt] !== undefined && Number.isFinite(y)) {
+      if (y < 100) y += 2500;
+      if (y > 2400) y -= 543;
+      return new Date(y, months[monthTxt], day);
+    }
   }
   return null;
 }
 
-function dateSortValue(d) { return d ? d.getTime() : 9999999999999; }
-
-// ใช้วันที่จริงของประเทศไทย เพื่อกรองเฉพาะเดือนปัจจุบันเท่านั้น
 function thaiNow() {
   const now = new Date();
   const th = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
-  th.setHours(0,0,0,0);
+  th.setHours(0, 0, 0, 0);
   return th;
 }
-function monthKey(d) {
-  if (!d || Number.isNaN(d.getTime())) return "no-date";
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+function monthStart(d = thaiNow()) { return new Date(d.getFullYear(), d.getMonth(), 1); }
+function nextMonthStart(d = thaiNow()) { return new Date(d.getFullYear(), d.getMonth() + 1, 1); }
+function inCurrentThaiMonth(d) {
+  if (!d || Number.isNaN(d.getTime())) return false;
+  const t = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  return t >= monthStart() && t < nextMonthStart();
 }
-function currentMonthKey() { return monthKey(thaiNow()); }
-function isCurrentMonth(d) { return !!d && monthKey(d) === currentMonthKey(); }
+function dateSortValue(d) { return d ? d.getTime() : 9999999999999; }
 function thaiMonthYearLabel() {
   return thaiNow().toLocaleDateString("th-TH", { month: "long", year: "numeric" });
 }
-function isSameCurrentMonthRow(r) { return r.dateObj && isCurrentMonth(r.dateObj); }
 
 function inferBU(customerId, fallback = "") {
   const id = cleanText(customerId).toUpperCase();
@@ -102,13 +120,11 @@ function inferBU(customerId, fallback = "") {
   if (id.startsWith("KCG")) return "KCG";
   return cleanText(fallback);
 }
-
 function normalizeMeter(v) {
   const s = cleanText(v).toUpperCase();
   const m = s.match(/(?:MT|TR)?\s*-?\s*(\d{1,3})/);
   return m ? m[1] : s;
 }
-
 function statusGroup(status) {
   const s = cleanText(status).toLowerCase();
   if (s.includes("lost customer") || s === "lost" || s.includes("lost")) return "ลูกค้าหาย";
@@ -118,21 +134,18 @@ function statusGroup(status) {
   if (s.includes("winback") || s.includes("new")) return "ลูกค้าใหม่/Winback";
   return "อื่นๆ";
 }
-
 function marketScore(status) {
-  const group = statusGroup(status);
-  if (group === "ลูกค้าหาย") return 1;
-  if (group === "ลูกค้าหายเกิน 60 วัน") return 2;
-  if (group === "ลูกค้าเสี่ยงหาย") return 3;
-  if (group === "ลูกค้าใหม่/Winback") return 4;
-  if (group === "ลูกค้าซื้อขายประจำ") return 5;
+  const g = statusGroup(status);
+  if (g === "ลูกค้าหาย") return 1;
+  if (g === "ลูกค้าหายเกิน 60 วัน") return 2;
+  if (g === "ลูกค้าเสี่ยงหาย") return 3;
+  if (g === "ลูกค้าใหม่/Winback") return 4;
+  if (g === "ลูกค้าซื้อขายประจำ") return 5;
   return 9;
 }
-
 function getUrgencyScore(urgency, dateObj) {
   const u = cleanText(urgency);
-  const today = thaiNow();
-  const d = dateObj ? Math.ceil((dateObj - today) / 86400000) : 99999;
+  const d = dateObj ? Math.ceil((dateObj - thaiNow()) / 86400000) : 99999;
   if (u.includes("ยาก") || u.includes("เร่งด่วน")) return d <= 3 ? 1 : 2;
   if (u.includes("ปานกลาง")) return d <= 15 ? 2 : 3;
   if (u.includes("ง่าย")) return d <= 30 ? 3 : 4;
@@ -140,7 +153,6 @@ function getUrgencyScore(urgency, dateObj) {
 }
 
 function normalizePump(rows) {
-  // B=1 รหัสลูกค้า, C=2 รายชื่อลูกค้า, D=3 มิเตอร์สาย, E=4 วันนัดหมาย, F=5 สถานะ, G=6 ละ, H=7 ลอง
   return rows.slice(1)
     .filter(r => cleanText(cell(r,5)) !== "เสร็จ")
     .filter(r => cleanText(cell(r,5)) === "ยังไม่เริ่ม" || cleanText(cell(r,5)) !== "")
@@ -149,99 +161,40 @@ function normalizePump(rows) {
       const customerId = cell(r,1);
       const meterRaw = cell(r,3);
       return {
-        sourceRank: 1,
-        priority: 100,
-        priorityLabel: "1-ปรับปรุงปั๊ม",
-        type: "ปรับปรุงปั๊ม",
-        dateRaw: cell(r,4),
-        dateObj,
-        customer_id: customerId,
-        customer_name: cell(r,2),
-        status: cell(r,5),
-        bu: inferBU(customerId),
-        meter: meterRaw,
-        meterKey: normalizeMeter(meterRaw),
-        area: "",
-        purpose: "ปรับปรุงปั๊ม",
-        coordinator: "",
-        phone: "",
-        lat: cell(r,6),
-        lng: cell(r,7),
-        sales_litre: "",
-        route_group: "",
-        stop_no: "",
-        start_name: ""
+        sourceRank: 1, priority: 100, priorityLabel: "1-ปรับปรุงปั๊ม", type: "ปรับปรุงปั๊ม",
+        dateRaw: cell(r,4), dateObj, customer_id: customerId, customer_name: cell(r,2), status: cell(r,5),
+        bu: inferBU(customerId), meter: meterRaw, meterKey: normalizeMeter(meterRaw), area: "", purpose: "ปรับปรุงปั๊ม",
+        coordinator: "", phone: "", lat: cell(r,6), lng: cell(r,7), sales_litre: "", route_group: "", stop_no: "", start_name: ""
       };
     });
 }
-
 function normalizeRepair(rows) {
   return rows.slice(1)
     .filter(r => cleanText(cell(r,10)) !== "เสร็จ")
     .filter(r => cleanText(cell(r,10)) === "ยังไม่เข้าซ่อม" || cleanText(cell(r,10)) !== "")
     .map(r => {
       const dateObj = parseDateTH(cell(r,8));
-      const urgentScore = getUrgencyScore(cell(r,9), dateObj);
       const meterRaw = cell(r,2);
       return {
-        sourceRank: 2,
-        priority: 200 + urgentScore,
-        priorityLabel: cell(r,9) || "ซ่อม",
-        type: "ซ่อม",
-        dateRaw: cell(r,8),
-        dateObj,
-        customer_id: "",
-        customer_name: cell(r,1),
-        status: cell(r,10),
-        bu: "",
-        meter: meterRaw,
-        meterKey: normalizeMeter(meterRaw),
-        area: cell(r,3),
-        purpose: cell(r,4),
-        coordinator: cell(r,6),
-        phone: cell(r,7),
-        lat: cell(r,11),
-        lng: cell(r,12),
-        sales_litre: "",
-        route_group: "",
-        stop_no: "",
-        start_name: ""
+        sourceRank: 2, priority: 200 + getUrgencyScore(cell(r,9), dateObj), priorityLabel: cell(r,9) || "ซ่อม", type: "ซ่อม",
+        dateRaw: cell(r,8), dateObj, customer_id: "", customer_name: cell(r,1), status: cell(r,10), bu: "",
+        meter: meterRaw, meterKey: normalizeMeter(meterRaw), area: cell(r,3), purpose: cell(r,4), coordinator: cell(r,6), phone: cell(r,7),
+        lat: cell(r,11), lng: cell(r,12), sales_litre: "", route_group: "", stop_no: "", start_name: ""
       };
     });
 }
-
 function normalizeMarket(rows) {
-  // A=0 customer_id, B=1 customer_name, C=2 ละ, D=3 ลอง, E=4 BU, F=5 สายมิเตอร์, K=10 status
   return rows.slice(1).map(r => {
     const status = cell(r,10);
     const meterRaw = cell(r,5);
     return {
-      sourceRank: 3,
-      priority: 300 + marketScore(status),
-      priorityLabel: statusGroup(status),
-      type: "พื้นที่ออกตลาด",
-      dateRaw: "",
-      dateObj: null,
-      customer_id: cell(r,0),
-      customer_name: cell(r,1),
-      status,
-      bu: cell(r,4),
-      meter: meterRaw,
-      meterKey: normalizeMeter(meterRaw),
-      area: cell(r,4),
-      purpose: "ติดตามสถานะลูกค้า",
-      coordinator: "",
-      phone: "",
-      lat: cell(r,2),
-      lng: cell(r,3),
-      sales_litre: "",
-      route_group: "",
-      stop_no: "",
-      start_name: ""
+      sourceRank: 3, priority: 300 + marketScore(status), priorityLabel: statusGroup(status), type: "พื้นที่ออกตลาด",
+      dateRaw: "", dateObj: null, customer_id: cell(r,0), customer_name: cell(r,1), status, bu: cell(r,4),
+      meter: meterRaw, meterKey: normalizeMeter(meterRaw), area: cell(r,4), purpose: "ติดตามสถานะลูกค้า", coordinator: "", phone: "",
+      lat: cell(r,2), lng: cell(r,3), sales_litre: "", route_group: "", stop_no: "", start_name: ""
     };
   }).filter(r => r.customer_id || r.customer_name);
 }
-
 function buildSalesMap(rows) {
   const map = new Map();
   rows.slice(1).forEach(r => {
@@ -256,77 +209,60 @@ function buildSalesMap(rows) {
   });
   return map;
 }
-
 function enrichSales(rows, salesRows) {
   const salesMap = buildSalesMap(salesRows);
   return rows.map(r => {
     const meter = cleanText(r.meter);
     const type = meter.toUpperCase().includes("TR") ? "TR" : meter.toUpperCase().includes("MT") ? "MT" : "";
     const litre = salesMap.get(`${meter}|${type}`.toLowerCase()) || salesMap.get(`${meter}`.toLowerCase()) || "";
-    return {...r, sales_litre: litre ? litre.toLocaleString("th-TH") : ""};
+    return { ...r, sales_litre: litre ? litre.toLocaleString("th-TH") : "" };
   });
 }
 
 function chooseOnePumpPerMeterCurrentMonth(pumpRows) {
-  // สำคัญ: แสดงเฉพาะปั๊มที่อยู่ในเดือนปัจจุบันเท่านั้น เช่น มิ.ย. ก็เอาเฉพาะ 1-30 มิ.ย.
   const today = thaiNow();
   const monthRows = pumpRows
-    .filter(r => isCurrentMonth(r.dateObj))
+    .filter(r => inCurrentThaiMonth(r.dateObj))
     .filter(r => cleanText(r.status) !== "เสร็จ");
 
   const groups = new Map();
   monthRows.forEach(r => {
-    const key = `${r.bu || "ไม่ระบุ"}|${r.meterKey}|${currentMonthKey()}`;
+    const key = `${r.bu || "ไม่ระบุ"}|${r.meterKey}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(r);
   });
 
   const selected = [];
   groups.forEach(list => {
-    // 1 สาย/BU/เดือน แสดงแค่ 1 ปั๊ม
-    // ถ้ามีวันตั้งแต่วันนี้ขึ้นไป ให้เลือกวันที่ใกล้ที่สุดก่อน
-    // ถ้าเลยวันมาแล้วทั้งเดือน ให้เลือกวันที่ล่าสุดในเดือนนั้น
-    const future = list
-      .filter(x => x.dateObj && x.dateObj >= today)
-      .sort((a,b) => dateSortValue(a.dateObj) - dateSortValue(b.dateObj));
-
-    const latestInCurrentMonth = [...list]
-      .sort((a,b) => dateSortValue(b.dateObj) - dateSortValue(a.dateObj));
-
-    const one = future[0] || latestInCurrentMonth[0];
-    if (one) selected.push(one);
+    const upcoming = list.filter(x => x.dateObj && x.dateObj >= today).sort((a,b) => dateSortValue(a.dateObj) - dateSortValue(b.dateObj));
+    const latest = [...list].sort((a,b) => dateSortValue(b.dateObj) - dateSortValue(a.dateObj));
+    selected.push(upcoming[0] || latest[0]);
   });
 
-  return selected.sort((a,b) => dateSortValue(a.dateObj) - dateSortValue(b.dateObj));
+  return selected.filter(Boolean).sort((a,b) => dateSortValue(a.dateObj) - dateSortValue(b.dateObj));
 }
-
 function haversine(a, b) {
   const R = 6371;
   const lat1 = Number(a.lat) * Math.PI / 180;
   const lat2 = Number(b.lat) * Math.PI / 180;
   const dLat = (Number(b.lat) - Number(a.lat)) * Math.PI / 180;
   const dLng = (Number(b.lng) - Number(a.lng)) * Math.PI / 180;
-  const x = Math.sin(dLat/2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng/2) ** 2;
+  const x = Math.sin(dLat/2)**2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
 }
-
 function nearestStart(point) {
   if (!validCoord(point)) return START_POINTS[0];
-  return START_POINTS
-    .map(s => ({...s, distance: haversine(s, {lat: toNumber(point.lat), lng: toNumber(point.lng)})}))
-    .sort((a,b) => a.distance - b.distance)[0];
+  return START_POINTS.map(s => ({ ...s, distance: haversine(s, { lat: toNumber(point.lat), lng: toNumber(point.lng) }) })).sort((a,b) => a.distance - b.distance)[0];
 }
-
 function orderCircularRoute(start, points) {
   const remaining = points.filter(validCoord).map(p => ({...p}));
   const noCoord = points.filter(p => !validCoord(p));
   const ordered = [];
   let current = { lat: start.lat, lng: start.lng };
   while (remaining.length) {
-    let bestIndex = 0;
-    let bestDistance = Infinity;
+    let bestIndex = 0, bestDistance = Infinity;
     remaining.forEach((p, i) => {
-      const d = haversine(current, {lat: toNumber(p.lat), lng: toNumber(p.lng)});
+      const d = haversine(current, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
       if (d < bestDistance) { bestDistance = d; bestIndex = i; }
     });
     const next = remaining.splice(bestIndex, 1)[0];
@@ -335,46 +271,38 @@ function orderCircularRoute(start, points) {
   }
   return [...ordered, ...noCoord];
 }
-
 function takeByStatusForMeter(marketRows, pump) {
   const sameMeter = marketRows.filter(m => {
     if (m.meterKey !== pump.meterKey) return false;
-    // ถ้ามี BU ตรงกันให้เอา BU เดียวกันก่อน แต่ถ้า BU ของปั๊มเป็น KCG/ไม่ระบุ ให้ยอมให้สายเดียวกันแสดงได้
     if (!pump.bu || pump.bu === "KCG") return true;
     return !m.bu || cleanText(m.bu).toUpperCase() === cleanText(pump.bu).toUpperCase();
   });
-
   const lost = sameMeter.filter(x => ["ลูกค้าหาย", "ลูกค้าหายเกิน 60 วัน"].includes(statusGroup(x.status))).slice(0, 5);
   const risky = sameMeter.filter(x => statusGroup(x.status) === "ลูกค้าเสี่ยงหาย").slice(0, 5);
   const active = sameMeter.filter(x => statusGroup(x.status) === "ลูกค้าซื้อขายประจำ").slice(0, 5);
   const winback = sameMeter.filter(x => statusGroup(x.status) === "ลูกค้าใหม่/Winback").slice(0, 5);
-
   return [...lost, ...risky, ...active, ...winback];
 }
-
 function buildPlannedRows(pumpRows, repairRows, marketRows) {
   const selectedPumps = chooseOnePumpPerMeterCurrentMonth(pumpRows);
   const output = [];
 
   selectedPumps.forEach((pump, groupIndex) => {
     const relatedMarkets = takeByStatusForMeter(marketRows, pump);
-    const routeId = `${groupIndex + 1}. ${pump.bu || "BU-?"} สาย ${pump.meterKey} เดือน ${pump.dateRaw || "ไม่ระบุวันที่"}`;
+    const routeDate = pump.dateObj ? pump.dateObj.toLocaleDateString("th-TH", { day: "numeric", month: "long", year: "2-digit" }) : pump.dateRaw;
+    const routeId = `${pump.bu || "BU-?"} สาย ${pump.meterKey} วันที่ ${routeDate}`;
     const start = nearestStart(pump);
     const ordered = orderCircularRoute(start, [pump, ...relatedMarkets]);
-
-    ordered.forEach((row, idx) => {
-      output.push({
-        ...row,
-        route_group: routeId,
-        stop_no: `${idx + 1}/${ordered.length}`,
-        start_name: start.name,
-        priorityLabel: idx === 0 && row.type === "ปรับปรุงปั๊ม" ? "1-ปรับปรุงปั๊ม" : row.priorityLabel
-      });
-    });
+    ordered.forEach((row, idx) => output.push({
+      ...row,
+      route_group: routeId,
+      stop_no: `${idx + 1}/${ordered.length}`,
+      start_name: start.name,
+      priorityLabel: idx === 0 && row.type === "ปรับปรุงปั๊ม" ? "1-ปรับปรุงปั๊ม" : row.priorityLabel
+    }));
   });
 
-  // ตารางซ่อมแสดงเฉพาะเดือนปัจจุบัน เพื่อให้หน้าแผนเป็นข้อมูลเดือนเดียวกัน
-  const repairs = repairRows.filter(r => isCurrentMonth(r.dateObj)).map(r => ({...r, route_group: "ตารางซ่อม", stop_no: "-", start_name: "-"}));
+  const repairs = repairRows.filter(r => inCurrentThaiMonth(r.dateObj)).map(r => ({ ...r, route_group: "ตารางซ่อมเดือนปัจจุบัน", stop_no: "-", start_name: "-" }));
   return [...output, ...repairs];
 }
 
@@ -382,32 +310,30 @@ async function loadData() {
   const tbody = document.getElementById("resultBody");
   tbody.innerHTML = `<tr><td colspan="18" class="loading">กำลังโหลดข้อมูล...</td></tr>`;
   try {
-    const monthEl = document.getElementById("currentMonthLabel");
-    if (monthEl) monthEl.textContent = thaiMonthYearLabel();
+    document.getElementById("currentMonthLabel").textContent = thaiMonthYearLabel();
     const [pumpRowsRaw, repairRowsRaw, marketRowsRaw, salesRows] = await Promise.all([
       fetchSheetByIndex(SHEET_NAMES.pump),
       fetchSheetByIndex(SHEET_NAMES.repair),
       fetchSheetByIndex(SHEET_NAMES.market),
       fetchSheetByIndex(SHEET_NAMES.sales)
     ]);
-
     const pumpRows = normalizePump(pumpRowsRaw);
     const repairRows = normalizeRepair(repairRowsRaw);
     const marketRows = normalizeMarket(marketRowsRaw);
 
+    // ตารางข้อมูลทั้งหมด: ยังให้ดูทั้งหมดได้ แต่แผนและแผนที่ด้านบนจะถูกล็อกเฉพาะเดือนปัจจุบันเสมอ
     rawRows = enrichSales([...pumpRows, ...repairRows, ...marketRows], salesRows)
       .sort((a,b) => (a.sourceRank - b.sourceRank) || dateSortValue(a.dateObj) - dateSortValue(b.dateObj));
     plannedRows = enrichSales(buildPlannedRows(pumpRows, repairRows, marketRows), salesRows);
+    selectedRouteKey = "";
     renderTable();
   } catch (err) {
     tbody.innerHTML = `<tr><td colspan="18" class="loading">เกิดข้อผิดพลาด: ${escapeHtml(err.message)}</td></tr>`;
   }
 }
-
 function escapeHtml(str) {
   return cleanText(str).replace(/[&<>'"]/g, m => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[m]));
 }
-
 function priorityClass(row) {
   if (row.sourceRank === 1) return "p1";
   if (row.sourceRank === 2) return row.priority <= 202 ? "p1" : "p2";
@@ -419,24 +345,21 @@ function priorityClass(row) {
   }
   return "p4";
 }
-
 function routeToGoogleMapsUrl(list) {
   const valid = list.filter(validCoord);
   if (!valid.length) return "";
   const start = START_POINTS.find(x => x.name === list[0].start_name) || nearestStart(valid[0]);
-  const stops = [{customer_name:start.name, lat:start.lat, lng:start.lng}, ...valid, {customer_name:start.name, lat:start.lat, lng:start.lng}];
+  const stops = [{ customer_name:start.name, lat:start.lat, lng:start.lng }, ...valid, { customer_name:start.name, lat:start.lat, lng:start.lng }];
   const coords = stops.map(p => `${toNumber(p.lat)},${toNumber(p.lng)}`);
-  if (coords.length <= 2) return `https://www.google.com/maps/search/?api=1&query=${coords[0]}`;
   const origin = coords[0];
   const destination = coords[coords.length - 1];
   const waypoints = coords.slice(1, -1).join("|");
   return `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&waypoints=${encodeURIComponent(waypoints)}&travelmode=driving`;
 }
-
-function renderRouteSummary(rows) {
+function renderRouteSummary(planRowsForMonth) {
   const box = document.getElementById("routeSummary");
   const groups = new Map();
-  rows.filter(r => r.route_group && r.route_group !== "ตารางซ่อม").forEach(r => {
+  planRowsForMonth.filter(r => r.route_group && !r.route_group.includes("ตารางซ่อม")).forEach(r => {
     if (!groups.has(r.route_group)) groups.set(r.route_group, []);
     groups.get(r.route_group).push(r);
   });
@@ -445,13 +368,11 @@ function renderRouteSummary(rows) {
   const keys = Array.from(groups.keys());
   if (!keys.length) {
     selectedRouteKey = "";
-    box.innerHTML = `<div class="route-item">เดือน ${escapeHtml(thaiMonthYearLabel())} ยังไม่มีข้อมูลแผนเส้นทางจากตารางปรับปรุงปั๊ม</div>`;
+    box.innerHTML = `<div class="route-item">เดือน ${escapeHtml(thaiMonthYearLabel())} ยังไม่มีข้อมูลปรับปรุงปั๊มสำหรับวางแผน</div>`;
     renderRouteDetail([]);
     return;
   }
-
   if (!selectedRouteKey || !groups.has(selectedRouteKey)) selectedRouteKey = keys[0];
-
   box.innerHTML = keys.map((name, idx) => {
     const list = groups.get(name);
     const first = list[0];
@@ -459,17 +380,12 @@ function renderRouteSummary(rows) {
     const active = name === selectedRouteKey ? " active" : "";
     return `<button class="route-item route-button${active}" data-route-key="${escapeHtml(name)}" type="button"><strong>${idx + 1}. ${escapeHtml(name)}</strong><br><span>เริ่ม: ${escapeHtml(first.start_name || "-")}</span><br><small>${escapeHtml(routeNames)} → ${escapeHtml(first.start_name || "จุดเริ่มต้น")}</small></button>`;
   }).join("");
-
-  box.querySelectorAll(".route-button").forEach(btn => {
-    btn.addEventListener("click", () => {
-      selectedRouteKey = btn.dataset.routeKey;
-      renderRouteSummary(rows);
-    });
-  });
-
+  box.querySelectorAll(".route-button").forEach(btn => btn.addEventListener("click", () => {
+    selectedRouteKey = btn.dataset.routeKey;
+    renderRouteSummary(plannedRows);
+  }));
   renderRouteDetail(groups.get(selectedRouteKey) || []);
 }
-
 function renderRouteDetail(list) {
   const detail = document.getElementById("routeDetail");
   if (!list.length) {
@@ -477,21 +393,17 @@ function renderRouteDetail(list) {
     renderMap([]);
     return;
   }
-
   const start = START_POINTS.find(x => x.name === list[0].start_name) || nearestStart(list[0]);
   const googleUrl = routeToGoogleMapsUrl(list);
   const rows = list.map((r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.customer_name || "-")}</td><td>${escapeHtml(r.type || "-")}</td><td>${escapeHtml(r.status || "-")}</td><td>${escapeHtml(r.lat || "-")}, ${escapeHtml(r.lng || "-")}</td></tr>`).join("");
-
   detail.innerHTML = `
     <div class="detail-head">
       <div><h3>${escapeHtml(selectedRouteKey)}</h3><p>จุดเริ่มต้น/วนกลับ: <strong>${escapeHtml(start.name)}</strong></p></div>
       ${googleUrl ? `<a class="map-link" href="${googleUrl}" target="_blank" rel="noopener">เปิดเส้นทางใน Google Maps</a>` : ""}
     </div>
-    <div class="detail-table-wrap"><table class="detail-table"><thead><tr><th>ลำดับ</th><th>ชื่อปั๊ม/ลูกค้า</th><th>ประเภท</th><th>สถานะ</th><th>พิกัด</th></tr></thead><tbody>${rows}</tbody></table></div>
-  `;
+    <div class="detail-table-wrap"><table class="detail-table"><thead><tr><th>ลำดับ</th><th>ชื่อปั๊ม/ลูกค้า</th><th>ประเภท</th><th>สถานะ</th><th>พิกัด</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   renderMap(list);
 }
-
 function renderMap(list) {
   const mapEl = document.getElementById("routeMap");
   if (!window.L) {
@@ -500,41 +412,37 @@ function renderMap(list) {
   }
   if (!routeMap) {
     routeMap = L.map("routeMap");
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19,
-      attribution: "&copy; OpenStreetMap"
-    }).addTo(routeMap);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(routeMap);
   }
   if (routeLayer) routeLayer.remove();
   routeLayer = L.layerGroup().addTo(routeMap);
-
   const valid = list.filter(validCoord);
   if (!valid.length) {
     routeMap.setView([16.5, 103.8], 8);
+    setTimeout(() => routeMap.invalidateSize(), 200);
     return;
   }
-
   const start = START_POINTS.find(x => x.name === list[0].start_name) || nearestStart(valid[0]);
-  const points = [{...start, customer_name:start.name, type:"จุดเริ่มต้น", status:"เริ่ม/กลับ"}, ...valid, {...start, customer_name:start.name, type:"จุดเริ่มต้น", status:"วนกลับ"}];
+  const points = [{ ...start, customer_name:start.name, type:"จุดเริ่มต้น", status:"เริ่ม/กลับ" }, ...valid, { ...start, customer_name:start.name, type:"จุดเริ่มต้น", status:"วนกลับ" }];
   const latlngs = points.map(p => [toNumber(p.lat), toNumber(p.lng)]);
-
-  L.polyline(latlngs, { weight: 4 }).addTo(routeLayer);
+  L.polyline(latlngs, { weight: 5 }).addTo(routeLayer);
   points.forEach((p, idx) => {
     const label = idx === 0 ? "เริ่ม" : idx === points.length - 1 ? "กลับ" : String(idx);
     L.marker([toNumber(p.lat), toNumber(p.lng)]).addTo(routeLayer)
       .bindPopup(`<strong>${label}. ${escapeHtml(p.customer_name || p.name || "-")}</strong><br>${escapeHtml(p.type || "-")}<br>${escapeHtml(p.status || "-")}`);
   });
-
-  routeMap.fitBounds(latlngs, { padding: [28, 28] });
-  setTimeout(() => routeMap.invalidateSize(), 150);
+  routeMap.fitBounds(latlngs, { padding: [30, 30] });
+  setTimeout(() => routeMap.invalidateSize(), 250);
 }
-
 function renderTable() {
   const search = cleanText(document.getElementById("searchBox").value).toLowerCase();
   const type = cleanText(document.getElementById("typeFilter").value);
   const status = cleanText(document.getElementById("statusFilter").value).toLowerCase();
   const showAll = document.getElementById("showAllToggle").checked;
   const tbody = document.getElementById("resultBody");
+
+  // สำคัญ: การ์ดแผนและแผนที่ด้านบนใช้ plannedRows เท่านั้น จึงไม่มีเดือนอื่นหลุดขึ้นมา
+  renderRouteSummary(plannedRows);
 
   let rows = showAll ? rawRows : plannedRows;
   rows = rows.filter(r => {
@@ -547,58 +455,32 @@ function renderTable() {
   document.getElementById("sumRepair").textContent = rows.filter(r => r.type === "ซ่อม").length;
   document.getElementById("sumMarket").textContent = rows.filter(r => r.type === "พื้นที่ออกตลาด").length;
 
-  renderRouteSummary(showAll ? plannedRows : rows);
-
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="18" class="loading">ไม่พบข้อมูลตามเงื่อนไข</td></tr>`;
     return;
   }
-
   tbody.innerHTML = rows.map((r,i) => `
     <tr>
-      <td>${i + 1}</td>
-      <td>${escapeHtml(r.stop_no) || "-"}</td>
-      <td>${escapeHtml(r.start_name) || "-"}</td>
-      <td><span class="badge ${priorityClass(r)}">${escapeHtml(r.priorityLabel)}</span></td>
-      <td>${escapeHtml(r.type)}</td>
-      <td>${escapeHtml(r.dateRaw) || "-"}</td>
-      <td>${escapeHtml(r.customer_id) || "-"}</td>
-      <td>${escapeHtml(r.customer_name) || "-"}</td>
-      <td>${escapeHtml(r.status) || "-"}</td>
-      <td>${escapeHtml(r.bu) || "-"}</td>
-      <td>${escapeHtml(r.meter) || "-"}</td>
-      <td>${escapeHtml(r.area) || "-"}</td>
-      <td>${escapeHtml(r.purpose) || "-"}</td>
-      <td>${escapeHtml(r.coordinator) || "-"}</td>
-      <td>${escapeHtml(r.phone) || "-"}</td>
-      <td>${escapeHtml(r.sales_litre) || "-"}</td>
-      <td>${escapeHtml(r.lat) || "-"}</td>
-      <td>${escapeHtml(r.lng) || "-"}</td>
-    </tr>
-  `).join("");
+      <td>${i + 1}</td><td>${escapeHtml(r.stop_no) || "-"}</td><td>${escapeHtml(r.start_name) || "-"}</td>
+      <td><span class="badge ${priorityClass(r)}">${escapeHtml(r.priorityLabel)}</span></td><td>${escapeHtml(r.type)}</td><td>${escapeHtml(r.dateRaw) || "-"}</td>
+      <td>${escapeHtml(r.customer_id) || "-"}</td><td>${escapeHtml(r.customer_name) || "-"}</td><td>${escapeHtml(r.status) || "-"}</td><td>${escapeHtml(r.bu) || "-"}</td>
+      <td>${escapeHtml(r.meter) || "-"}</td><td>${escapeHtml(r.area) || "-"}</td><td>${escapeHtml(r.purpose) || "-"}</td><td>${escapeHtml(r.coordinator) || "-"}</td>
+      <td>${escapeHtml(r.phone) || "-"}</td><td>${escapeHtml(r.sales_litre) || "-"}</td><td>${escapeHtml(r.lat) || "-"}</td><td>${escapeHtml(r.lng) || "-"}</td>
+    </tr>`).join("");
 }
-
 async function saveForm(e) {
   e.preventDefault();
   const status = document.getElementById("saveStatus");
   const data = Object.fromEntries(new FormData(e.target).entries());
-
   if (WEB_APP_URL.includes("PUT_YOUR")) {
     status.textContent = "กรุณาใส่ Web App URL ในไฟล์ script.js ก่อน";
     status.style.color = "#dc2626";
     return;
   }
-
   status.textContent = "กำลังบันทึกข้อมูล...";
   status.style.color = "#92400e";
-
   try {
-    await fetch(WEB_APP_URL, {
-      method: "POST",
-      mode: "no-cors",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify(data)
-    });
+    await fetch(WEB_APP_URL, { method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify(data) });
     status.textContent = "บันทึกข้อมูลเรียบร้อยแล้ว";
     status.style.color = "#166534";
     e.target.reset();
@@ -614,5 +496,4 @@ document.getElementById("typeFilter").addEventListener("change", renderTable);
 document.getElementById("statusFilter").addEventListener("change", renderTable);
 document.getElementById("showAllToggle").addEventListener("change", renderTable);
 document.getElementById("reloadBtn").addEventListener("click", loadData);
-
 loadData();
