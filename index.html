@@ -4,14 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ระบบวางแผนออกตลาด KCE</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <link rel="stylesheet" href="style.css?v=20260614-02" />
 </head>
 <body>
   <header class="app-header">
     <div>
       <h1>ระบบวางแผนออกตลาด KCE</h1>
-      <p>แสดงแผนเฉพาะเดือนปัจจุบัน: ปรับปรุงปั๊ม 1 จุด/สาย/เดือน → ลูกค้าหาย → เสี่ยงหาย 5 จุด → ซื้อขายประจำ 5 จุด → แผนที่เส้นทางวนกลับจุดเริ่มต้น</p>
+      <p>แสดงเฉพาะแผนของเดือนปัจจุบัน: ปรับปรุงปั๊ม 1 จุด/สาย/BU/เดือน → ลูกค้าสายเดียวกัน → เส้นทางวนกลับจุดเริ่มต้น</p>
     </div>
     <button id="reloadBtn" type="button">รีเฟรชข้อมูล</button>
   </header>
@@ -26,13 +26,14 @@
   <section class="route-card">
     <div>
       <h2>แผนเส้นทางแบบวงกลม</h2>
-      <p>ระบบจะแสดงเฉพาะแผนของเดือนปัจจุบันตามวันที่จริง และเลือกจุดเริ่มต้นที่ใกล้ที่สุดจาก 4 จุด</p>
+      <p>ระบบแสดงเฉพาะเดือนปัจจุบันตามวันที่จริง และเลือกจุดเริ่มต้นที่ใกล้ที่สุดจาก 4 จุด</p>
       <p class="month-note">เดือนที่แสดง: <strong id="currentMonthLabel">-</strong></p>
     </div>
     <label class="check-inline">
       <input id="showAllToggle" type="checkbox" />
       แสดงข้อมูลทั้งหมด ไม่ตัดเหลือเฉพาะแผน
     </label>
+
     <div id="routeSummary" class="route-summary"></div>
     <div id="routeDetail" class="route-detail">คลิกการ์ดแผนเส้นทางด้านบน เพื่อดูรายละเอียดและแผนที่</div>
     <div id="routeMap" class="route-map"></div>
@@ -90,33 +91,16 @@
     <table>
       <thead>
         <tr>
-          <th>ลำดับ</th>
-          <th>ลำดับวิ่ง</th>
-          <th>จุดเริ่มต้น</th>
-          <th>ความสำคัญ</th>
-          <th>ประเภท</th>
-          <th>วันนัดหมาย</th>
-          <th>รหัสลูกค้า</th>
-          <th>ชื่อลูกค้า/ชื่อปั๊ม</th>
-          <th>สถานะ</th>
-          <th>BU</th>
-          <th>สายมิเตอร์</th>
-          <th>พื้นที่</th>
-          <th>งาน/วัตถุประสงค์</th>
-          <th>ผู้ประสานงาน</th>
-          <th>เบอร์โทร</th>
-          <th>ยอดขายลิตร</th>
-          <th>ละ</th>
-          <th>ลอง</th>
+          <th>ลำดับ</th><th>ลำดับวิ่ง</th><th>จุดเริ่มต้น</th><th>ความสำคัญ</th><th>ประเภท</th><th>วันนัดหมาย</th>
+          <th>รหัสลูกค้า</th><th>ชื่อลูกค้า/ชื่อปั๊ม</th><th>สถานะ</th><th>BU</th><th>สายมิเตอร์</th><th>พื้นที่</th>
+          <th>งาน/วัตถุประสงค์</th><th>ผู้ประสานงาน</th><th>เบอร์โทร</th><th>ยอดขายลิตร</th><th>ละ</th><th>ลอง</th>
         </tr>
       </thead>
-      <tbody id="resultBody">
-        <tr><td colspan="18" class="loading">กำลังโหลดข้อมูล...</td></tr>
-      </tbody>
+      <tbody id="resultBody"><tr><td colspan="18" class="loading">กำลังโหลดข้อมูล...</td></tr></tbody>
     </table>
   </main>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="script.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="script.js?v=20260614-02"></script>
 </body>
 </html>
