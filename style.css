@@ -81,9 +81,16 @@ tr:nth-child(even) td { background:#f9fafb; }
 @media (max-width:900px){ .checkin-btn{width:100%;} }
 
 
-/* ===== Final route/table fixes 20260615-06 ===== */
+/* ===== Final route/table fixes 20260615-08 ===== */
 .route-metrics { margin-top:6px !important; color:#166534 !important; font-weight:700; }
 .table-wrap { max-height:70vh; overflow:auto; }
 .table-wrap table thead th { position:sticky; top:0; z-index:10; box-shadow:0 1px 0 rgba(255,255,255,.2); }
 .detail-table th { position:static !important; top:auto !important; }
 @media (max-width:900px){ .table-wrap{max-height:65vh;} }
+
+
+/* ===== Daily planning + check-in 100m update ===== */
+.plan-controls { display:grid; grid-template-columns:220px 180px; gap:10px; margin-top:10px; }
+.plan-controls label { color:#0f172a; font-weight:700; font-size:13px; }
+.plan-controls select { margin-top:5px; }
+@media (max-width:900px){ .plan-controls{grid-template-columns:1fr;} }
