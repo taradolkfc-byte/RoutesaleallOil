@@ -234,6 +234,12 @@ function isVisited(row) {
   const name = norm(row.customer_name);
   return (id && visitedSet.ids.has(id)) || (name && visitedSet.names.has(name));
 }
+function isCompleted(row) {
+  return isVisited(row);
+}
+function completedLabel(row) {
+  return isCompleted(row) ? "✓ เข้าบริการแล้ว" : "รอเข้าบริการ";
+}
 function buildVisitedSet(savedRows) {
   const ids = new Set();
   const names = new Set();
@@ -326,7 +332,7 @@ function chooseOnePumpPerMeterCurrentMonth(pumpRows) {
   const monthRows = pumpRows
     .filter(r => inCurrentThaiMonth(r.dateObj))
     .filter(r => cleanText(r.status) !== "เสร็จ")
-    .filter(r => !isVisited(r));
+    /* แสดงจุดที่เช็คอินสำเร็จไว้ในแผน เพื่อให้ขึ้นเครื่องหมายถูก */;
 
   const groups = new Map();
   monthRows.forEach(r => {
@@ -510,9 +516,41 @@ function movePointToEnd(order, movingKeywords) {
   return next;
 }
 
+function applyPreferredSequence(order, keywordGroups) {
+  const remaining = [...order];
+  const picked = [];
+  keywordGroups.forEach(words => {
+    const idx = remaining.findIndex(p => hasAllKeywords(p, words));
+    if (idx >= 0) picked.push(remaining.splice(idx, 1)[0]);
+  });
+  // ใช้ลำดับเฉพาะเมื่อเจอจุดในกติกาอย่างน้อย 4 จุด เพื่อไม่ไปรบกวนสายอื่น
+  if (picked.length < 4) return order;
+  return [...picked, ...remaining];
+}
+
 function applyRouteBusinessRules(order) {
   // กติกาหน้างานเฉพาะพื้นที่ที่แจ้งมา เพื่อให้ไม่ย้อนกลับมาเก็บจุดเดิม
   let next = [...order];
+
+  // ลำดับตัวอย่างที่ผู้ใช้ยืนยันว่าเหมาะสมสำหรับ ST สาย 55 / พื้นที่กมลาไสย-ร่องคำ-โพธิ์ชัย
+  next = applyPreferredSequence(next, [
+    ["กองทุน", "นาเรียง"],
+    ["ปั้มสุดที"],
+    ["เกษตรสมบูรณ์"],
+    ["หจก", "สินธุ์ชัยไอซ์"],
+    ["แม่พันธ์"],
+    ["สมพอง"],
+    ["บุญจันทร์"],
+    ["พิมลรัตน์"],
+    ["ยิ่งเจริญ"],
+    ["เกียรติประภัส"],
+    ["ด่านใต้"],
+    ["โนนเมือง"],
+    ["จอยบริการ"],
+    ["บจก", "สินธุ์ชัยไอซ์"],
+    ["หนองตอกแป้น"],
+    ["กลุ่มทำนาหลักเมือง"]
+  ]);
 
   // สินธุ์ชัยไอซ์ -> สถานีบริการน้ำมัน 6J9Q+RWF
   next = movePointAfter(next, ["สินธุ์ชัยไอซ์"], ["6J9Q"]);
@@ -555,7 +593,7 @@ function takeByStatusForMeter(marketRows, pump) {
   const sameMeter = marketRows
     .filter(m => m.meterKey === pump.meterKey)
     .filter(m => !selectedBU || cleanText(m.bu).toUpperCase() === selectedBU.toUpperCase())
-    .filter(m => !isVisited(m))
+    /* แสดงจุดที่เช็คอินสำเร็จไว้ในแผน เพื่อให้ขึ้นเครื่องหมายถูก */
     .filter(m => {
       if (!pump.bu || pump.bu === "KCG") return true;
       return !m.bu || cleanText(m.bu).toUpperCase() === cleanText(pump.bu).toUpperCase();
@@ -594,7 +632,7 @@ function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
 
   const repairs = repairRows
     .filter(r => inCurrentThaiMonth(r.dateObj))
-    .filter(r => !isVisited(r))
+    /* แสดงจุดที่เช็คอินสำเร็จไว้ในแผน เพื่อให้ขึ้นเครื่องหมายถูก */
     .map(r => ({ ...r, plan_day: 1, plan_date: r.dateObj || thaiNow(), route_group: "ตารางซ่อมเดือนปัจจุบัน", stop_no: "-", start_name: "-" }));
   return [...output, ...repairs];
 }
@@ -604,7 +642,7 @@ function buildNormalPlanRows(marketRows, planDays) {
   const selectedBU = getSelectedStartBU();
   const candidates = marketRows
     .filter(r => !selectedBU || cleanText(r.bu).toUpperCase() === selectedBU.toUpperCase())
-    .filter(r => !isVisited(r))
+    /* แสดงจุดที่เช็คอินสำเร็จไว้ในแผน เพื่อให้ขึ้นเครื่องหมายถูก */
     .filter(validCoord)
     .sort((a,b) => (marketScore(a.status) - marketScore(b.status)) || cleanText(a.bu).localeCompare(cleanText(b.bu), "th") || cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), "th"));
 
@@ -666,7 +704,7 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
   // ตารางซ่อม: ดึง “ทุกจุดซ่อมของเดือนปัจจุบัน” ออกมา ไม่จำกัดเหลือแค่จุดแรก
   // ถ้าเลือกจุดเริ่ม ระบบจะกรองเฉพาะ BU ของจุดเริ่มนั้น เช่น สามทองบริการ = ST
   let candidates = repairRows
-    .filter(r => !isVisited(r))
+    /* แสดงจุดที่เช็คอินสำเร็จไว้ในแผน เพื่อให้ขึ้นเครื่องหมายถูก */
     .filter(validCoord)
     .filter(r => inCurrentThaiMonth(r.dateObj))
     .map(r => {
@@ -835,12 +873,18 @@ function renderRouteDetail(list) {
   const googleUrl = routeToGoogleMapsUrl(list);
   const displayList = routeDisplayStops(list);
   const hiddenCount = Math.max(0, list.filter(validCoord).length - displayList.length);
-  const rows = displayList.map((r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.customer_name || "-")}</td><td>${escapeHtml(r.type || "-")}</td><td>${escapeHtml(r.status || "-")}</td><td>${escapeHtml(r.lat || "-")}, ${escapeHtml(r.lng || "-")}</td></tr>`).join("");
+  const doneCount = displayList.filter(isCompleted).length;
+  const remainCount = Math.max(0, displayList.length - doneCount);
+  const rows = displayList.map((r, i) => {
+    const done = isCompleted(r);
+    return `<tr class="${done ? "done-row" : ""}"><td>${done ? "✓" : i + 1}</td><td>${escapeHtml(r.customer_name || "-")}</td><td>${escapeHtml(r.type || "-")}</td><td>${escapeHtml(r.status || "-")}<br><span class="visit-state ${done ? "done" : "pending"}">${completedLabel(r)}</span></td><td>${escapeHtml(r.lat || "-")}, ${escapeHtml(r.lng || "-")}</td></tr>`;
+  }).join("");
   detail.innerHTML = `
     <div class="detail-head">
       <div>
         <h3>${escapeHtml(selectedRouteKey)}</h3>
         <p>จุดเริ่มต้น/วนกลับ: <strong>${escapeHtml(start.name)}</strong></p>
+        <p class="route-check-summary">เข้ารับบริการแล้ว <strong>${doneCount}</strong> จุด • คงเหลือ <strong>${remainCount}</strong> จุด</p>
         <p id="routeMetrics" class="route-metrics">กำลังคำนวณเส้นทางตามถนนจริง...</p>
       </div>
       ${googleUrl ? `<a class="map-link" href="${googleUrl}" target="_blank" rel="noopener">เปิดเส้นทางจริง/เวลาที่ดีที่สุดใน Google Maps</a>` : ""}
@@ -857,6 +901,15 @@ function makeNumberIcon(number, variant = "normal") {
     iconSize: [30, 30],
     iconAnchor: [15, 15],
     popupAnchor: [0, -15]
+  });
+}
+function makeDoneIcon() {
+  return L.divIcon({
+    className: "route-done-icon",
+    html: `<span>✓</span>`,
+    iconSize: [32, 32],
+    iconAnchor: [16, 16],
+    popupAnchor: [0, -16]
   });
 }
 function makeStartIcon(label) {
@@ -933,7 +986,7 @@ async function renderMap(list) {
     const label = idx === 0 ? "เริ่ม" : idx === points.length - 1 ? "กลับ" : String(idx);
     const icon = isStart
       ? makeStartIcon(idx === 0 ? "เริ่ม" : "กลับ")
-      : makeNumberIcon(idx, isFocusStop(p) ? "focus" : "normal");
+      : (isCompleted(p) ? makeDoneIcon() : makeNumberIcon(idx, isFocusStop(p) ? "focus" : "normal"));
     L.marker([toNumber(p.lat), toNumber(p.lng)], { icon }).addTo(routeLayer)
       .bindPopup(`<strong>${label}. ${escapeHtml(p.customer_name || p.name || "-")}</strong><br>${escapeHtml(p.type || "-")}<br>${escapeHtml(p.status || "-")}`);
   });
@@ -948,7 +1001,9 @@ async function renderMap(list) {
       L.polyline(routed.latlngs, { weight: 5 }).addTo(routeLayer);
       routeMap.fitBounds(routed.latlngs, { padding: [30, 30] });
       if (metricsEl) {
-        metricsEl.textContent = `แสดงจุด ${validStops.length} จุด ตรงกับ Google Maps • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (จำกัด Map/Google Maps ไม่เกิน ${MAX_ROUTE_CUSTOMER_STOPS} จุด)`;
+        const done = validStops.filter(isCompleted).length;
+        const remain = Math.max(0, validStops.length - done);
+        metricsEl.textContent = `แสดงจุด ${validStops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (จำกัด Map/Google Maps ไม่เกิน ${MAX_ROUTE_CUSTOMER_STOPS} จุด)`;
       }
       return;
     }
@@ -985,8 +1040,8 @@ function renderTable() {
     return;
   }
   tbody.innerHTML = rows.map((r,i) => `
-    <tr>
-      <td>${i + 1}</td><td>${escapeHtml(r.stop_no) || "-"}</td><td>${escapeHtml(r.start_name) || "-"}</td>
+    <tr class="${isCompleted(r) ? "done-row" : ""}">
+      <td>${i + 1}</td><td>${isCompleted(r) ? "✓" : (escapeHtml(r.stop_no) || "-")}</td><td>${escapeHtml(r.start_name) || "-"}</td>
       <td><span class="badge ${priorityClass(r)}">${escapeHtml(r.priorityLabel)}</span></td><td>${escapeHtml(r.type)}</td><td>${escapeHtml(r.dateRaw) || "-"}</td>
       <td>${escapeHtml(r.customer_id) || "-"}</td><td>${escapeHtml(r.customer_name) || "-"}</td><td>${escapeHtml(r.status) || "-"}</td><td>${escapeHtml(r.bu) || "-"}</td>
       <td>${escapeHtml(r.meter) || "-"}</td><td>${escapeHtml(r.area) || "-"}</td><td>${escapeHtml(r.purpose) || "-"}</td><td>${escapeHtml(r.coordinator) || "-"}</td>
