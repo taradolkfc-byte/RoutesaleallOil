@@ -572,112 +572,50 @@ function applyRouteBusinessRules(order) {
 }
 
 
+
 function routeDistanceFast(start, order) {
   return routeDistanceFromStart(start, order);
 }
 
-function relocateOptimizeClosedRoute(start, order) {
-  if (order.length < 3) return order;
-  let best = order.map(p => ({ ...p }));
-  let bestDistance = routeDistanceFast(start, best);
-  let improved = true;
-  let guard = 0;
-  while (improved && guard < 100) {
-    improved = false;
-    guard++;
-    outer:
-    for (let from = 0; from < best.length; from++) {
-      const picked = best[from];
-      const without = [...best.slice(0, from), ...best.slice(from + 1)];
-      for (let to = 0; to <= without.length; to++) {
-        if (to === from || to === from + 1) continue;
-        const candidate = [...without.slice(0, to), picked, ...without.slice(to)];
-        const d = routeDistanceFast(start, candidate);
-        if (d + 0.001 < bestDistance) {
-          best = candidate;
-          bestDistance = d;
-          improved = true;
-          break outer;
-        }
-      }
-    }
-  }
-  return best;
-}
+function circularSweepClosedOrder(start, points) {
+  // วางเส้นทางแบบ “วงกลม” รอบกลุ่มลูกค้า ไม่ใช้ TSP แบบกระโดดข้ามไปมา
+  // เป้าหมาย: ลดการย้อนกลับมาเก็บจุดย้อนหลัง และให้ลำดับอ่านง่ายเหมือนวิ่งวนรอบพื้นที่
+  const valid = points.filter(validCoord).map(p => ({ ...p }));
+  if (valid.length <= 2) return valid;
 
-function segmentRelocateOptimizeClosedRoute(start, order) {
-  if (order.length < 5) return order;
-  let best = order.map(p => ({ ...p }));
-  let bestDistance = routeDistanceFast(start, best);
-  let improved = true;
-  let guard = 0;
-  while (improved && guard < 60) {
-    improved = false;
-    guard++;
-    outer:
-    for (let len = 2; len <= Math.min(4, best.length - 1); len++) {
-      for (let from = 0; from <= best.length - len; from++) {
-        const segment = best.slice(from, from + len);
-        const without = [...best.slice(0, from), ...best.slice(from + len)];
-        for (let to = 0; to <= without.length; to++) {
-          const candidate = [...without.slice(0, to), ...segment, ...without.slice(to)];
-          const d = routeDistanceFast(start, candidate);
-          if (d + 0.001 < bestDistance) {
-            best = candidate;
-            bestDistance = d;
-            improved = true;
-            break outer;
-          }
-        }
-      }
-    }
-  }
-  return best;
-}
+  const center = {
+    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
+    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
+  };
 
-function improveRouteFreely(start, order) {
-  // ปรับแบบอิสระ: อนุญาตให้วิ่งเส้นเดิม/เส้นใหม่ได้หมด เป้าหมายคือระยะรวมสั้นที่สุด
-  let best = twoOptClosedRoute(start, order);
-  best = relocateOptimizeClosedRoute(start, best);
-  best = segmentRelocateOptimizeClosedRoute(start, best);
-  best = twoOptClosedRoute(start, best);
-  best = relocateOptimizeClosedRoute(start, best);
-  return best;
-}
+  const withAngle = valid.map(p => ({
+    ...p,
+    __angle: Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng)
+  }));
 
-function buildFreeRouteCandidates(start, validPoints) {
-  const pts = validPoints.map(p => ({ ...p }));
+  const clockwise = [...withAngle].sort((a, b) => a.__angle - b.__angle);
+  const counterClockwise = [...clockwise].reverse();
   const candidates = [];
-  candidates.push(nearestNeighborOrder(start, pts));
-  candidates.push(farthestInsertionOrder(start, pts));
-  candidates.push(...angularSweepOrders(pts));
 
-  // ลองเริ่มจากจุดแรกหลายแบบ แล้วปล่อย nearest-neighbor ต่อ เพื่อเลี่ยงเส้นทางอ้อมจาก seed แรก
-  pts.forEach(seed => {
-    const remaining = pts.filter(p => p !== seed);
-    const ordered = [seed];
-    let current = { lat: toNumber(seed.lat), lng: toNumber(seed.lng) };
-    const rem = remaining.map(p => ({ ...p }));
-    while (rem.length) {
-      let bestIndex = 0;
-      let bestDistance = Infinity;
-      rem.forEach((p, i) => {
-        const d = haversine(current, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
-        if (d < bestDistance) { bestDistance = d; bestIndex = i; }
-      });
-      const next = rem.splice(bestIndex, 1)[0];
-      ordered.push(next);
-      current = { lat: toNumber(next.lat), lng: toNumber(next.lng) };
+  [clockwise, counterClockwise].forEach(base => {
+    for (let i = 0; i < base.length; i++) {
+      const rotated = [...base.slice(i), ...base.slice(0, i)].map(({ __angle, ...p }) => p);
+      candidates.push(rotated);
     }
-    candidates.push(ordered);
   });
 
-  // เรียงตามแกนภูมิศาสตร์หลายแบบเป็น seed เพิ่มเติม
-  candidates.push([...pts].sort((a, b) => toNumber(a.lat) - toNumber(b.lat)));
-  candidates.push([...pts].sort((a, b) => toNumber(b.lat) - toNumber(a.lat)));
-  candidates.push([...pts].sort((a, b) => toNumber(a.lng) - toNumber(b.lng)));
-  candidates.push([...pts].sort((a, b) => toNumber(b.lng) - toNumber(a.lng)));
-  return candidates;
+  // เลือกวงที่มีระยะรวมสั้นที่สุด แต่ยังรักษาลำดับแบบวนรอบพื้นที่
+  return candidates.sort((a, b) => routeDistanceFromStart(start, a) - routeDistanceFromStart(start, b))[0] || valid;
+}
+
+function improveCircularRouteLight(start, order) {
+  // ปรับเฉพาะเล็กน้อยแบบไม่ทำให้เส้นทางกระโดดแปลก: ลองกลับทิศทาง และหมุนจุดเริ่มในวงเท่านั้น
+  if (order.length <= 2) return order;
+  const variants = [];
+  [order, [...order].reverse()].forEach(base => {
+    for (let i = 0; i < base.length; i++) variants.push([...base.slice(i), ...base.slice(0, i)]);
+  });
+  return variants.sort((a, b) => routeDistanceFromStart(start, a) - routeDistanceFromStart(start, b))[0] || order;
 }
 
 function orderCircularRoute(start, points) {
@@ -685,12 +623,10 @@ function orderCircularRoute(start, points) {
   const noCoord = points.filter(p => !validCoord(p));
   if (validPoints.length <= 2) return [...validPoints, ...noCoord];
 
-  // โหมดใหม่: วางแผนแบบอิสระ ไม่บังคับกติกาตายตัว เพื่อหาระยะใกล้สุด/เวลาสั้นสุดมากกว่าเดิม
-  const candidates = buildFreeRouteCandidates(start, validPoints)
-    .filter(order => order && order.length)
-    .map(order => improveRouteFreely(start, order));
-
-  const best = candidates.sort((a, b) => routeDistanceFromStart(start, a) - routeDistanceFromStart(start, b))[0] || validPoints;
+  // กลับไปใช้เงื่อนไข “วิ่งเป็นวงกลม” ตามที่ต้องการ ไม่บังคับจุดใกล้เป็นจุดแรก
+  // ระบบจะเลือกทิศทางวนและจุดเริ่มของวงที่ใกล้ที่สุดจากจุดเริ่มต้น/วนกลับ
+  let best = circularSweepClosedOrder(start, validPoints);
+  best = improveCircularRouteLight(start, best);
   return [...best, ...noCoord];
 }
 function takeByStatusForMeter(marketRows, pump) {
@@ -924,75 +860,15 @@ function getRouteStartForList(list) {
   return START_POINTS.find(x => x.name === (list[0] && list[0].start_name)) || bestStartForRoute(valid);
 }
 
-function exactShortestClosedOrder(start, stops) {
-  const points = stops.filter(validCoord).map(p => ({ ...p }));
-  const n = points.length;
-  if (n <= 2) return points;
-  if (n > 10) return improveRouteFreely(start, points);
-
-  const distStart = points.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
-  const dist = Array.from({ length: n }, (_, i) =>
-    Array.from({ length: n }, (_, j) => i === j ? 0 : haversine(
-      { lat: toNumber(points[i].lat), lng: toNumber(points[i].lng) },
-      { lat: toNumber(points[j].lat), lng: toNumber(points[j].lng) }
-    ))
-  );
-
-  const size = 1 << n;
-  const dp = Array.from({ length: size }, () => Array(n).fill(Infinity));
-  const parent = Array.from({ length: size }, () => Array(n).fill(-1));
-  for (let i = 0; i < n; i++) dp[1 << i][i] = distStart[i];
-
-  for (let mask = 1; mask < size; mask++) {
-    for (let last = 0; last < n; last++) {
-      const base = dp[mask][last];
-      if (!Number.isFinite(base)) continue;
-      for (let next = 0; next < n; next++) {
-        if (mask & (1 << next)) continue;
-        const nextMask = mask | (1 << next);
-        const nd = base + dist[last][next];
-        if (nd < dp[nextMask][next]) {
-          dp[nextMask][next] = nd;
-          parent[nextMask][next] = last;
-        }
-      }
-    }
-  }
-
-  const full = size - 1;
-  let bestLast = 0;
-  let bestDistance = Infinity;
-  for (let last = 0; last < n; last++) {
-    const total = dp[full][last] + distStart[last];
-    if (total < bestDistance) {
-      bestDistance = total;
-      bestLast = last;
-    }
-  }
-
-  const orderIdx = [];
-  let mask = full;
-  let cur = bestLast;
-  while (cur >= 0) {
-    orderIdx.push(cur);
-    const prev = parent[mask][cur];
-    mask ^= (1 << cur);
-    cur = prev;
-  }
-  orderIdx.reverse();
-  return orderIdx.map(i => points[i]);
-}
 
 function optimizeStopsForDisplay(list) {
+  // Map และ Google Maps ใช้จุดชุดเดียวกัน และเรียงแบบวงกลมเหมือนตารางแผน
   const valid = list.filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
-  const noCoord = list.filter(p => !validCoord(p));
   if (!valid.length) return [];
   const start = getRouteStartForList(list);
-  const optimized = exactShortestClosedOrder(start, valid);
-  return optimized;
+  return orderCircularRoute(start, valid);
 }
 function routeDisplayStops(list) {
-  // ใช้ TSP แบบ Exact สำหรับจุดที่แสดงบน Map/Google Maps เพื่อเลือกลำดับที่สั้นที่สุดมากกว่า nearest-neighbor
   return optimizeStopsForDisplay(list);
 }
 function routeNavPoints(list) {
