@@ -917,13 +917,88 @@ function isFocusStop(row) {
   const focusType = currentFocusType();
   return cleanText(row.type) === focusType;
 }
+
+
+function getRouteStartForList(list) {
+  const valid = list.filter(validCoord);
+  return START_POINTS.find(x => x.name === (list[0] && list[0].start_name)) || bestStartForRoute(valid);
+}
+
+function exactShortestClosedOrder(start, stops) {
+  const points = stops.filter(validCoord).map(p => ({ ...p }));
+  const n = points.length;
+  if (n <= 2) return points;
+  if (n > 10) return improveRouteFreely(start, points);
+
+  const distStart = points.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const dist = Array.from({ length: n }, (_, i) =>
+    Array.from({ length: n }, (_, j) => i === j ? 0 : haversine(
+      { lat: toNumber(points[i].lat), lng: toNumber(points[i].lng) },
+      { lat: toNumber(points[j].lat), lng: toNumber(points[j].lng) }
+    ))
+  );
+
+  const size = 1 << n;
+  const dp = Array.from({ length: size }, () => Array(n).fill(Infinity));
+  const parent = Array.from({ length: size }, () => Array(n).fill(-1));
+  for (let i = 0; i < n; i++) dp[1 << i][i] = distStart[i];
+
+  for (let mask = 1; mask < size; mask++) {
+    for (let last = 0; last < n; last++) {
+      const base = dp[mask][last];
+      if (!Number.isFinite(base)) continue;
+      for (let next = 0; next < n; next++) {
+        if (mask & (1 << next)) continue;
+        const nextMask = mask | (1 << next);
+        const nd = base + dist[last][next];
+        if (nd < dp[nextMask][next]) {
+          dp[nextMask][next] = nd;
+          parent[nextMask][next] = last;
+        }
+      }
+    }
+  }
+
+  const full = size - 1;
+  let bestLast = 0;
+  let bestDistance = Infinity;
+  for (let last = 0; last < n; last++) {
+    const total = dp[full][last] + distStart[last];
+    if (total < bestDistance) {
+      bestDistance = total;
+      bestLast = last;
+    }
+  }
+
+  const orderIdx = [];
+  let mask = full;
+  let cur = bestLast;
+  while (cur >= 0) {
+    orderIdx.push(cur);
+    const prev = parent[mask][cur];
+    mask ^= (1 << cur);
+    cur = prev;
+  }
+  orderIdx.reverse();
+  return orderIdx.map(i => points[i]);
+}
+
+function optimizeStopsForDisplay(list) {
+  const valid = list.filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  const noCoord = list.filter(p => !validCoord(p));
+  if (!valid.length) return [];
+  const start = getRouteStartForList(list);
+  const optimized = exactShortestClosedOrder(start, valid);
+  return optimized;
+}
 function routeDisplayStops(list) {
-  return list.filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  // ใช้ TSP แบบ Exact สำหรับจุดที่แสดงบน Map/Google Maps เพื่อเลือกลำดับที่สั้นที่สุดมากกว่า nearest-neighbor
+  return optimizeStopsForDisplay(list);
 }
 function routeNavPoints(list) {
   const valid = routeDisplayStops(list);
   if (!valid.length) return [];
-  const start = START_POINTS.find(x => x.name === list[0].start_name) || bestStartForRoute(valid);
+  const start = getRouteStartForList(list);
   return [{ ...start, customer_name:start.name, type:"จุดเริ่มต้น", status:"เริ่ม/กลับ" }, ...valid, { ...start, customer_name:start.name, type:"จุดเริ่มต้น", status:"วนกลับ" }];
 }
 
@@ -1108,7 +1183,7 @@ async function renderMap(list) {
       if (metricsEl) {
         const done = validStops.filter(isCompleted).length;
         const remain = Math.max(0, validStops.length - done);
-        metricsEl.textContent = `แสดงจุด ${validStops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (จำกัด Map/Google Maps ไม่เกิน ${MAX_ROUTE_CUSTOMER_STOPS} จุด)`;
+        metricsEl.textContent = `จัดลำดับใหม่แบบระยะสั้นที่สุด ${validStops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (จำกัด Map/Google Maps ไม่เกิน ${MAX_ROUTE_CUSTOMER_STOPS} จุด)`;
       }
       return;
     }
@@ -1116,7 +1191,7 @@ async function renderMap(list) {
     // ไม่ต้องหยุดระบบ ถ้า OSRM ไม่ตอบกลับ
   }
   L.polyline(latlngs, { weight: 5, dashArray: "8,8" }).addTo(routeLayer);
-  if (metricsEl) metricsEl.textContent = `แสดงจุด ${validStops.length} จุด ตรงกับ Google Maps • แสดงเส้นเชื่อมแบบประมาณการ กด Google Maps เพื่อดูเส้นทางจริงและเวลาที่ดีที่สุด`;
+  if (metricsEl) metricsEl.textContent = `จัดลำดับใหม่แบบระยะสั้นที่สุด ${validStops.length} จุด ตรงกับ Google Maps • แสดงเส้นเชื่อมแบบประมาณการ กด Google Maps เพื่อดูเส้นทางจริงและเวลาที่ดีที่สุด`;
 }
 function renderTable() {
   const search = cleanText(document.getElementById("searchBox").value).toLowerCase();
