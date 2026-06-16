@@ -99,3 +99,11 @@ tr:nth-child(even) td { background:#f9fafb; }
 .detail-table-wrap { max-height:430px; overflow:auto; }
 .detail-table-wrap .detail-table thead th { position:sticky !important; top:0 !important; z-index:3; }
 @media (max-width:900px){ .detail-table-wrap{max-height:360px;} }
+
+/* ===== Update: focus marker by selected plan mode ===== */
+.route-focus-icon span {
+  background:#16a34a !important;
+  color:#fff !important;
+  border-color:#ffffff !important;
+}
+.leaflet-marker-icon.route-focus-icon { background:transparent; border:0; }
