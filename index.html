@@ -27,23 +27,23 @@
     <div class="route-top">
       <div>
         <h2>แผนเส้นทางแบบวงกลม</h2>
-        <p>คลิกการ์ดแผนแต่ละสายเพื่อดูรายละเอียดและแผนที่ทันที • เมื่อเลือกจุดเริ่ม ระบบจะแสดงเฉพาะ BU ของจุดเริ่มนั้น</p>
+        <p>คลิกการ์ดแผนแต่ละสายเพื่อดูรายละเอียดและแผนที่ทันที</p>
         <p class="month-note">เดือนที่แสดง: <strong id="currentMonthLabel">-</strong></p>
         <div class="plan-controls">
           <label>จุดเริ่ม
-            <input id="startPointInput" list="startPointList" placeholder="อัตโนมัติ หรือเลือกจุดเริ่ม" />
-            <datalist id="startPointList">
-              <option value="อัตโนมัติ"></option>
-              <option value="สามทองบริการ"></option>
-              <option value="เค.ซี.ปิโตรเลียม2006"></option>
-              <option value="เค.ซี.จี.ปิโตรเลียม"></option>
-              <option value="เค.ซี. กรีน เอ็นเนอร์จี"></option>
-            </datalist>
+            <select id="startPointInput">
+              <option value="อัตโนมัติ">อัตโนมัติ</option>
+              <option value="สามทองบริการ">สามทองบริการ</option>
+              <option value="เค.ซี.ปิโตรเลียม2006">เค.ซี.ปิโตรเลียม2006</option>
+              <option value="เค.ซี.จี.ปิโตรเลียม">เค.ซี.จี.ปิโตรเลียม</option>
+              <option value="เค.ซี. กรีน เอ็นเนอร์จี">เค.ซี. กรีน เอ็นเนอร์จี</option>
+            </select>
           </label>
           <label>โหมดวางแผน
             <select id="planMode">
               <option value="pump">ตามแผนปรับปรุงปั๊ม</option>
               <option value="normal">วันปกติ / ออกตลาดทั่วไป</option>
+              <option value="repair">ตารางซ่อม</option>
             </select>
           </label>
           <label>วางแผนล่วงหน้า
