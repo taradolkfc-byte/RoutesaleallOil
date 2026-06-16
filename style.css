@@ -107,3 +107,7 @@ tr:nth-child(even) td { background:#f9fafb; }
   border-color:#ffffff !important;
 }
 .leaflet-marker-icon.route-focus-icon { background:transparent; border:0; }
+
+
+/* ===== Repair all current month + 9 point sync ===== */
+.route-limit-note { margin:8px 0 0; color:#92400e; font-weight:700; }
