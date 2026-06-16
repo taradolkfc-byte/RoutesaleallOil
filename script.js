@@ -39,6 +39,7 @@ let selectedRouteKey = "";
 let routeMap = null;
 let routeLayer = null;
 let visitedSet = { ids: new Set(), names: new Set() };
+let customerMasterRows = [];
 
 function cleanText(v) { return String(v ?? "").trim(); }
 function norm(v) { return cleanText(v).toLowerCase().replace(/\s+/g, " "); }
@@ -463,7 +464,7 @@ function nearestStartPointForRow(row) {
     .sort((a,b) => a.distance - b.distance)[0];
 }
 
-function buildRepairPlanRows(repairRows, planDays) {
+function buildRepairPlanRows(repairRows, marketRows, planDays) {
   const today = thaiNow();
   const selectedPoint = getSelectedStartPoint();
   const selectedBU = selectedPoint ? selectedPoint.bu : "";
@@ -474,22 +475,28 @@ function buildRepairPlanRows(repairRows, planDays) {
     .filter(r => inCurrentThaiMonth(r.dateObj) || !r.dateObj)
     .map(r => {
       const nearest = nearestStartPointForRow(r);
-      return { ...r, bu: r.bu || nearest.bu || "", __nearestStartName: nearest.name, __nearestBU: nearest.bu || "" };
+      const bu = r.bu || nearest.bu || "";
+      return { ...r, bu, __nearestStartName: nearest.name, __nearestBU: bu };
     })
     .filter(r => !selectedBU || cleanText(r.__nearestBU).toUpperCase() === selectedBU.toUpperCase())
     .sort((a,b) => (a.priority - b.priority) || (dateSortValue(a.dateObj) - dateSortValue(b.dateObj)) || cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), "th"));
 
   const output = [];
-  const maxItems = Math.min(candidates.length, planDays * MAX_STOPS_PER_DAY);
-  const usable = candidates.slice(0, maxItems);
+  const maxRoutes = Math.min(candidates.length, planDays * MAX_STOPS_PER_DAY);
+  const usableRepairs = candidates.slice(0, maxRoutes);
 
-  for (let dayIndex = 0; dayIndex < planDays; dayIndex++) {
-    const chunk = usable.slice(dayIndex * MAX_STOPS_PER_DAY, (dayIndex + 1) * MAX_STOPS_PER_DAY);
-    if (!chunk.length) continue;
+  usableRepairs.forEach((repair, repairIndex) => {
+    const dayIndex = Math.floor(repairIndex / MAX_STOPS_PER_DAY);
     const planDate = addDaysTH(today, dayIndex);
-    const start = startForRoute(chunk);
-    const ordered = orderCircularRoute(start, chunk);
-    const routeId = `ตารางซ่อม ${thaiDateLabel(planDate)} ${selectedBU || "ทุก BU"}`;
+
+    // ตารางซ่อม: วางแผนเหมือนปรับปรุงปั๊ม โดยเอาจุดซ่อมเป็นตัวตั้ง แล้วดึงลูกค้าออกตลาดสายเดียวกันมาเพิ่มใน Route
+    const relatedMarkets = takeByStatusForMeter(marketRows, repair);
+    const routePoints = [repair, ...relatedMarkets];
+    const start = startForRoute(routePoints);
+    const ordered = orderCircularRoute(start, routePoints);
+    const routeDate = repair.dateObj ? repair.dateObj.toLocaleDateString("th-TH", { day: "numeric", month: "long", year: "2-digit" }) : thaiDateLabel(planDate);
+    const routeId = `ตารางซ่อม ${routeDate} ${repair.bu || selectedBU || "ทุก BU"} สาย ${repair.meterKey || "ไม่ระบุ"}`;
+
     ordered.forEach((row, idx) => output.push({
       ...row,
       plan_day: dayIndex + 1,
@@ -497,16 +504,17 @@ function buildRepairPlanRows(repairRows, planDays) {
       route_group: routeId,
       stop_no: `${idx + 1}/${ordered.length}`,
       start_name: start.name,
-      priorityLabel: row.priorityLabel || "ซ่อม"
+      priorityLabel: idx === 0 && row.type === "ซ่อม" ? (row.priorityLabel || "ซ่อม") : row.priorityLabel
     }));
-  }
+  });
+
   return output;
 }
 
 function buildPlannedRows(pumpRows, repairRows, marketRows) {
   const { mode, days } = getPlanSettings();
   if (mode === "normal") return buildNormalPlanRows(marketRows, days);
-  if (mode === "repair") return buildRepairPlanRows(repairRows, days);
+  if (mode === "repair") return buildRepairPlanRows(repairRows, marketRows, days);
   return buildPumpPlanRows(pumpRows, repairRows, marketRows);
 }
 
@@ -527,6 +535,8 @@ async function loadData() {
     const pumpRows = normalizePump(pumpRowsRaw);
     const repairRows = normalizeRepair(repairRowsRaw);
     const marketRows = normalizeMarket(marketRowsRaw);
+
+    customerMasterRows = buildCustomerMasterRows(pumpRows, repairRows, marketRows);
 
     rawRows = enrichSales([...pumpRows, ...repairRows, ...marketRows], salesRows)
       .sort((a,b) => (a.sourceRank - b.sourceRank) || dateSortValue(a.dateObj) - dateSortValue(b.dateObj));
@@ -754,6 +764,100 @@ function renderTable() {
       <td>${escapeHtml(r.phone) || "-"}</td><td>${escapeHtml(r.sales_litre) || "-"}</td><td>${escapeHtml(r.lat) || "-"}</td><td>${escapeHtml(r.lng) || "-"}</td>
     </tr>`).join("");
 }
+function compactCustomerName(name) {
+  return norm(name).replace(/\s+[a-z]{1,5}\d{3,}$/i, "").replace(/\s+st\d+$/i, "").trim();
+}
+
+function buildCustomerMasterRows(pumpRows, repairRows, marketRows) {
+  const map = new Map();
+  const add = (row) => {
+    if (!row || (!row.customer_id && !row.customer_name)) return;
+    const idKey = norm(row.customer_id);
+    const nameKey = norm(row.customer_name);
+    const key = idKey || nameKey;
+    if (!key) return;
+    const existing = map.get(key) || {};
+    map.set(key, {
+      ...existing,
+      ...row,
+      customer_id: row.customer_id || existing.customer_id || "",
+      customer_name: row.customer_name || existing.customer_name || "",
+      bu: row.bu || existing.bu || inferBU(row.customer_id, existing.bu),
+      meter: row.meter || existing.meter || "",
+      area: row.area || existing.area || "",
+      lat: row.lat || existing.lat || "",
+      lng: row.lng || existing.lng || "",
+      purpose: row.purpose || existing.purpose || "ติดตามสถานะลูกค้า",
+      coordinator: row.coordinator || existing.coordinator || "",
+      phone: row.phone || existing.phone || "",
+      type: row.type || existing.type || "พื้นที่ออกตลาด"
+    });
+  };
+  marketRows.forEach(add);
+  pumpRows.forEach(add);
+  repairRows.forEach(add);
+  return Array.from(map.values());
+}
+
+function findCustomerByIdOrName(customerId, customerName) {
+  const id = norm(customerId);
+  const name = norm(customerName);
+  const compactName = compactCustomerName(customerName);
+
+  if (id) {
+    const exactId = customerMasterRows.find(c => norm(c.customer_id) === id);
+    if (exactId) return exactId;
+  }
+
+  if (name) {
+    let exactName = customerMasterRows.find(c => norm(c.customer_name) === name);
+    if (exactName) return exactName;
+    exactName = customerMasterRows.find(c => compactCustomerName(c.customer_name) === compactName && compactName.length >= 4);
+    if (exactName) return exactName;
+  }
+
+  return null;
+}
+
+function fillFormFromMasterCustomer(customer, source = "manual") {
+  if (!customer) return false;
+  const form = document.getElementById("planForm");
+  if (!form) return false;
+
+  const currentVisitDate = form.elements.visit_date.value;
+  const currentStatus = form.elements.visit_status ? form.elements.visit_status.value : "";
+
+  form.elements.job_type.value = customer.type === "ซ่อม" ? "ซ่อม" : "ออกตลาด";
+  form.elements.customer_id.value = customer.customer_id || "";
+  form.elements.customer_name.value = customer.customer_name || "";
+  form.elements.bu.value = customer.bu || inferBU(customer.customer_id, customer.bu);
+  form.elements.meter.value = customer.meter || "";
+  form.elements.area.value = customer.area || "";
+  form.elements.purpose.value = customer.purpose || (customer.type === "ซ่อม" ? "ซ่อม" : "ติดตามสถานะลูกค้า");
+  form.elements.coordinator.value = customer.coordinator || "";
+  form.elements.phone.value = customer.phone || "";
+  form.elements.lat.value = customer.lat || "";
+  form.elements.lng.value = customer.lng || "";
+  if (currentVisitDate) form.elements.visit_date.value = currentVisitDate;
+  if (form.elements.visit_status && currentStatus) form.elements.visit_status.value = currentStatus;
+
+  const status = document.getElementById("saveStatus");
+  if (status) {
+    status.textContent = source === "gps"
+      ? `พบข้อมูลลูกค้าจาก GPS: ${customer.customer_name || customer.customer_id}`
+      : `ดึงข้อมูลลูกค้าสำเร็จ: ${customer.customer_name || customer.customer_id}`;
+    status.style.color = "#166534";
+  }
+  return true;
+}
+
+function autoFillCustomerFromInput() {
+  const form = document.getElementById("planForm");
+  if (!form) return;
+  const customer = findCustomerByIdOrName(form.elements.customer_id.value, form.elements.customer_name.value);
+  if (customer) fillFormFromMasterCustomer(customer, "manual");
+}
+
 async function saveForm(e) {
   e.preventDefault();
   const status = document.getElementById("saveStatus");
@@ -822,13 +926,8 @@ function findNearestCustomer(lat, lng) {
 }
 
 function fillFormFromCustomer(form, customer) {
-  form.elements.job_type.value = "ออกตลาด";
-  form.elements.customer_id.value = customer.customer_id || "";
-  form.elements.customer_name.value = customer.customer_name || "";
-  form.elements.bu.value = customer.bu || inferBU(customer.customer_id, customer.bu);
-  form.elements.meter.value = customer.meter || "";
-  form.elements.area.value = customer.area || form.elements.area.value || "";
-  form.elements.purpose.value = customer.purpose || "ติดตามสถานะลูกค้า";
+  fillFormFromMasterCustomer(customer, "gps");
+  if (!form.elements.area.value && customer.area) form.elements.area.value = customer.area;
 }
 
 function unlockManualCustomerFields(form) {
@@ -893,4 +992,11 @@ if (document.getElementById("planMode")) document.getElementById("planMode").add
 if (document.getElementById("planDays")) document.getElementById("planDays").addEventListener("change", loadData);
 document.getElementById("reloadBtn").addEventListener("click", loadData);
 document.getElementById("checkinBtn").addEventListener("click", checkInGps);
+["customer_id", "customer_name"].forEach(name => {
+  const el = document.querySelector(`#planForm [name="${name}"]`);
+  if (el) {
+    el.addEventListener("change", autoFillCustomerFromInput);
+    el.addEventListener("blur", autoFillCustomerFromInput);
+  }
+});
 loadData();
