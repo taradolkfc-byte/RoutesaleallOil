@@ -456,9 +456,57 @@ function buildNormalPlanRows(marketRows, planDays) {
   return output;
 }
 
+function nearestStartPointForRow(row) {
+  if (!validCoord(row)) return START_POINTS[0];
+  return START_POINTS
+    .map(s => ({ ...s, distance: haversine(s, { lat: toNumber(row.lat), lng: toNumber(row.lng) }) }))
+    .sort((a,b) => a.distance - b.distance)[0];
+}
+
+function buildRepairPlanRows(repairRows, planDays) {
+  const today = thaiNow();
+  const selectedPoint = getSelectedStartPoint();
+  const selectedBU = selectedPoint ? selectedPoint.bu : "";
+
+  let candidates = repairRows
+    .filter(r => !isVisited(r))
+    .filter(validCoord)
+    .filter(r => inCurrentThaiMonth(r.dateObj) || !r.dateObj)
+    .map(r => {
+      const nearest = nearestStartPointForRow(r);
+      return { ...r, bu: r.bu || nearest.bu || "", __nearestStartName: nearest.name, __nearestBU: nearest.bu || "" };
+    })
+    .filter(r => !selectedBU || cleanText(r.__nearestBU).toUpperCase() === selectedBU.toUpperCase())
+    .sort((a,b) => (a.priority - b.priority) || (dateSortValue(a.dateObj) - dateSortValue(b.dateObj)) || cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), "th"));
+
+  const output = [];
+  const maxItems = Math.min(candidates.length, planDays * MAX_STOPS_PER_DAY);
+  const usable = candidates.slice(0, maxItems);
+
+  for (let dayIndex = 0; dayIndex < planDays; dayIndex++) {
+    const chunk = usable.slice(dayIndex * MAX_STOPS_PER_DAY, (dayIndex + 1) * MAX_STOPS_PER_DAY);
+    if (!chunk.length) continue;
+    const planDate = addDaysTH(today, dayIndex);
+    const start = startForRoute(chunk);
+    const ordered = orderCircularRoute(start, chunk);
+    const routeId = `ตารางซ่อม ${thaiDateLabel(planDate)} ${selectedBU || "ทุก BU"}`;
+    ordered.forEach((row, idx) => output.push({
+      ...row,
+      plan_day: dayIndex + 1,
+      plan_date: planDate,
+      route_group: routeId,
+      stop_no: `${idx + 1}/${ordered.length}`,
+      start_name: start.name,
+      priorityLabel: row.priorityLabel || "ซ่อม"
+    }));
+  }
+  return output;
+}
+
 function buildPlannedRows(pumpRows, repairRows, marketRows) {
   const { mode, days } = getPlanSettings();
   if (mode === "normal") return buildNormalPlanRows(marketRows, days);
+  if (mode === "repair") return buildRepairPlanRows(repairRows, days);
   return buildPumpPlanRows(pumpRows, repairRows, marketRows);
 }
 
@@ -517,7 +565,7 @@ function routeToGoogleMapsUrl(list) {
 function renderRouteSummary(rows) {
   const box = document.getElementById("routeSummary");
   const groups = new Map();
-  rows.filter(r => r.route_group && !r.route_group.includes("ตารางซ่อม")).forEach(r => {
+  rows.filter(r => r.route_group && (getPlanSettings().mode === "repair" || !r.route_group.includes("ตารางซ่อม"))).forEach(r => {
     if (!groups.has(r.route_group)) groups.set(r.route_group, []);
     groups.get(r.route_group).push(r);
   });
