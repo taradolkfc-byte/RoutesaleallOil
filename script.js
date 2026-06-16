@@ -184,6 +184,19 @@ function inferBU(customerId, fallback = "") {
   if (id.startsWith("KCG")) return "KCG";
   return cleanText(fallback);
 }
+
+function inferBUFromAnyText(...values) {
+  const text = values.map(v => cleanText(v).toUpperCase()).join(" ");
+
+  // ตรวจจากรหัสลูกค้า / คำที่อยู่ในข้อความ
+  if (/\bST\d+/.test(text) || text.includes(" ST ") || text.startsWith("ST") || text.includes("สามทอง")) return "ST";
+  if (/\bKN\d+/.test(text) || text.includes(" KN ") || text.startsWith("KN")) return "KN";
+  if (/\bMUK\d+/.test(text) || text.includes(" MUK ") || text.startsWith("MUK")) return "MUK";
+  if (/\bWNN\d+/.test(text) || text.includes(" WNN ") || text.startsWith("WNN")) return "WNN";
+  if (/\bKCG\d+/.test(text) || text.includes(" KCG ") || text.startsWith("KCG")) return "KCG";
+
+  return "";
+}
 function normalizeMeter(v) {
   const s = cleanText(v).toUpperCase();
   const m = s.match(/(?:MT|TR)?\s*-?\s*(\d{1,3})/);
