@@ -364,22 +364,191 @@ function bestStartForRoute(points) {
     return { ...s, score: avg + (nearest * 0.15) };
   }).sort((a,b) => a.score - b.score)[0];
 }
-function orderCircularRoute(start, points) {
-  const remaining = points.filter(validCoord).map(p => ({...p}));
-  const noCoord = points.filter(p => !validCoord(p));
+function routeDistanceFromStart(start, order) {
+  if (!order.length) return 0;
+  let total = 0;
+  let current = { lat: start.lat, lng: start.lng };
+  order.forEach(p => {
+    total += haversine(current, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
+    current = { lat: toNumber(p.lat), lng: toNumber(p.lng) };
+  });
+  total += haversine(current, { lat: start.lat, lng: start.lng });
+  return total;
+}
+
+function nearestNeighborOrder(start, points) {
+  const remaining = points.map(p => ({ ...p }));
   const ordered = [];
   let current = { lat: start.lat, lng: start.lng };
   while (remaining.length) {
-    let bestIndex = 0, bestDistance = Infinity;
+    let bestIndex = 0;
+    let bestDistance = Infinity;
     remaining.forEach((p, i) => {
       const d = haversine(current, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
-      if (d < bestDistance) { bestDistance = d; bestIndex = i; }
+      if (d < bestDistance) {
+        bestDistance = d;
+        bestIndex = i;
+      }
     });
     const next = remaining.splice(bestIndex, 1)[0];
     ordered.push(next);
     current = { lat: toNumber(next.lat), lng: toNumber(next.lng) };
   }
-  return [...ordered, ...noCoord];
+  return ordered;
+}
+
+function farthestInsertionOrder(start, points) {
+  const remaining = points.map(p => ({ ...p }));
+  if (remaining.length <= 2) return nearestNeighborOrder(start, remaining);
+
+  remaining.sort((a, b) => haversine(start, { lat: toNumber(b.lat), lng: toNumber(b.lng) }) - haversine(start, { lat: toNumber(a.lat), lng: toNumber(a.lng) }));
+  const ordered = [remaining.shift()];
+
+  while (remaining.length) {
+    let farIndex = 0;
+    let farDistance = -1;
+    remaining.forEach((p, i) => {
+      const nearestInRoute = Math.min(
+        haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }),
+        ...ordered.map(o => haversine(o, { lat: toNumber(p.lat), lng: toNumber(p.lng) }))
+      );
+      if (nearestInRoute > farDistance) {
+        farDistance = nearestInRoute;
+        farIndex = i;
+      }
+    });
+
+    const point = remaining.splice(farIndex, 1)[0];
+    let bestPos = 0;
+    let bestDistance = Infinity;
+    for (let pos = 0; pos <= ordered.length; pos++) {
+      const candidate = [...ordered.slice(0, pos), point, ...ordered.slice(pos)];
+      const d = routeDistanceFromStart(start, candidate);
+      if (d < bestDistance) {
+        bestDistance = d;
+        bestPos = pos;
+      }
+    }
+    ordered.splice(bestPos, 0, point);
+  }
+  return ordered;
+}
+
+function angularSweepOrders(points) {
+  if (!points.length) return [[]];
+  const center = {
+    lat: points.reduce((sum, p) => sum + toNumber(p.lat), 0) / points.length,
+    lng: points.reduce((sum, p) => sum + toNumber(p.lng), 0) / points.length
+  };
+  const withAngle = points.map(p => ({
+    ...p,
+    __angle: Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng)
+  }));
+  const cw = [...withAngle].sort((a, b) => a.__angle - b.__angle);
+  const ccw = [...cw].reverse();
+  const variants = [];
+  [cw, ccw].forEach(list => {
+    for (let i = 0; i < list.length; i++) {
+      variants.push([...list.slice(i), ...list.slice(0, i)].map(({ __angle, ...p }) => p));
+    }
+  });
+  return variants;
+}
+
+function twoOptClosedRoute(start, order) {
+  if (order.length < 4) return order;
+  let best = order.map(p => ({ ...p }));
+  let improved = true;
+  let guard = 0;
+  while (improved && guard < 120) {
+    improved = false;
+    guard++;
+    const base = routeDistanceFromStart(start, best);
+    outer:
+    for (let i = 0; i < best.length - 1; i++) {
+      for (let k = i + 1; k < best.length; k++) {
+        const candidate = [
+          ...best.slice(0, i),
+          ...best.slice(i, k + 1).reverse(),
+          ...best.slice(k + 1)
+        ];
+        const d = routeDistanceFromStart(start, candidate);
+        if (d + 0.001 < base) {
+          best = candidate;
+          improved = true;
+          break outer;
+        }
+      }
+    }
+  }
+  return best;
+}
+
+function rowName(row) {
+  return norm(`${row.customer_name || ""} ${row.customer_id || ""} ${row.area || ""} ${row.purpose || ""}`);
+}
+function hasAllKeywords(row, words) {
+  const text = rowName(row);
+  return words.every(w => text.includes(norm(w)));
+}
+function movePointAfter(order, anchorKeywords, movingKeywords) {
+  const anchorIndex = order.findIndex(p => hasAllKeywords(p, anchorKeywords));
+  const movingIndex = order.findIndex(p => hasAllKeywords(p, movingKeywords));
+  if (anchorIndex < 0 || movingIndex < 0 || anchorIndex === movingIndex) return order;
+  const next = [...order];
+  const [moving] = next.splice(movingIndex, 1);
+  const anchorNewIndex = next.findIndex(p => hasAllKeywords(p, anchorKeywords));
+  next.splice(anchorNewIndex + 1, 0, moving);
+  return next;
+}
+function movePointToEnd(order, movingKeywords) {
+  const idx = order.findIndex(p => hasAllKeywords(p, movingKeywords));
+  if (idx < 0 || idx === order.length - 1) return order;
+  const next = [...order];
+  const [moving] = next.splice(idx, 1);
+  next.push(moving);
+  return next;
+}
+
+function applyRouteBusinessRules(order) {
+  // กติกาหน้างานเฉพาะพื้นที่ที่แจ้งมา เพื่อให้ไม่ย้อนกลับมาเก็บจุดเดิม
+  let next = [...order];
+
+  // สินธุ์ชัยไอซ์ -> สถานีบริการน้ำมัน 6J9Q+RWF
+  next = movePointAfter(next, ["สินธุ์ชัยไอซ์"], ["6J9Q"]);
+  next = movePointAfter(next, ["สินธุ์ชัยไอซ์"], ["สถานีบริการน้ำมัน", "เจ้าท่า"]);
+
+  // ที่ทำการผู้ใหญ่บ้าน/ทุ่งเจริญ -> ยิ่ง เจริญ -> เกียรติประภัสร์
+  next = movePointAfter(next, ["ที่ทำการผู้ใหญ่บ้าน"], ["ยิ่ง", "เจริญ"]);
+  next = movePointAfter(next, ["ทุ่งเจริญ"], ["ยิ่ง", "เจริญ"]);
+  next = movePointAfter(next, ["ยิ่ง", "เจริญ"], ["เกียรติประภัสร์"]);
+  next = movePointAfter(next, ["ยิ่ง", "เจริญ"], ["ปั้มดาบร่วม"]);
+
+  // กลุ่มทำนาหลักเมืองให้เป็นจุดขากลับ: ถ้ามีสหกรณ์แก้มลิงให้ต่อหลังสหกรณ์ ไม่เช่นนั้นย้ายไปท้ายรายการ
+  const before = next.map(rowName).join("|");
+  next = movePointAfter(next, ["สหกรณ์การเกษตร", "แก้มลิง"], ["กลุ่มทำนาหลักเมือง"]);
+  const after = next.map(rowName).join("|");
+  if (before === after) next = movePointToEnd(next, ["กลุ่มทำนาหลักเมือง"]);
+
+  return next;
+}
+
+function orderCircularRoute(start, points) {
+  const validPoints = points.filter(validCoord).map(p => ({ ...p }));
+  const noCoord = points.filter(p => !validCoord(p));
+  if (validPoints.length <= 2) return [...validPoints, ...noCoord];
+
+  // สร้างหลายเส้นทางเริ่มต้น แล้วเลือกเส้นทางที่วนกลับจุดเริ่มต้นสั้นที่สุด จากนั้นปรับด้วย 2-opt
+  const candidates = [
+    nearestNeighborOrder(start, validPoints),
+    farthestInsertionOrder(start, validPoints),
+    ...angularSweepOrders(validPoints)
+  ].map(order => twoOptClosedRoute(start, order));
+
+  let best = candidates.sort((a, b) => routeDistanceFromStart(start, a) - routeDistanceFromStart(start, b))[0];
+  best = applyRouteBusinessRules(best);
+
+  return [...best, ...noCoord];
 }
 function takeByStatusForMeter(marketRows, pump) {
   const selectedBU = getSelectedStartBU();
