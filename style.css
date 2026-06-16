@@ -90,7 +90,12 @@ tr:nth-child(even) td { background:#f9fafb; }
 
 
 /* ===== Daily planning + check-in 100m update ===== */
-.plan-controls { display:grid; grid-template-columns:220px 180px; gap:10px; margin-top:10px; }
+.plan-controls { display:grid; grid-template-columns:220px 260px 220px; gap:10px; margin-top:10px; align-items:end; }
 .plan-controls label { color:#0f172a; font-weight:700; font-size:13px; }
-.plan-controls select { margin-top:5px; }
+.plan-controls select, .plan-controls input { margin-top:5px; width:100%; }
 @media (max-width:900px){ .plan-controls{grid-template-columns:1fr;} }
+
+/* ===== Update 20260615-09: plan controls + detail table scroll ===== */
+.detail-table-wrap { max-height:430px; overflow:auto; }
+.detail-table-wrap .detail-table thead th { position:sticky !important; top:0 !important; z-index:3; }
+@media (max-width:900px){ .detail-table-wrap{max-height:360px;} }
