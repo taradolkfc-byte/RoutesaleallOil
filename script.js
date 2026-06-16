@@ -31,6 +31,8 @@ const START_POINT_BU_MAP = {
 const CHECKIN_RADIUS_METER = 100;
 const MAX_PLAN_DAYS = 7;
 const MAX_STOPS_PER_DAY = 16;
+// จำกัดจำนวนจุดที่ส่งเข้า Map และ Google Maps ให้ตรงกัน ไม่เกิน 9 จุด ตามเงื่อนไขใช้งานจริง
+const MAX_ROUTE_CUSTOMER_STOPS = 9;
 
 let rawRows = [];
 let plannedRows = [];
@@ -264,7 +266,7 @@ function normalizeRepair(rows) {
       const meterRaw = cell(r,2);
       return {
         sourceRank: 2, priority: 200 + getUrgencyScore(cell(r,9), dateObj), priorityLabel: cell(r,9) || "ซ่อม", type: "ซ่อม",
-        dateRaw: cell(r,8), dateObj, customer_id: "", customer_name: cell(r,1), status: cell(r,10), bu: "",
+        dateRaw: cell(r,8), dateObj, customer_id: "", customer_name: cell(r,1), status: cell(r,10), bu: inferBUFromAnyText(cell(r,1), cell(r,3), cell(r,6)),
         meter: meterRaw, meterKey: normalizeMeter(meterRaw), area: cell(r,3), purpose: cell(r,4), coordinator: cell(r,6), phone: cell(r,7),
         lat: cell(r,11), lng: cell(r,12), sales_litre: "", route_group: "", stop_no: "", start_name: ""
       };
@@ -464,47 +466,65 @@ function nearestStartPointForRow(row) {
     .sort((a,b) => a.distance - b.distance)[0];
 }
 
-function buildRepairPlanRows(repairRows, marketRows, planDays) {
-  const today = thaiNow();
-  const selectedPoint = getSelectedStartPoint();
-  const selectedBU = selectedPoint ? selectedPoint.bu : "";
+function uniqueRowsByIdName(rows) {
+  const seen = new Set();
+  const out = [];
+  rows.forEach(r => {
+    const key = `${norm(r.customer_id)}|${norm(r.customer_name)}|${cleanText(r.lat)}|${cleanText(r.lng)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(r);
+  });
+  return out;
+}
 
+function buildRepairPlanRows(repairRows, marketRows, planDays) {
+  const selectedBU = getSelectedStartBU();
+
+  // ตารางซ่อม: ดึง “ทุกจุดซ่อมของเดือนปัจจุบัน” ออกมา ไม่จำกัดเหลือแค่จุดแรก
+  // ถ้าเลือกจุดเริ่ม ระบบจะกรองเฉพาะ BU ของจุดเริ่มนั้น เช่น สามทองบริการ = ST
   let candidates = repairRows
     .filter(r => !isVisited(r))
     .filter(validCoord)
-    .filter(r => inCurrentThaiMonth(r.dateObj) || !r.dateObj)
+    .filter(r => inCurrentThaiMonth(r.dateObj))
     .map(r => {
       const nearest = nearestStartPointForRow(r);
-      const bu = r.bu || nearest.bu || "";
+      const buFromText = inferBUFromAnyText(r.customer_name, r.area, r.coordinator, r.meter, r.customer_id);
+      const bu = r.bu || buFromText || nearest.bu || "";
       return { ...r, bu, __nearestStartName: nearest.name, __nearestBU: bu };
     })
     .filter(r => !selectedBU || cleanText(r.__nearestBU).toUpperCase() === selectedBU.toUpperCase())
-    .sort((a,b) => (a.priority - b.priority) || (dateSortValue(a.dateObj) - dateSortValue(b.dateObj)) || cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), "th"));
+    .sort((a,b) => (dateSortValue(a.dateObj) - dateSortValue(b.dateObj)) || (a.priority - b.priority) || cleanText(a.bu).localeCompare(cleanText(b.bu), "th") || cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), "th"));
+
+  const groups = new Map();
+  candidates.forEach(r => {
+    const dateKey = r.dateObj ? r.dateObj.toISOString().slice(0,10) : "nodate";
+    const buKey = r.bu || selectedBU || "ทุก BU";
+    const meterKey = r.meterKey || "ไม่ระบุ";
+    const key = `${dateKey}|${buKey}|${meterKey}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  });
 
   const output = [];
-  const maxRoutes = Math.min(candidates.length, planDays * MAX_STOPS_PER_DAY);
-  const usableRepairs = candidates.slice(0, maxRoutes);
-
-  usableRepairs.forEach((repair, repairIndex) => {
-    const dayIndex = Math.floor(repairIndex / MAX_STOPS_PER_DAY);
-    const planDate = addDaysTH(today, dayIndex);
-
-    // ตารางซ่อม: วางแผนเหมือนปรับปรุงปั๊ม โดยเอาจุดซ่อมเป็นตัวตั้ง แล้วดึงลูกค้าออกตลาดสายเดียวกันมาเพิ่มใน Route
-    const relatedMarkets = takeByStatusForMeter(marketRows, repair);
-    const routePoints = [repair, ...relatedMarkets];
+  groups.forEach((repairs, key) => {
+    const first = repairs[0];
+    const relatedMarkets = uniqueRowsByIdName(repairs.flatMap(repair => takeByStatusForMeter(marketRows, repair)));
+    // วางจุดซ่อมไว้ก่อน แล้วต่อด้วยลูกค้าออกตลาดสายเดียวกัน
+    const routePoints = uniqueRowsByIdName([...repairs, ...relatedMarkets]);
     const start = startForRoute(routePoints);
     const ordered = orderCircularRoute(start, routePoints);
-    const routeDate = repair.dateObj ? repair.dateObj.toLocaleDateString("th-TH", { day: "numeric", month: "long", year: "2-digit" }) : thaiDateLabel(planDate);
-    const routeId = `ตารางซ่อม ${routeDate} ${repair.bu || selectedBU || "ทุก BU"} สาย ${repair.meterKey || "ไม่ระบุ"}`;
+    const routeDate = first.dateObj ? first.dateObj.toLocaleDateString("th-TH", { day: "numeric", month: "long", year: "2-digit" }) : "ไม่ระบุวัน";
+    const routeId = `ตารางซ่อม ${routeDate} ${first.bu || selectedBU || "ทุก BU"} สาย ${first.meterKey || "ไม่ระบุ"}`;
 
     ordered.forEach((row, idx) => output.push({
       ...row,
-      plan_day: dayIndex + 1,
-      plan_date: planDate,
+      plan_day: 1,
+      plan_date: first.dateObj || thaiNow(),
       route_group: routeId,
       stop_no: `${idx + 1}/${ordered.length}`,
       start_name: start.name,
-      priorityLabel: idx === 0 && row.type === "ซ่อม" ? (row.priorityLabel || "ซ่อม") : row.priorityLabel
+      priorityLabel: row.type === "ซ่อม" ? (row.priorityLabel || "ซ่อม") : row.priorityLabel
     }));
   });
 
@@ -572,8 +592,11 @@ function isFocusStop(row) {
   const focusType = currentFocusType();
   return cleanText(row.type) === focusType;
 }
+function routeDisplayStops(list) {
+  return list.filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+}
 function routeNavPoints(list) {
-  const valid = list.filter(validCoord);
+  const valid = routeDisplayStops(list);
   if (!valid.length) return [];
   const start = START_POINTS.find(x => x.name === list[0].start_name) || bestStartForRoute(valid);
   return [{ ...start, customer_name:start.name, type:"จุดเริ่มต้น", status:"เริ่ม/กลับ" }, ...valid, { ...start, customer_name:start.name, type:"จุดเริ่มต้น", status:"วนกลับ" }];
@@ -601,7 +624,7 @@ function renderRouteSummary(rows) {
   const keys = Array.from(groups.keys());
   if (!keys.length) {
     selectedRouteKey = "";
-    box.innerHTML = `<div class="route-item">ยังไม่มีข้อมูลสำหรับวางแผน หรือจุดถูกบันทึกสำเร็จแล้ว</div>`;
+    box.innerHTML = `<div class="route-item">ยังไม่มีข้อมูลสำหรับวางแผนในเดือนนี้ หรือจุดถูกบันทึกสำเร็จแล้ว</div>`;
     renderRouteDetail([]);
     return;
   }
@@ -628,7 +651,9 @@ function renderRouteDetail(list) {
   }
   const start = START_POINTS.find(x => x.name === list[0].start_name) || bestStartForRoute(list);
   const googleUrl = routeToGoogleMapsUrl(list);
-  const rows = list.map((r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.customer_name || "-")}</td><td>${escapeHtml(r.type || "-")}</td><td>${escapeHtml(r.status || "-")}</td><td>${escapeHtml(r.lat || "-")}, ${escapeHtml(r.lng || "-")}</td></tr>`).join("");
+  const displayList = routeDisplayStops(list);
+  const hiddenCount = Math.max(0, list.filter(validCoord).length - displayList.length);
+  const rows = displayList.map((r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.customer_name || "-")}</td><td>${escapeHtml(r.type || "-")}</td><td>${escapeHtml(r.status || "-")}</td><td>${escapeHtml(r.lat || "-")}, ${escapeHtml(r.lng || "-")}</td></tr>`).join("");
   detail.innerHTML = `
     <div class="detail-head">
       <div>
@@ -638,7 +663,8 @@ function renderRouteDetail(list) {
       </div>
       ${googleUrl ? `<a class="map-link" href="${googleUrl}" target="_blank" rel="noopener">เปิดเส้นทางจริง/เวลาที่ดีที่สุดใน Google Maps</a>` : ""}
     </div>
-    <div class="detail-table-wrap"><table class="detail-table"><thead><tr><th>ลำดับ</th><th>ชื่อปั๊ม/ลูกค้า</th><th>ประเภท</th><th>สถานะ</th><th>พิกัด</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    <div class="detail-table-wrap"><table class="detail-table"><thead><tr><th>ลำดับ</th><th>ชื่อปั๊ม/ลูกค้า</th><th>ประเภท</th><th>สถานะ</th><th>พิกัด</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${hiddenCount ? `<p class="route-limit-note">แสดงใน Map/Google Maps ${MAX_ROUTE_CUSTOMER_STOPS} จุดแรก จากทั้งหมด ${hiddenCount + displayList.length} จุด เพื่อให้จำนวนจุดตรงกันและไม่สับสน</p>` : ""}`;
   renderMap(list);
 }
 function makeNumberIcon(number, variant = "normal") {
@@ -709,7 +735,7 @@ async function renderMap(list) {
   routeLayer = L.layerGroup().addTo(routeMap);
 
   const points = routeNavPoints(list);
-  const validStops = list.filter(validCoord);
+  const validStops = routeDisplayStops(list);
   if (points.length < 2 || !validStops.length) {
     routeMap.setView([16.5, 103.8], 8);
     if (metricsEl) metricsEl.textContent = "ยังไม่มีพิกัดสำหรับคำนวณเส้นทาง";
@@ -740,7 +766,7 @@ async function renderMap(list) {
       L.polyline(routed.latlngs, { weight: 5 }).addTo(routeLayer);
       routeMap.fitBounds(routed.latlngs, { padding: [30, 30] });
       if (metricsEl) {
-        metricsEl.textContent = `แสดงจุด ${validStops.length} จุด ตรงกับ Google Maps • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (กด Google Maps เพื่อดูเวลาจราจรจริง/เส้นทางดีที่สุด)`;
+        metricsEl.textContent = `แสดงจุด ${validStops.length} จุด ตรงกับ Google Maps • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (จำกัด Map/Google Maps ไม่เกิน ${MAX_ROUTE_CUSTOMER_STOPS} จุด)`;
       }
       return;
     }
