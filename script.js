@@ -571,21 +571,126 @@ function applyRouteBusinessRules(order) {
   return next;
 }
 
+
+function routeDistanceFast(start, order) {
+  return routeDistanceFromStart(start, order);
+}
+
+function relocateOptimizeClosedRoute(start, order) {
+  if (order.length < 3) return order;
+  let best = order.map(p => ({ ...p }));
+  let bestDistance = routeDistanceFast(start, best);
+  let improved = true;
+  let guard = 0;
+  while (improved && guard < 100) {
+    improved = false;
+    guard++;
+    outer:
+    for (let from = 0; from < best.length; from++) {
+      const picked = best[from];
+      const without = [...best.slice(0, from), ...best.slice(from + 1)];
+      for (let to = 0; to <= without.length; to++) {
+        if (to === from || to === from + 1) continue;
+        const candidate = [...without.slice(0, to), picked, ...without.slice(to)];
+        const d = routeDistanceFast(start, candidate);
+        if (d + 0.001 < bestDistance) {
+          best = candidate;
+          bestDistance = d;
+          improved = true;
+          break outer;
+        }
+      }
+    }
+  }
+  return best;
+}
+
+function segmentRelocateOptimizeClosedRoute(start, order) {
+  if (order.length < 5) return order;
+  let best = order.map(p => ({ ...p }));
+  let bestDistance = routeDistanceFast(start, best);
+  let improved = true;
+  let guard = 0;
+  while (improved && guard < 60) {
+    improved = false;
+    guard++;
+    outer:
+    for (let len = 2; len <= Math.min(4, best.length - 1); len++) {
+      for (let from = 0; from <= best.length - len; from++) {
+        const segment = best.slice(from, from + len);
+        const without = [...best.slice(0, from), ...best.slice(from + len)];
+        for (let to = 0; to <= without.length; to++) {
+          const candidate = [...without.slice(0, to), ...segment, ...without.slice(to)];
+          const d = routeDistanceFast(start, candidate);
+          if (d + 0.001 < bestDistance) {
+            best = candidate;
+            bestDistance = d;
+            improved = true;
+            break outer;
+          }
+        }
+      }
+    }
+  }
+  return best;
+}
+
+function improveRouteFreely(start, order) {
+  // ปรับแบบอิสระ: อนุญาตให้วิ่งเส้นเดิม/เส้นใหม่ได้หมด เป้าหมายคือระยะรวมสั้นที่สุด
+  let best = twoOptClosedRoute(start, order);
+  best = relocateOptimizeClosedRoute(start, best);
+  best = segmentRelocateOptimizeClosedRoute(start, best);
+  best = twoOptClosedRoute(start, best);
+  best = relocateOptimizeClosedRoute(start, best);
+  return best;
+}
+
+function buildFreeRouteCandidates(start, validPoints) {
+  const pts = validPoints.map(p => ({ ...p }));
+  const candidates = [];
+  candidates.push(nearestNeighborOrder(start, pts));
+  candidates.push(farthestInsertionOrder(start, pts));
+  candidates.push(...angularSweepOrders(pts));
+
+  // ลองเริ่มจากจุดแรกหลายแบบ แล้วปล่อย nearest-neighbor ต่อ เพื่อเลี่ยงเส้นทางอ้อมจาก seed แรก
+  pts.forEach(seed => {
+    const remaining = pts.filter(p => p !== seed);
+    const ordered = [seed];
+    let current = { lat: toNumber(seed.lat), lng: toNumber(seed.lng) };
+    const rem = remaining.map(p => ({ ...p }));
+    while (rem.length) {
+      let bestIndex = 0;
+      let bestDistance = Infinity;
+      rem.forEach((p, i) => {
+        const d = haversine(current, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
+        if (d < bestDistance) { bestDistance = d; bestIndex = i; }
+      });
+      const next = rem.splice(bestIndex, 1)[0];
+      ordered.push(next);
+      current = { lat: toNumber(next.lat), lng: toNumber(next.lng) };
+    }
+    candidates.push(ordered);
+  });
+
+  // เรียงตามแกนภูมิศาสตร์หลายแบบเป็น seed เพิ่มเติม
+  candidates.push([...pts].sort((a, b) => toNumber(a.lat) - toNumber(b.lat)));
+  candidates.push([...pts].sort((a, b) => toNumber(b.lat) - toNumber(a.lat)));
+  candidates.push([...pts].sort((a, b) => toNumber(a.lng) - toNumber(b.lng)));
+  candidates.push([...pts].sort((a, b) => toNumber(b.lng) - toNumber(a.lng)));
+  return candidates;
+}
+
 function orderCircularRoute(start, points) {
   const validPoints = points.filter(validCoord).map(p => ({ ...p }));
   const noCoord = points.filter(p => !validCoord(p));
   if (validPoints.length <= 2) return [...validPoints, ...noCoord];
 
-  // สร้างหลายเส้นทางเริ่มต้น แล้วเลือกเส้นทางที่วนกลับจุดเริ่มต้นสั้นที่สุด จากนั้นปรับด้วย 2-opt
-  const candidates = [
-    nearestNeighborOrder(start, validPoints),
-    farthestInsertionOrder(start, validPoints),
-    ...angularSweepOrders(validPoints)
-  ].map(order => twoOptClosedRoute(start, order));
+  // โหมดใหม่: วางแผนแบบอิสระ ไม่บังคับกติกาตายตัว เพื่อหาระยะใกล้สุด/เวลาสั้นสุดมากกว่าเดิม
+  const candidates = buildFreeRouteCandidates(start, validPoints)
+    .filter(order => order && order.length)
+    .map(order => improveRouteFreely(start, order));
 
-  let best = candidates.sort((a, b) => routeDistanceFromStart(start, a) - routeDistanceFromStart(start, b))[0];
-  best = applyRouteBusinessRules(best);
-
+  const best = candidates.sort((a, b) => routeDistanceFromStart(start, a) - routeDistanceFromStart(start, b))[0] || validPoints;
   return [...best, ...noCoord];
 }
 function takeByStatusForMeter(marketRows, pump) {
