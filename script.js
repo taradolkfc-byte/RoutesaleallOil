@@ -1236,7 +1236,7 @@ function fillFormFromMasterCustomer(customer, source = "manual") {
   const currentVisitDate = form.elements.visit_date.value;
   const currentStatus = form.elements.visit_status ? form.elements.visit_status.value : "";
 
-  form.elements.job_type.value = customer.type === "ซ่อม" ? "ซ่อม" : "ออกตลาด";
+  form.elements.job_type.value = customer.type === "ซ่อม" ? "ซ่อม" : (customer.type === "ปรับปรุงปั๊ม" ? "ปรับปรุงปั๊ม" : "ออกเยี่ยมลูกค้า");
   form.elements.customer_id.value = customer.customer_id || "";
   form.elements.customer_name.value = customer.customer_name || "";
   const routeMeta = selectedRouteMeta();
@@ -1244,7 +1244,7 @@ function fillFormFromMasterCustomer(customer, source = "manual") {
   form.elements.bu.value = branchNameFromBU(buCode);
   form.elements.meter.value = routeMeta.meter || customer.meter || "";
   form.elements.area.value = customer.area || "";
-  if (form.elements.purpose) form.elements.purpose.value = customer.purpose || (customer.type === "ซ่อม" ? "ซ่อม" : "ติดตามสถานะลูกค้า");
+  if (form.elements.purpose) form.elements.purpose.value = customer.purpose || (customer.type === "ซ่อม" ? "ซ่อม" : "ออกเยี่ยมลูกค้า");
   form.elements.coordinator.value = customer.coordinator || "";
   form.elements.phone.value = customer.phone || "";
   form.elements.lat.value = customer.lat || "";
