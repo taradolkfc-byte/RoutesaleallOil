@@ -714,6 +714,26 @@ function pullPointsThatAreOnTheWay(start, order) {
   return result;
 }
 
+function pushNearStartStopsToEnd(start, order) {
+  // กติกาเสริม: จุดที่อยู่ใกล้จุดเริ่มมาก ๆ ไม่จำเป็นต้องเป็นจุดแรก
+  // ให้เก็บไว้ช่วงท้ายของวง เพื่อไม่ให้วิ่งออกไปแล้ววกกลับมาเก็บจุดใกล้ฐานอีกครั้ง
+  if (!order || order.length < 6) return order;
+  const distances = order.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const maxD = Math.max(...distances);
+  const threshold = Math.max(10, maxD * 0.38);
+  const near = [];
+  const far = [];
+  order.forEach((p, idx) => {
+    const d = distances[idx];
+    if (d <= threshold) near.push({ p, d });
+    else far.push(p);
+  });
+  // ถ้า near เยอะเกินไป แปลว่าทั้งกลุ่มอยู่ใกล้ฐาน ไม่ควรแยกไปท้าย
+  if (near.length < 2 || near.length > Math.ceil(order.length * 0.45)) return order;
+  near.sort((a, b) => b.d - a.d); // ไกลกว่าไปก่อน ใกล้ฐานที่สุดอยู่ท้ายสุดก่อนวนกลับ
+  return [...far, ...near.map(x => x.p)];
+}
+
 function chooseBestCircularCandidate(start, validPoints) {
   // สร้าง candidate หลายแบบ แต่ยังคงแนวคิด “วงกลม ไม่เก็บย้อนหลัง”
   const candidates = [];
@@ -728,7 +748,9 @@ function chooseBestCircularCandidate(start, validPoints) {
     for (let i = 0; i < base.length; i++) {
       const rotated = [...base.slice(i), ...base.slice(0, i)];
       candidates.push(rotated);
+      candidates.push(pushNearStartStopsToEnd(start, rotated));
       candidates.push(pullPointsThatAreOnTheWay(start, rotated));
+      candidates.push(pullPointsThatAreOnTheWay(start, pushNearStartStopsToEnd(start, rotated)));
     }
   });
 
@@ -739,7 +761,14 @@ function chooseBestCircularCandidate(start, validPoints) {
     const key = c.map(x => `${norm(x.customer_id)}:${norm(x.customer_name)}`).join('|');
     if (!seen.has(key)) { seen.add(key); unique.push(c); }
   }
-  return unique.sort((a, b) => routeDistanceFromStart(start, a) - routeDistanceFromStart(start, b))[0] || validPoints;
+  const scored = unique.map(route => {
+    const nearFirstPenalty = route.slice(0, Math.min(2, route.length)).reduce((sum, p) => {
+      const d = haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
+      return sum + Math.max(0, 12 - d) * 8;
+    }, 0);
+    return { route, score: routeDistanceFromStart(start, route) + nearFirstPenalty };
+  });
+  return (scored.sort((a, b) => a.score - b.score)[0] || {}).route || validPoints;
 }
 
 function orderCircularRoute(start, points) {
@@ -750,6 +779,7 @@ function orderCircularRoute(start, points) {
   // ใช้แนวคิด “วงกลม ไม่เก็บย้อนหลัง” แต่เพิ่มการดึงจุดที่อยู่ระหว่างทางมาแวะก่อน
   // ช่วยลดเคสที่ Google Maps/OSRM วิ่งผ่านจุด 4-5 แต่เลขลำดับกลับไปเก็บจุด 3 ก่อน
   let best = chooseBestCircularCandidate(start, validPoints);
+  best = pushNearStartStopsToEnd(start, best);
   best = pullPointsThatAreOnTheWay(start, best);
   return [...best, ...noCoord];
 }
@@ -1110,7 +1140,7 @@ async function hydrateDetailAreas() {
     const lng = node.dataset.lng;
     if (!lat || !lng) continue;
     const area = await reverseGeocode(lat, lng);
-    node.textContent = area || `${lat}, ${lng}`;
+    node.textContent = area || "ไม่พบข้อมูลพื้นที่";
   }
 }
 function makeNumberIcon(number, variant = "normal") {
@@ -1394,26 +1424,65 @@ function todayInputValue() {
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
+function cleanThaiPlace(v, prefixes = []) {
+  let text = cleanText(v);
+  prefixes.forEach(prefix => { text = text.replace(new RegExp(`^${prefix}\\s*`, "i"), ""); });
+  return text;
+}
 function buildAreaText(address = {}) {
-  const tambon = address.suburb || address.quarter || address.village || address.hamlet || address.neighbourhood || "";
-  const amphoe = address.city_district || address.county || address.city || address.town || address.municipality || "";
-  const province = address.state || address.province || "";
+  const tambon = address.suburb || address.quarter || address.village || address.hamlet || address.neighbourhood || address.locality || "";
+  const amphoe = address.city_district || address.county || address.city || address.town || address.municipality || address.localityInfo || "";
+  const province = address.state || address.province || address.principalSubdivision || "";
   const parts = [];
-  if (tambon) parts.push(`ต.${tambon.replace(/^ตำบล\s*/, "")}`);
-  if (amphoe) parts.push(`อ.${amphoe.replace(/^อำเภอ\s*/, "")}`);
-  if (province) parts.push(`จ.${province.replace(/^จังหวัด\s*/, "")}`);
-  return parts.join(" ") || address.display_name || "";
+  if (tambon) parts.push(`ต.${cleanThaiPlace(tambon, ["ตำบล", "แขวง"])}`);
+  if (amphoe) parts.push(`อ.${cleanThaiPlace(amphoe, ["อำเภอ", "เขต"])}`);
+  if (province) parts.push(`จ.${cleanThaiPlace(province, ["จังหวัด"])}`);
+  return parts.join(" ");
+}
+function buildAreaTextFromBigDataCloud(data = {}) {
+  let tambon = data.locality || data.city || "";
+  let amphoe = data.city || data.locality || "";
+  let province = data.principalSubdivision || "";
+  const admin = (((data.localityInfo || {}).administrative) || []);
+  const adminNames = admin.map(x => x.name).filter(Boolean);
+  // ใช้ค่าจาก administrative ช่วยเติมกรณี locality ซ้ำ/ว่าง
+  if (!tambon && adminNames.length) tambon = adminNames[0];
+  if ((!amphoe || amphoe === tambon) && adminNames.length > 1) amphoe = adminNames.find(x => x !== tambon && x !== province) || amphoe;
+  const parts = [];
+  if (tambon) parts.push(`ต.${cleanThaiPlace(tambon, ["ตำบล", "แขวง"])}`);
+  if (amphoe) parts.push(`อ.${cleanThaiPlace(amphoe, ["อำเภอ", "เขต"])}`);
+  if (province) parts.push(`จ.${cleanThaiPlace(province, ["จังหวัด"])}`);
+  return parts.join(" ");
 }
 async function reverseGeocode(lat, lng) {
+  const key = `area:${Number(lat).toFixed(6)},${Number(lng).toFixed(6)}`;
+  try {
+    const cached = localStorage.getItem(key);
+    if (cached) return cached;
+  } catch (e) {}
+
+  // Provider 1: BigDataCloud ใช้งานจาก browser ได้ค่อนข้างเสถียร
+  try {
+    const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lng)}&localityLanguage=th`;
+    const res = await fetch(url, { cache: "force-cache" });
+    if (res.ok) {
+      const data = await res.json();
+      const area = buildAreaTextFromBigDataCloud(data);
+      if (area) { try { localStorage.setItem(key, area); } catch (e) {} return area; }
+    }
+  } catch (err) {}
+
+  // Provider 2: Nominatim สำรอง
   try {
     const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}&zoom=18&addressdetails=1&accept-language=th`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error("reverse geocode failed");
-    const data = await res.json();
-    return buildAreaText(data.address || {}) || data.display_name || "";
-  } catch (err) {
-    return "";
-  }
+    const res = await fetch(url, { cache: "force-cache" });
+    if (res.ok) {
+      const data = await res.json();
+      const area = buildAreaText(data.address || {});
+      if (area) { try { localStorage.setItem(key, area); } catch (e) {} return area; }
+    }
+  } catch (err) {}
+  return "ไม่พบข้อมูลพื้นที่";
 }
 function distanceMeter(lat1, lng1, lat2, lng2) {
   return haversine({ lat: lat1, lng: lng1 }, { lat: lat2, lng: lng2 }) * 1000;
