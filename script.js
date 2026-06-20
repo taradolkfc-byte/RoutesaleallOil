@@ -305,10 +305,18 @@ function normalizePump(rows) {
       };
     });
 }
+function isRepairOpenStatus(status) {
+  const s = cleanText(status).toLowerCase();
+  if (!s) return false;
+  // แสดงเฉพาะงานที่ยังไม่ปิดงาน เช่น "ยังไม่เข้าซ่อม"
+  // ไม่แสดงงานที่ปิดแล้ว เช่น "เสร็จ", "แล้วเสร็จ", "เสร็จแล้ว"
+  const doneWords = ["แล้วเสร็จ", "เสร็จแล้ว", "เสร็จ", "complete", "completed", "done"];
+  return !doneWords.some(w => s.includes(w));
+}
+
 function normalizeRepair(rows) {
   return rows.slice(1)
-    .filter(r => cleanText(cell(r,10)) !== "เสร็จ")
-    .filter(r => cleanText(cell(r,10)) === "ยังไม่เข้าซ่อม" || cleanText(cell(r,10)) !== "")
+    .filter(r => isRepairOpenStatus(cell(r,10)))
     .map(r => {
       const dateObj = parseDateTH(cell(r,8));
       const meterRaw = cell(r,2);
@@ -913,23 +921,25 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
 
   const groups = new Map();
   candidates.forEach(r => {
-    const dateKey = r.dateObj ? r.dateObj.toISOString().slice(0,10) : "nodate";
+    // โหมดตารางซ่อมต้องแสดงทุกจุดซ่อมของเดือนนั้น ไม่แยกหายเพราะคนละวัน
+    // จึงรวมเป็นกลุ่มตาม BU + สายมิเตอร์ เพื่อให้เห็นงานซ่อมทั้งหมดในเดือนปัจจุบัน
     const buKey = r.bu || selectedBU || "ทุก BU";
     const meterKey = r.meterKey || "ไม่ระบุ";
-    const key = `${dateKey}|${buKey}|${meterKey}`;
+    const key = `${buKey}|${meterKey}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(r);
   });
 
   const output = [];
   groups.forEach((repairs, key) => {
+    repairs.sort((a,b) => dateSortValue(a.dateObj) - dateSortValue(b.dateObj) || (a.priority - b.priority));
     const first = repairs[0];
     const relatedMarkets = uniqueRowsByIdName(repairs.flatMap(repair => takeByStatusForMeter(marketRows, repair)));
     // วางจุดซ่อมไว้ก่อน แล้วต่อด้วยลูกค้าออกตลาดสายเดียวกัน
     const routePoints = uniqueRowsByIdName([...repairs, ...relatedMarkets]);
     const start = startForRoute(routePoints);
     const ordered = orderCircularRoute(start, routePoints);
-    const routeDate = first.dateObj ? first.dateObj.toLocaleDateString("th-TH", { day: "numeric", month: "long", year: "2-digit" }) : "ไม่ระบุวัน";
+    const routeDate = thaiMonthYearLabel();
     const routeId = `ตารางซ่อม ${routeDate} ${first.bu || selectedBU || "ทุก BU"} สาย ${first.meterKey || "ไม่ระบุ"}`;
 
     ordered.forEach((row, idx) => output.push({
