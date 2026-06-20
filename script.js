@@ -28,6 +28,34 @@ const START_POINT_BU_MAP = {
   "ปั๊ม เค.ซี.กรีน เอ็นเนอร์จี": "WNN"
 };
 
+
+const BU_BRANCH_NAME_MAP = {
+  ST: "สามทองบริการ",
+  KN: "เค.ซี.ปิโตรเลียม2006",
+  MUK: "เค.ซี.จี.ปิโตรเลียม",
+  KCG: "เค.ซี.จี.ปิโตรเลียม",
+  WNN: "เค.ซี. กรีน เอ็นเนอร์จี"
+};
+
+function branchNameFromBU(bu) {
+  const key = cleanText(bu).toUpperCase();
+  return BU_BRANCH_NAME_MAP[key] || cleanText(bu);
+}
+
+function selectedRouteMeta() {
+  const key = cleanText(selectedRouteKey);
+  const m = key.match(/(?:^|\s)(ST|KN|MUK|KCG|WNN)\s+สาย\s+(\d{1,3})/i);
+  if (!m) return { bu: "", meter: "" };
+  return { bu: m[1].toUpperCase(), meter: `MT-${m[2]}` };
+}
+
+function applySelectedRouteToForm(form) {
+  const meta = selectedRouteMeta();
+  if (!form || (!meta.bu && !meta.meter)) return;
+  if (meta.bu && form.elements.bu) form.elements.bu.value = branchNameFromBU(meta.bu);
+  if (meta.meter && form.elements.meter) form.elements.meter.value = meta.meter;
+}
+
 const CHECKIN_RADIUS_METER = 100;
 const MAX_PLAN_DAYS = 7;
 const MAX_STOPS_PER_DAY = 16;
@@ -38,6 +66,7 @@ let rawRows = [];
 let plannedRows = [];
 let currentRouteGroups = new Map();
 let selectedRouteKey = "";
+let routeCollapsedToSelected = false;
 let routeMap = null;
 let routeLayer = null;
 let visitedSet = { ids: new Set(), names: new Set() };
@@ -823,6 +852,7 @@ async function loadData() {
       .sort((a,b) => (a.sourceRank - b.sourceRank) || dateSortValue(a.dateObj) - dateSortValue(b.dateObj));
     plannedRows = enrichSales(buildPlannedRows(pumpRows, repairRows, marketRows), salesRows);
     selectedRouteKey = "";
+    routeCollapsedToSelected = false;
     renderTable();
   } catch (err) {
     tbody.innerHTML = `<tr><td colspan="18" class="loading">เกิดข้อผิดพลาด: ${escapeHtml(err.message)}</td></tr>`;
@@ -905,18 +935,35 @@ function renderRouteSummary(rows) {
     return;
   }
   if (!selectedRouteKey || !groups.has(selectedRouteKey)) selectedRouteKey = keys[0];
-  box.innerHTML = keys.map((name, idx) => {
+
+  const visibleKeys = routeCollapsedToSelected && groups.has(selectedRouteKey) ? [selectedRouteKey] : keys;
+  const showAllBtn = routeCollapsedToSelected && keys.length > 1
+    ? `<button id="showRouteCardsBtn" class="route-show-all" type="button">แสดงแผนทั้งหมด</button>`
+    : "";
+
+  box.innerHTML = showAllBtn + visibleKeys.map((name) => {
     const list = groups.get(name);
     const first = list[0];
+    const idx = keys.indexOf(name);
     const routeNames = list.map(x => x.customer_name || x.customer_id).filter(Boolean).join(" → ");
     const active = name === selectedRouteKey ? " active" : "";
     return `<button class="route-item route-button${active}" data-route-key="${escapeHtml(name)}" type="button"><strong>${idx + 1}. ${escapeHtml(name)}</strong><br><span>เริ่ม/วนกลับ: ${escapeHtml(first.start_name || "-")}</span><br><small>${escapeHtml(routeNames)} → ${escapeHtml(first.start_name || "จุดเริ่มต้น")}</small></button>`;
   }).join("");
+
+  const showAll = document.getElementById("showRouteCardsBtn");
+  if (showAll) showAll.addEventListener("click", () => {
+    routeCollapsedToSelected = false;
+    renderRouteSummary(plannedRows);
+  });
+
   box.querySelectorAll(".route-button").forEach(btn => btn.addEventListener("click", () => {
     selectedRouteKey = btn.dataset.routeKey;
+    routeCollapsedToSelected = true;
     renderRouteSummary(plannedRows);
   }));
   renderRouteDetail(groups.get(selectedRouteKey) || []);
+  const form = document.getElementById("planForm");
+  if (form) applySelectedRouteToForm(form);
 }
 function renderRouteDetail(list) {
   const detail = document.getElementById("routeDetail");
@@ -933,7 +980,8 @@ function renderRouteDetail(list) {
   const remainCount = Math.max(0, displayList.length - doneCount);
   const rows = displayList.map((r, i) => {
     const done = isCompleted(r);
-    return `<tr class="${done ? "done-row" : ""}"><td>${done ? "✓" : i + 1}</td><td>${escapeHtml(r.customer_name || "-")}</td><td>${escapeHtml(r.type || "-")}</td><td>${escapeHtml(r.status || "-")}<br><span class="visit-state ${done ? "done" : "pending"}">${completedLabel(r)}</span></td><td>${escapeHtml(r.lat || "-")}, ${escapeHtml(r.lng || "-")}</td></tr>`;
+    const areaCell = detailAreaHtml(r, i);
+    return `<tr class="${done ? "done-row" : ""}"><td>${done ? "✓" : i + 1}</td><td>${escapeHtml(r.customer_name || "-")}</td><td>${escapeHtml(r.type || "-")}</td><td>${escapeHtml(r.status || "-")}<br><span class="visit-state ${done ? "done" : "pending"}">${completedLabel(r)}</span></td><td>${areaCell}</td></tr>`;
   }).join("");
   detail.innerHTML = `
     <div class="detail-head">
@@ -945,9 +993,30 @@ function renderRouteDetail(list) {
       </div>
       ${googleUrl ? `<a class="map-link" href="${googleUrl}" target="_blank" rel="noopener">เปิดเส้นทางจริง/เวลาที่ดีที่สุดใน Google Maps</a>` : ""}
     </div>
-    <div class="detail-table-wrap"><table class="detail-table"><thead><tr><th>ลำดับ</th><th>ชื่อปั๊ม/ลูกค้า</th><th>ประเภท</th><th>สถานะ</th><th>พิกัด</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="detail-table-wrap"><table class="detail-table"><thead><tr><th>ลำดับ</th><th>ชื่อปั๊ม/ลูกค้า</th><th>ประเภท</th><th>สถานะ</th><th>ตำบล/อำเภอ/จังหวัด</th></tr></thead><tbody>${rows}</tbody></table></div>
     ${hiddenCount ? `<p class="route-limit-note">แสดงใน Map/Google Maps ${MAX_ROUTE_CUSTOMER_STOPS} จุดแรก จากทั้งหมด ${hiddenCount + displayList.length} จุด เพื่อให้จำนวนจุดตรงกันและไม่สับสน</p>` : ""}`;
+  hydrateDetailAreas();
   renderMap(list);
+}
+function isUsefulAreaText(v) {
+  const a = cleanText(v);
+  if (!a || ["ST", "KN", "MUK", "WNN", "KCG"].includes(a.toUpperCase())) return false;
+  return a.length > 2;
+}
+function detailAreaHtml(row, index) {
+  if (isUsefulAreaText(row.area)) return escapeHtml(row.area);
+  if (!validCoord(row)) return "-";
+  return `<span class="geo-area" data-lat="${escapeHtml(row.lat)}" data-lng="${escapeHtml(row.lng)}">กำลังค้นหาพื้นที่...</span>`;
+}
+async function hydrateDetailAreas() {
+  const nodes = Array.from(document.querySelectorAll(".geo-area"));
+  for (const node of nodes) {
+    const lat = node.dataset.lat;
+    const lng = node.dataset.lng;
+    if (!lat || !lng) continue;
+    const area = await reverseGeocode(lat, lng);
+    node.textContent = area || `${lat}, ${lng}`;
+  }
 }
 function makeNumberIcon(number, variant = "normal") {
   const cls = variant === "focus" ? "route-number-icon route-focus-icon" : "route-number-icon";
@@ -1170,10 +1239,12 @@ function fillFormFromMasterCustomer(customer, source = "manual") {
   form.elements.job_type.value = customer.type === "ซ่อม" ? "ซ่อม" : "ออกตลาด";
   form.elements.customer_id.value = customer.customer_id || "";
   form.elements.customer_name.value = customer.customer_name || "";
-  form.elements.bu.value = customer.bu || inferBU(customer.customer_id, customer.bu);
-  form.elements.meter.value = customer.meter || "";
+  const routeMeta = selectedRouteMeta();
+  const buCode = routeMeta.bu || customer.bu || inferBU(customer.customer_id, customer.bu);
+  form.elements.bu.value = branchNameFromBU(buCode);
+  form.elements.meter.value = routeMeta.meter || customer.meter || "";
   form.elements.area.value = customer.area || "";
-  form.elements.purpose.value = customer.purpose || (customer.type === "ซ่อม" ? "ซ่อม" : "ติดตามสถานะลูกค้า");
+  if (form.elements.purpose) form.elements.purpose.value = customer.purpose || (customer.type === "ซ่อม" ? "ซ่อม" : "ติดตามสถานะลูกค้า");
   form.elements.coordinator.value = customer.coordinator || "";
   form.elements.phone.value = customer.phone || "";
   form.elements.lat.value = customer.lat || "";
@@ -1303,10 +1374,12 @@ async function checkInGps() {
     if (customer) {
       fillFormFromCustomer(form, customer);
       if (!form.elements.area.value && customer.area) form.elements.area.value = customer.area;
+      applySelectedRouteToForm(form);
       status.textContent = `เช็คอินสำเร็จ: พบลูกค้าในรัศมี ${Math.round(customer.distance)} เมตร - ${customer.customer_name || customer.customer_id}`;
       status.style.color = "#166534";
     } else {
       unlockManualCustomerFields(form);
+      applySelectedRouteToForm(form);
       status.textContent = `เช็คอินสำเร็จ: อยู่นอกเขตลูกค้า ${CHECKIN_RADIUS_METER} เมตร ระบบเติมพื้นที่/พิกัดให้แล้ว กรุณากรอกรหัสลูกค้า ชื่อปั๊ม BU และสายมิเตอร์เอง`;
       status.style.color = "#92400e";
     }
@@ -1327,9 +1400,9 @@ document.getElementById("searchBox").addEventListener("input", renderTable);
 document.getElementById("typeFilter").addEventListener("change", renderTable);
 document.getElementById("statusFilter").addEventListener("change", renderTable);
 document.getElementById("showAllToggle").addEventListener("change", renderTable);
-if (document.getElementById("startPointInput")) document.getElementById("startPointInput").addEventListener("change", loadData);
-if (document.getElementById("planMode")) document.getElementById("planMode").addEventListener("change", loadData);
-if (document.getElementById("planDays")) document.getElementById("planDays").addEventListener("change", loadData);
+if (document.getElementById("startPointInput")) document.getElementById("startPointInput").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
+if (document.getElementById("planMode")) document.getElementById("planMode").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
+if (document.getElementById("planDays")) document.getElementById("planDays").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
 document.getElementById("reloadBtn").addEventListener("click", loadData);
 document.getElementById("checkinBtn").addEventListener("click", checkInGps);
 ["customer_id", "customer_name"].forEach(name => {
