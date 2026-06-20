@@ -647,15 +647,110 @@ function improveCircularRouteLight(start, order) {
   return variants.sort((a, b) => routeDistanceFromStart(start, a) - routeDistanceFromStart(start, b))[0] || order;
 }
 
+
+
+function pointSegmentProjection(a, b, p) {
+  // ประเมินว่าจุด p อยู่ “ระหว่างทาง” จาก a ไป b หรือไม่ (ใช้ระยะเชิงเรขาคณิตเป็นตัวช่วย)
+  const ax = toNumber(a.lng), ay = toNumber(a.lat);
+  const bx = toNumber(b.lng), by = toNumber(b.lat);
+  const px = toNumber(p.lng), py = toNumber(p.lat);
+  if (![ax, ay, bx, by, px, py].every(Number.isFinite)) return null;
+  const vx = bx - ax, vy = by - ay;
+  const wx = px - ax, wy = py - ay;
+  const vv = vx * vx + vy * vy;
+  if (vv === 0) return null;
+  const t = Math.max(0, Math.min(1, (wx * vx + wy * vy) / vv));
+  const proj = { lng: ax + t * vx, lat: ay + t * vy };
+  const distKm = haversine({ lat: py, lng: px }, proj);
+  const alongKm = haversine(a, proj);
+  return { t, distKm, alongKm };
+}
+
+function pullPointsThatAreOnTheWay(start, order) {
+  // แก้ปัญหา “วิ่งผ่าน/ใกล้จุดหนึ่งแล้วไม่แวะ แต่ไปย้อนกลับมาเก็บทีหลัง”
+  // หลักการ: ถ้าจุดถัด ๆ ไปอยู่ในแนวทางระหว่างจุดปัจจุบันกับจุดเป้าหมาย ให้ดึงมาแวะก่อน
+  if (order.length < 4) return order;
+  const result = [];
+  const remaining = order.map(p => ({ ...p }));
+  let current = { lat: start.lat, lng: start.lng };
+
+  while (remaining.length) {
+    const next = remaining.shift();
+    const inPath = [];
+
+    for (let i = remaining.length - 1; i >= 0; i--) {
+      const candidate = remaining[i];
+      const proj = pointSegmentProjection(current, next, candidate);
+      if (!proj) continue;
+
+      const currentToNext = haversine(current, next);
+      const currentToCandidate = haversine(current, candidate);
+      const candidateToNext = haversine(candidate, next);
+      const detour = currentToCandidate + candidateToNext - currentToNext;
+
+      // เกณฑ์แบบยืดหยุ่น: อยู่ตามแนวทางจริงพอสมควร และการแทรกไม่ทำให้ระยะอ้อมเพิ่มมาก
+      const corridorKm = Math.max(2.5, Math.min(10, currentToNext * 0.22));
+      const isBetween = proj.t > 0.08 && proj.t < 0.92;
+      const isCloseToLine = proj.distKm <= corridorKm;
+      const lowDetour = detour <= Math.max(4, currentToNext * 0.18);
+
+      if (isBetween && isCloseToLine && lowDetour) {
+        inPath.push({ index: i, point: candidate, alongKm: proj.alongKm });
+      }
+    }
+
+    inPath.sort((a, b) => a.alongKm - b.alongKm);
+    for (const item of inPath) {
+      const idx = remaining.indexOf(item.point);
+      if (idx >= 0) remaining.splice(idx, 1);
+      result.push(item.point);
+      current = { lat: toNumber(item.point.lat), lng: toNumber(item.point.lng) };
+    }
+
+    result.push(next);
+    current = { lat: toNumber(next.lat), lng: toNumber(next.lng) };
+  }
+
+  return result;
+}
+
+function chooseBestCircularCandidate(start, validPoints) {
+  // สร้าง candidate หลายแบบ แต่ยังคงแนวคิด “วงกลม ไม่เก็บย้อนหลัง”
+  const candidates = [];
+  const sweep = circularSweepClosedOrder(start, validPoints);
+  candidates.push(sweep);
+  candidates.push([...sweep].reverse());
+  candidates.push(pullPointsThatAreOnTheWay(start, sweep));
+  candidates.push(pullPointsThatAreOnTheWay(start, [...sweep].reverse()));
+
+  // เพิ่ม candidate จากการหมุนวง เพื่อไม่ให้จุดใกล้จุดเริ่มถูกบังคับเป็นจุดแรกเสมอไป
+  [sweep, [...sweep].reverse()].forEach(base => {
+    for (let i = 0; i < base.length; i++) {
+      const rotated = [...base.slice(i), ...base.slice(0, i)];
+      candidates.push(rotated);
+      candidates.push(pullPointsThatAreOnTheWay(start, rotated));
+    }
+  });
+
+  // เลือกเส้นทางที่ระยะสั้น แต่ลงโทษการตัดข้าม/ย้อนกลับแรง ๆ ด้วยการดูผลหลังดึงจุดระหว่างทาง
+  const unique = [];
+  const seen = new Set();
+  for (const c of candidates) {
+    const key = c.map(x => `${norm(x.customer_id)}:${norm(x.customer_name)}`).join('|');
+    if (!seen.has(key)) { seen.add(key); unique.push(c); }
+  }
+  return unique.sort((a, b) => routeDistanceFromStart(start, a) - routeDistanceFromStart(start, b))[0] || validPoints;
+}
+
 function orderCircularRoute(start, points) {
   const validPoints = points.filter(validCoord).map(p => ({ ...p }));
   const noCoord = points.filter(p => !validCoord(p));
   if (validPoints.length <= 2) return [...validPoints, ...noCoord];
 
-  // กลับไปใช้เงื่อนไข “วิ่งเป็นวงกลม” ตามที่ต้องการ ไม่บังคับจุดใกล้เป็นจุดแรก
-  // ระบบจะเลือกทิศทางวนและจุดเริ่มของวงที่ใกล้ที่สุดจากจุดเริ่มต้น/วนกลับ
-  let best = circularSweepClosedOrder(start, validPoints);
-  best = improveCircularRouteLight(start, best);
+  // ใช้แนวคิด “วงกลม ไม่เก็บย้อนหลัง” แต่เพิ่มการดึงจุดที่อยู่ระหว่างทางมาแวะก่อน
+  // ช่วยลดเคสที่ Google Maps/OSRM วิ่งผ่านจุด 4-5 แต่เลขลำดับกลับไปเก็บจุด 3 ก่อน
+  let best = chooseBestCircularCandidate(start, validPoints);
+  best = pullPointsThatAreOnTheWay(start, best);
   return [...best, ...noCoord];
 }
 function takeByStatusForMeter(marketRows, pump) {
@@ -1128,7 +1223,7 @@ async function renderMap(list) {
       if (metricsEl) {
         const done = validStops.filter(isCompleted).length;
         const remain = Math.max(0, validStops.length - done);
-        metricsEl.textContent = `จัดลำดับใหม่แบบระยะสั้นที่สุด ${validStops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (จำกัด Map/Google Maps ไม่เกิน ${MAX_ROUTE_CUSTOMER_STOPS} จุด)`;
+        metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (จำกัด Map/Google Maps ไม่เกิน ${MAX_ROUTE_CUSTOMER_STOPS} จุด)`;
       }
       return;
     }
@@ -1136,7 +1231,7 @@ async function renderMap(list) {
     // ไม่ต้องหยุดระบบ ถ้า OSRM ไม่ตอบกลับ
   }
   L.polyline(latlngs, { weight: 5, dashArray: "8,8" }).addTo(routeLayer);
-  if (metricsEl) metricsEl.textContent = `จัดลำดับใหม่แบบระยะสั้นที่สุด ${validStops.length} จุด ตรงกับ Google Maps • แสดงเส้นเชื่อมแบบประมาณการ กด Google Maps เพื่อดูเส้นทางจริงและเวลาที่ดีที่สุด`;
+  if (metricsEl) metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • แสดงเส้นเชื่อมแบบประมาณการ กด Google Maps เพื่อดูเส้นทางจริงและเวลาที่ดีที่สุด`;
 }
 function renderTable() {
   const search = cleanText(document.getElementById("searchBox").value).toLowerCase();
@@ -1236,7 +1331,7 @@ function fillFormFromMasterCustomer(customer, source = "manual") {
   const currentVisitDate = form.elements.visit_date.value;
   const currentStatus = form.elements.visit_status ? form.elements.visit_status.value : "";
 
-  form.elements.job_type.value = customer.type === "ซ่อม" ? "ซ่อม" : (customer.type === "ปรับปรุงปั๊ม" ? "ปรับปรุงปั๊ม" : "ออกเยี่ยมลูกค้า");
+  form.elements.job_type.value = customer.type === "ซ่อม" ? "ซ่อม" : "ออกตลาด";
   form.elements.customer_id.value = customer.customer_id || "";
   form.elements.customer_name.value = customer.customer_name || "";
   const routeMeta = selectedRouteMeta();
@@ -1244,7 +1339,7 @@ function fillFormFromMasterCustomer(customer, source = "manual") {
   form.elements.bu.value = branchNameFromBU(buCode);
   form.elements.meter.value = routeMeta.meter || customer.meter || "";
   form.elements.area.value = customer.area || "";
-  if (form.elements.purpose) form.elements.purpose.value = customer.purpose || (customer.type === "ซ่อม" ? "ซ่อม" : "ออกเยี่ยมลูกค้า");
+  if (form.elements.purpose) form.elements.purpose.value = customer.purpose || (customer.type === "ซ่อม" ? "ซ่อม" : "ติดตามสถานะลูกค้า");
   form.elements.coordinator.value = customer.coordinator || "";
   form.elements.phone.value = customer.phone || "";
   form.elements.lat.value = customer.lat || "";
