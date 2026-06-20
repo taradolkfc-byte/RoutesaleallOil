@@ -125,3 +125,9 @@ tr:nth-child(even) td { background:#f9fafb; }
 .visit-state.done { background:#dcfce7; color:#166534; }
 .visit-state.pending { background:#fef3c7; color:#92400e; }
 .route-check-summary { color:#0f766e !important; font-weight:700; margin-top:6px !important; }
+
+
+/* ===== UX update 20260620-01 ===== */
+.route-show-all { grid-column:1/-1; background:#0b3b70; color:#fff; width:max-content; margin-bottom:4px; }
+.geo-area { color:#0f172a; }
+@media (max-width:900px){ .route-show-all{width:100%;} }
