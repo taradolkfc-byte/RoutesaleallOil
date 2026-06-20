@@ -308,10 +308,9 @@ function normalizePump(rows) {
 function isRepairOpenStatus(status) {
   const s = cleanText(status).toLowerCase();
   if (!s) return false;
-  // แสดงเฉพาะงานที่ยังไม่ปิดงาน เช่น "ยังไม่เข้าซ่อม"
-  // ไม่แสดงงานที่ปิดแล้ว เช่น "เสร็จ", "แล้วเสร็จ", "เสร็จแล้ว"
-  const doneWords = ["แล้วเสร็จ", "เสร็จแล้ว", "เสร็จ", "complete", "completed", "done"];
-  return !doneWords.some(w => s.includes(w));
+  // ตามเงื่อนไขล่าสุด: โหมดตารางซ่อมให้แสดงทุกสถานะของเดือนนั้น
+  // ยกเว้นเฉพาะรายการที่ Column K ระบุว่า "แล้วเสร็จ" เท่านั้น
+  return !s.includes("แล้วเสร็จ");
 }
 
 function normalizeRepair(rows) {
@@ -904,10 +903,10 @@ function uniqueRowsByIdName(rows) {
 function buildRepairPlanRows(repairRows, marketRows, planDays) {
   const selectedBU = getSelectedStartBU();
 
-  // ตารางซ่อม: ดึง “ทุกจุดซ่อมของเดือนปัจจุบัน” ออกมา ไม่จำกัดเหลือแค่จุดแรก
-  // ถ้าเลือกจุดเริ่ม ระบบจะกรองเฉพาะ BU ของจุดเริ่มนั้น เช่น สามทองบริการ = ST
+  // ตารางซ่อม: แสดง “ทุกจุดซ่อมของเดือนปัจจุบัน” ที่ยังไม่ใช่สถานะ "แล้วเสร็จ"
+  // ถ้าเลือกจุดเริ่ม จะกรองเฉพาะ BU ของจุดเริ่มนั้น เช่น สามทองบริการ = ST
+  // 1 งานซ่อม = 1 แผน เพื่อให้ไม่ถูกตัดเหลือแค่รายการเดียว แม้อยู่ BU/สายเดียวกัน
   let candidates = repairRows
-    /* แสดงจุดที่เช็คอินสำเร็จไว้ในแผน เพื่อให้ขึ้นเครื่องหมายถูก */
     .filter(validCoord)
     .filter(r => inCurrentThaiMonth(r.dateObj))
     .map(r => {
@@ -917,39 +916,36 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
       return { ...r, bu, __nearestStartName: nearest.name, __nearestBU: bu };
     })
     .filter(r => !selectedBU || cleanText(r.__nearestBU).toUpperCase() === selectedBU.toUpperCase())
-    .sort((a,b) => (dateSortValue(a.dateObj) - dateSortValue(b.dateObj)) || (a.priority - b.priority) || cleanText(a.bu).localeCompare(cleanText(b.bu), "th") || cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), "th"));
-
-  const groups = new Map();
-  candidates.forEach(r => {
-    // โหมดตารางซ่อมต้องแสดงทุกจุดซ่อมของเดือนนั้น ไม่แยกหายเพราะคนละวัน
-    // จึงรวมเป็นกลุ่มตาม BU + สายมิเตอร์ เพื่อให้เห็นงานซ่อมทั้งหมดในเดือนปัจจุบัน
-    const buKey = r.bu || selectedBU || "ทุก BU";
-    const meterKey = r.meterKey || "ไม่ระบุ";
-    const key = `${buKey}|${meterKey}`;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(r);
-  });
+    .sort((a,b) =>
+      dateSortValue(a.dateObj) - dateSortValue(b.dateObj) ||
+      cleanText(a.bu).localeCompare(cleanText(b.bu), "th") ||
+      cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), "th") ||
+      cleanText(a.customer_name).localeCompare(cleanText(b.customer_name), "th")
+    );
 
   const output = [];
-  groups.forEach((repairs, key) => {
-    repairs.sort((a,b) => dateSortValue(a.dateObj) - dateSortValue(b.dateObj) || (a.priority - b.priority));
-    const first = repairs[0];
-    const relatedMarkets = uniqueRowsByIdName(repairs.flatMap(repair => takeByStatusForMeter(marketRows, repair)));
-    // วางจุดซ่อมไว้ก่อน แล้วต่อด้วยลูกค้าออกตลาดสายเดียวกัน
-    const routePoints = uniqueRowsByIdName([...repairs, ...relatedMarkets]);
+
+  candidates.forEach((repair, repairIndex) => {
+    const relatedMarkets = uniqueRowsByIdName(takeByStatusForMeter(marketRows, repair));
+
+    // จุดซ่อมต้องอยู่ในแผนเสมอ แล้วต่อด้วยจุดออกตลาดในสายเดียวกัน
+    const routePoints = uniqueRowsByIdName([repair, ...relatedMarkets]);
     const start = startForRoute(routePoints);
     const ordered = orderCircularRoute(start, routePoints);
-    const routeDate = thaiMonthYearLabel();
-    const routeId = `ตารางซ่อม ${routeDate} ${first.bu || selectedBU || "ทุก BU"} สาย ${first.meterKey || "ไม่ระบุ"}`;
+    const routeDate = repair.dateObj
+      ? repair.dateObj.toLocaleDateString("th-TH", { day:"numeric", month:"long", year:"2-digit" })
+      : thaiMonthYearLabel();
+    const routeId = `ตารางซ่อม ${routeDate} ${repair.bu || selectedBU || "ทุก BU"} สาย ${repair.meterKey || "ไม่ระบุ"}`;
 
     ordered.forEach((row, idx) => output.push({
       ...row,
       plan_day: 1,
-      plan_date: first.dateObj || thaiNow(),
+      plan_date: repair.dateObj || thaiNow(),
       route_group: routeId,
       stop_no: `${idx + 1}/${ordered.length}`,
       start_name: start.name,
-      priorityLabel: row.type === "ซ่อม" ? (row.priorityLabel || "ซ่อม") : row.priorityLabel
+      priorityLabel: row.type === "ซ่อม" ? (row.priorityLabel || "ซ่อม") : row.priorityLabel,
+      __repairIndex: repairIndex + 1
     }));
   });
 
