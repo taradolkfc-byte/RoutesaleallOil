@@ -1,7 +1,7 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
 // URL Apps Script ของคุณ
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbz_jybKjIdUFAt44LtRnea7IIQ8RbzATZTQgRqIRdFot6TbuxKcOVbqm3qjrsO4Fcxg/exec";
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxLDIGniwUc2lNzG0ten-T4f7UMJ_RyA9dMYg1rphu9ZuVWicfiFOPpfdO_HyRNCTJ5/exec";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
@@ -790,6 +790,156 @@ function orderCircularRoute(start, points) {
   best = pullPointsThatAreOnTheWay(start, best);
   return [...best, ...noCoord];
 }
+
+
+// ===== Pump-first route optimizer =====
+// ใช้เฉพาะโหมด "ตามแผนปรับปรุงปั๊ม"
+// เงื่อนไข: จุดที่ 1 ต้องเป็นจุดปรับปรุงปั๊มเสมอ จากนั้นเรียงจุดที่เหลือให้เดินทางไป-กลับฐานสั้นที่สุด
+// วิธีนี้จะไม่เอาจุดใกล้ฐานมาเป็นต้นทางก่อน และลดการวนกลับไปเก็บย้อนหลัง
+function exactPathFixedStartEnd(startPoint, endPoint, stops) {
+  const n = stops.length;
+  if (n === 0) return [];
+  if (n > 10) return null;
+
+  const memo = new Map();
+  const parent = new Map();
+  const allMask = (1 << n) - 1;
+
+  function dp(mask, last) {
+    const key = `${mask}|${last}`;
+    if (memo.has(key)) return memo.get(key);
+
+    const current = last === -1 ? startPoint : stops[last];
+    if (mask === allMask) {
+      const val = haversine(current, endPoint);
+      memo.set(key, val);
+      return val;
+    }
+
+    let best = Infinity;
+    let bestNext = -1;
+    for (let i = 0; i < n; i++) {
+      if (mask & (1 << i)) continue;
+      const cost = haversine(current, stops[i]) + dp(mask | (1 << i), i);
+      if (cost < best) {
+        best = cost;
+        bestNext = i;
+      }
+    }
+    memo.set(key, best);
+    parent.set(key, bestNext);
+    return best;
+  }
+
+  dp(0, -1);
+  const order = [];
+  let mask = 0;
+  let last = -1;
+  while (mask !== allMask) {
+    const key = `${mask}|${last}`;
+    const next = parent.get(key);
+    if (next === undefined || next < 0) break;
+    order.push(stops[next]);
+    mask |= (1 << next);
+    last = next;
+  }
+  return order;
+}
+
+function greedyPathFixedStartEnd(startPoint, endPoint, stops) {
+  const remaining = stops.map(p => ({ ...p }));
+  const order = [];
+  let current = startPoint;
+
+  while (remaining.length) {
+    let bestIndex = 0;
+    let bestScore = Infinity;
+    remaining.forEach((p, i) => {
+      // เลือกจุดที่ทำให้ระยะจากปัจจุบัน + ทางกลับฐานสมเหตุสมผลที่สุด
+      // ลดกรณีวิ่งออกไปไกลแล้วต้องย้อนกลับมาเก็บจุดกลางทาง
+      const dCurrent = haversine(current, p);
+      const dEnd = haversine(p, endPoint);
+      const score = dCurrent + dEnd * 0.28;
+      if (score < bestScore) {
+        bestScore = score;
+        bestIndex = i;
+      }
+    });
+    const next = remaining.splice(bestIndex, 1)[0];
+    order.push(next);
+    current = next;
+  }
+
+  return twoOptOpenPath(startPoint, endPoint, order);
+}
+
+function openPathDistance(startPoint, endPoint, order) {
+  if (!order.length) return haversine(startPoint, endPoint);
+  let total = haversine(startPoint, order[0]);
+  for (let i = 0; i < order.length - 1; i++) total += haversine(order[i], order[i + 1]);
+  total += haversine(order[order.length - 1], endPoint);
+  return total;
+}
+
+function twoOptOpenPath(startPoint, endPoint, order) {
+  if (order.length < 4) return order;
+  let best = order.map(p => ({ ...p }));
+  let improved = true;
+  let guard = 0;
+  while (improved && guard < 80) {
+    improved = false;
+    guard++;
+    const base = openPathDistance(startPoint, endPoint, best);
+    outer:
+    for (let i = 0; i < best.length - 1; i++) {
+      for (let k = i + 1; k < best.length; k++) {
+        const candidate = [
+          ...best.slice(0, i),
+          ...best.slice(i, k + 1).reverse(),
+          ...best.slice(k + 1)
+        ];
+        const d = openPathDistance(startPoint, endPoint, candidate);
+        if (d + 0.001 < base) {
+          best = candidate;
+          improved = true;
+          break outer;
+        }
+      }
+    }
+  }
+  return best;
+}
+
+function optimizePumpFirstRoute(startDepot, list, maxStops = MAX_ROUTE_CUSTOMER_STOPS) {
+  const valid = list.filter(validCoord).map(p => ({ ...p }));
+  const pumpIndex = valid.findIndex(r => cleanText(r.type) === "ปรับปรุงปั๊ม");
+  if (pumpIndex < 0) return orderCircularRoute(startDepot, valid).slice(0, maxStops);
+
+  const pump = valid[pumpIndex];
+  let others = valid.filter((_, idx) => idx !== pumpIndex);
+
+  // จำกัดจำนวนจุดรวมให้ตรงกับ Google Maps/Map ไม่เกิน 9 จุด: ปั๊ม 1 จุด + จุดออกตลาด 8 จุด
+  // เลือกจุดที่เหมาะกับการต่อเส้นจากปั๊มกลับฐานที่สุด ไม่ใช่เอาจุดตามลำดับเดิมแบบทื่อ ๆ
+  if (others.length > maxStops - 1) {
+    others = others
+      .map(p => ({
+        ...p,
+        __score: Math.min(
+          haversine(pump, p) + haversine(p, startDepot),
+          haversine(startDepot, p) * 1.15 + haversine(pump, p) * 0.35
+        )
+      }))
+      .sort((a, b) => a.__score - b.__score)
+      .slice(0, maxStops - 1)
+      .map(({ __score, ...p }) => p);
+  }
+
+  let afterPump = exactPathFixedStartEnd(pump, startDepot, others);
+  if (!afterPump) afterPump = greedyPathFixedStartEnd(pump, startDepot, others);
+  afterPump = twoOptOpenPath(pump, startDepot, afterPump);
+
+  return [pump, ...afterPump].slice(0, maxStops);
+}
 function takeByStatusForMeter(marketRows, pump) {
   const selectedBU = getSelectedStartBU();
   const sameMeter = marketRows
@@ -815,23 +965,12 @@ function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
   const output = [];
 
   selectedPumps.forEach(pump => {
-    // โหมด "ตามแผนปรับปรุงปั๊ม"
-    // 1) จุดแรกต้องเป็น "จุดปรับปรุงปั๊ม" เสมอ
-    // 2) จำกัดจุดรวมที่นำไปแสดงบน Map/Google Maps ไม่เกิน 9 จุด
-    //    ดังนั้น จุดออกตลาดที่ตามหลังจะถูกจำกัดไม่เกิน 8 จุด
-    // 3) ยังใช้จุดเริ่มจากดรอปดาวเดิมได้เหมือนเดิม
-    const relatedMarkets = takeByStatusForMeter(marketRows, pump)
-      .filter(validCoord)
-      .slice(0, Math.max(0, MAX_ROUTE_CUSTOMER_STOPS - 1));
-
+    const relatedMarkets = takeByStatusForMeter(marketRows, pump);
     const routeDate = pump.dateObj ? pump.dateObj.toLocaleDateString("th-TH", { day: "numeric", month: "long", year: "2-digit" }) : pump.dateRaw;
     const routeId = `${pump.bu || "BU-?"} สาย ${pump.meterKey} วันที่ ${routeDate}`;
-    const start = startForRoute([pump, ...relatedMarkets]);
-
-    // เรียงเฉพาะจุดออกตลาด ส่วนปั๊มปรับปรุงล็อกเป็นลำดับ 1
-    const orderedMarkets = orderCircularRoute(start, relatedMarkets);
-    const ordered = [pump, ...orderedMarkets].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
-
+    const routePoints = [pump, ...relatedMarkets];
+    const start = startForRoute(routePoints);
+    const ordered = orderCircularRoute(start, routePoints);
     ordered.forEach((row, idx) => output.push({
       ...row,
       plan_day: 1,
@@ -839,7 +978,7 @@ function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
       route_group: routeId,
       stop_no: `${idx + 1}/${ordered.length}`,
       start_name: start.name,
-      priorityLabel: row.type === "ปรับปรุงปั๊ม" ? "1-ปรับปรุงปั๊ม" : row.priorityLabel
+      priorityLabel: idx === 0 && row.type === "ปรับปรุงปั๊ม" ? "1-ปรับปรุงปั๊ม" : row.priorityLabel
     }));
   });
 
@@ -1034,10 +1173,18 @@ function getRouteStartForList(list) {
 
 
 function optimizeStopsForDisplay(list) {
-  // สำคัญ: ไม่เรียงลำดับซ้ำตรงนี้
-  // buildPumpPlanRows / buildNormalPlanRows / buildRepairPlanRows เรียงลำดับไว้แล้ว
-  // ถ้าเรียงซ้ำ จุดปรับปรุงปั๊มอาจหลุดจากลำดับที่ 1 และจำนวนจุดใน Map/Google Maps จะสับสน
-  return list.filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  // Map และ Google Maps ใช้จุดชุดเดียวกันเสมอ
+  const valid = list.filter(validCoord);
+  if (!valid.length) return [];
+  const start = getRouteStartForList(list);
+
+  // โหมดปรับปรุงปั๊ม: บังคับให้จุดแรกเป็นจุดปรับปรุงปั๊ม แล้วคำนวณจุดที่เหลือต่อจากปั๊มกลับฐาน
+  // แก้ปัญหาวิ่งวนกลับไปกลับมา เช่น 1 -> 6 -> 7 -> 8 -> 9 -> 2 แทนการกระโดดไปมา
+  if (getPlanSettings().mode === "pump" && valid.some(r => cleanText(r.type) === "ปรับปรุงปั๊ม")) {
+    return optimizePumpFirstRoute(start, valid, MAX_ROUTE_CUSTOMER_STOPS);
+  }
+
+  return orderCircularRoute(start, valid).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
 }
 function routeDisplayStops(list) {
   return optimizeStopsForDisplay(list);
@@ -1086,7 +1233,7 @@ function renderRouteSummary(rows) {
     const list = groups.get(name);
     const first = list[0];
     const idx = keys.indexOf(name);
-    const routeNames = routeDisplayStops(list).map(x => x.customer_name || x.customer_id).filter(Boolean).join(" → ");
+    const routeNames = list.map(x => x.customer_name || x.customer_id).filter(Boolean).join(" → ");
     const active = name === selectedRouteKey ? " active" : "";
     return `<button class="route-item route-button${active}" data-route-key="${escapeHtml(name)}" type="button"><strong>${idx + 1}. ${escapeHtml(name)}</strong><br><span>เริ่ม/วนกลับ: ${escapeHtml(first.start_name || "-")}</span><br><small>${escapeHtml(routeNames)} → ${escapeHtml(first.start_name || "จุดเริ่มต้น")}</small></button>`;
   }).join("");
