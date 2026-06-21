@@ -940,6 +940,96 @@ function optimizePumpFirstRoute(startDepot, list, maxStops = MAX_ROUTE_CUSTOMER_
 
   return [pump, ...afterPump].slice(0, maxStops);
 }
+
+
+// ===== Normal market route optimizer =====
+// ใช้เฉพาะโหมด "วันปกติ / ออกตลาดทั่วไป"
+// แนวคิด: ไม่เริ่มจากจุดใกล้ฐานเสมอ แต่ให้เปิดวงออกไปด้านนอกก่อน แล้วค่อยเก็บจุดใกล้ฐานช่วงขากลับ
+// เพื่อแก้เคสสาย 55 ที่ควรไปโซน 3 -> 4 -> 9 -> 6 -> 5 ก่อน แล้วค่อยวนกลับ แทนการเก็บ 1/2 ใกล้ฐานตั้งแต่ต้น
+function aggressivePushNearStartStopsToEnd(start, order) {
+  if (!order || order.length < 5) return order;
+  const distances = order.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const maxD = Math.max(...distances);
+  const minD = Math.min(...distances);
+  if (!Number.isFinite(maxD) || maxD <= 0) return order;
+
+  // เกณฑ์กว้างกว่าเดิมสำหรับวันปกติ: จุดใกล้ฐานไม่ควรถูกหยิบเป็นจุดแรกเสมอ
+  const threshold = Math.max(12, minD + (maxD - minD) * 0.42, maxD * 0.52);
+  const near = [];
+  const far = [];
+  order.forEach((p, idx) => {
+    const d = distances[idx];
+    if (d <= threshold) near.push({ p, d });
+    else far.push(p);
+  });
+
+  // ถ้าทั้งกลุ่มใกล้ฐานเกินไป ไม่แยก เพราะจะทำให้เส้นทางแปลก
+  if (near.length < 2 || far.length < 2 || near.length > Math.ceil(order.length * 0.55)) return order;
+  near.sort((a, b) => b.d - a.d); // จุดใกล้ฐานที่ไกลกว่าไปก่อน ใกล้ฐานสุดท้ายไว้ก่อนกลับฐาน
+  return [...far, ...near.map(x => x.p)];
+}
+
+function routeNormalMarketPenalty(start, route) {
+  if (!route.length) return 0;
+  const distances = route.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const maxD = Math.max(...distances);
+  const minD = Math.min(...distances);
+  const nearThreshold = Math.max(12, minD + (maxD - minD) * 0.40, maxD * 0.50);
+  let penalty = 0;
+
+  // ลงโทษหนักถ้า 1-3 จุดแรกยังเป็นจุดใกล้ฐาน เพราะมักทำให้วิ่งออกไปแล้วต้องย้อนกลับมาเก็บโซนไกล
+  route.slice(0, Math.min(3, route.length)).forEach((p, idx) => {
+    const d = distances[idx];
+    if (d < nearThreshold) penalty += (nearThreshold - d) * (idx === 0 ? 90 : idx === 1 ? 55 : 35);
+  });
+
+  // ให้รางวัลเส้นทางที่ค่อย ๆ เปิดออกไปหาโซนไกลในช่วงต้น ไม่ใช่วนเก็บใกล้ฐานก่อน
+  const earlyMax = Math.max(...distances.slice(0, Math.min(4, distances.length)));
+  if (earlyMax < maxD * 0.72) penalty += (maxD * 0.72 - earlyMax) * 35;
+
+  // ลดการกระโดดกลับเข้าฐานกลางคันก่อนออกไกลอีกครั้ง
+  for (let i = 1; i < distances.length - 1; i++) {
+    const prev = distances[i - 1], cur = distances[i], next = distances[i + 1];
+    if (cur < nearThreshold && next > cur + 10 && prev > cur + 6) penalty += 80;
+  }
+
+  return penalty;
+}
+
+function optimizeNormalMarketRoute(start, list, maxStops = MAX_ROUTE_CUSTOMER_STOPS) {
+  const valid = list.filter(validCoord).slice(0, maxStops).map(p => ({ ...p }));
+  const noCoord = list.filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord].slice(0, maxStops);
+
+  const candidates = [];
+  const sweep = circularSweepClosedOrder(start, valid);
+  const baseVariants = [sweep, [...sweep].reverse(), orderCircularRoute(start, valid), nearestNeighborOrder(start, valid)];
+
+  baseVariants.forEach(base => {
+    for (let i = 0; i < base.length; i++) {
+      const rotated = [...base.slice(i), ...base.slice(0, i)];
+      candidates.push(rotated);
+      candidates.push(aggressivePushNearStartStopsToEnd(start, rotated));
+      candidates.push(pullPointsThatAreOnTheWay(start, aggressivePushNearStartStopsToEnd(start, rotated)));
+    }
+  });
+
+  const unique = [];
+  const seen = new Set();
+  for (const c of candidates) {
+    const key = c.map(x => `${norm(x.customer_id)}:${norm(x.customer_name)}:${cleanText(x.lat)}:${cleanText(x.lng)}`).join('|');
+    if (!seen.has(key)) { seen.add(key); unique.push(c); }
+  }
+
+  const best = unique
+    .map(route => ({
+      route,
+      score: routeDistanceFromStart(start, route) + routeNormalMarketPenalty(start, route)
+    }))
+    .sort((a, b) => a.score - b.score)[0];
+
+  return [...((best && best.route) || valid), ...noCoord].slice(0, maxStops);
+}
 function takeByStatusForMeter(marketRows, pump) {
   const selectedBU = getSelectedStartBU();
   const sameMeter = marketRows
@@ -1182,6 +1272,11 @@ function optimizeStopsForDisplay(list) {
   // แก้ปัญหาวิ่งวนกลับไปกลับมา เช่น 1 -> 6 -> 7 -> 8 -> 9 -> 2 แทนการกระโดดไปมา
   if (getPlanSettings().mode === "pump" && valid.some(r => cleanText(r.type) === "ปรับปรุงปั๊ม")) {
     return optimizePumpFirstRoute(start, valid, MAX_ROUTE_CUSTOMER_STOPS);
+  }
+
+  // โหมดวันปกติ/ออกตลาดทั่วไป: ใช้ตัวเรียงเฉพาะที่เปิดวงไปโซนไกลก่อน แล้วค่อยเก็บจุดใกล้ฐานช่วงขากลับ
+  if (getPlanSettings().mode === "normal") {
+    return optimizeNormalMarketRoute(start, valid, MAX_ROUTE_CUSTOMER_STOPS);
   }
 
   return orderCircularRoute(start, valid).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
