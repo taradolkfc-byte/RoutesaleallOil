@@ -1,7 +1,7 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
 // URL Apps Script ของคุณ
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbz_jybKjIdUFAt44LtRnea7IIQ8RbzATZTQgRqIRdFot6TbuxKcOVbqm3qjrsO4Fcxg/exec";
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxLDIGniwUc2lNzG0ten-T4f7UMJ_RyA9dMYg1rphu9ZuVWicfiFOPpfdO_HyRNCTJ5/exec";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
