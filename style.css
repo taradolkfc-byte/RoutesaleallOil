@@ -81,17 +81,53 @@ tr:nth-child(even) td { background:#f9fafb; }
 @media (max-width:900px){ .checkin-btn{width:100%;} }
 
 
-/* ===== Final route/table fixes 20260615-06 ===== */
+/* ===== Final route/table fixes 20260615-08 ===== */
 .route-metrics { margin-top:6px !important; color:#166534 !important; font-weight:700; }
 .table-wrap { max-height:70vh; overflow:auto; }
 .table-wrap table thead th { position:sticky; top:0; z-index:10; box-shadow:0 1px 0 rgba(255,255,255,.2); }
 .detail-table th { position:static !important; top:auto !important; }
 @media (max-width:900px){ .table-wrap{max-height:65vh;} }
 
-/* ===== Pump first marker update ===== */
+
+/* ===== Daily planning + check-in 100m update ===== */
+.plan-controls { display:grid; grid-template-columns:220px 260px 220px; gap:10px; margin-top:10px; align-items:end; }
+.plan-controls label { color:#0f172a; font-weight:700; font-size:13px; }
+.plan-controls select, .plan-controls input { margin-top:5px; width:100%; }
+@media (max-width:900px){ .plan-controls{grid-template-columns:1fr;} }
+
+/* ===== Update 20260615-09: plan controls + detail table scroll ===== */
+.detail-table-wrap { max-height:430px; overflow:auto; }
+.detail-table-wrap .detail-table thead th { position:sticky !important; top:0 !important; z-index:3; }
+@media (max-width:900px){ .detail-table-wrap{max-height:360px;} }
+
+/* ===== Update: focus marker by selected plan mode ===== */
 .route-focus-icon span {
   background:#16a34a !important;
   color:#fff !important;
   border-color:#ffffff !important;
 }
 .leaflet-marker-icon.route-focus-icon { background:transparent; border:0; }
+
+
+/* ===== Repair all current month + 9 point sync ===== */
+.route-limit-note { margin:8px 0 0; color:#92400e; font-weight:700; }
+
+
+/* ===== Done check-in route markers ===== */
+.route-done-icon span {
+  width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+  background:#16a34a; color:#fff; font-weight:900; border:3px solid #fff; box-shadow:0 2px 8px rgba(15,23,42,.35);
+  font-size:18px;
+}
+.leaflet-marker-icon.route-done-icon { background:transparent; border:0; }
+.done-row td { background:#ecfdf5 !important; }
+.visit-state { display:inline-block; margin-top:3px; padding:2px 7px; border-radius:999px; font-size:11px; font-weight:700; }
+.visit-state.done { background:#dcfce7; color:#166534; }
+.visit-state.pending { background:#fef3c7; color:#92400e; }
+.route-check-summary { color:#0f766e !important; font-weight:700; margin-top:6px !important; }
+
+
+/* ===== UX update 20260620-01 ===== */
+.route-show-all { grid-column:1/-1; background:#0b3b70; color:#fff; width:max-content; margin-bottom:4px; }
+.geo-area { color:#0f172a; }
+@media (max-width:900px){ .route-show-all{width:100%;} }
