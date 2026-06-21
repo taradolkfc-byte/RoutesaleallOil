@@ -76,10 +76,10 @@
       <label>วันที่ออกตลาด<input name="visit_date" type="date" required /></label>
       <label>ประเภทงาน
         <select name="job_type">
-          <option value="ออกตลาด">ออกตลาด</option>
+          <option value="ออกเยี่ยมลูกค้า">ออกเยี่ยมลูกค้า</option>
+          <option value="ลูกค้าใหม่/มุ่งหวัง">ลูกค้าใหม่/มุ่งหวัง</option>
           <option value="ปรับปรุงปั๊ม">ปรับปรุงปั๊ม</option>
           <option value="ซ่อม">ซ่อม</option>
-          <option value="ติดตามลูกค้า">ติดตามลูกค้า</option>
         </select>
       </label>
       <label>รหัสลูกค้า<input name="customer_id" placeholder="เช่น C001" /></label>
@@ -112,9 +112,8 @@
         <select name="visit_status">
           <option value="สำเร็จ">สำเร็จ</option>
           <option value="ไม่พบลูกค้า">ไม่พบลูกค้า</option>
-          <option value="เลื่อน">เลื่อน</option>
           <option value="ปิดร้าน">ปิดร้าน</option>
-          <option value="เข้าพบไม่ได้">เข้าพบไม่ได้</option>
+          <option value="เลิกกิจการ">เลิกกิจการ</option>
         </select>
       </label>
       <button id="checkinBtn" class="checkin-btn" type="button">เช็คอิน GPS</button>
