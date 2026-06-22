@@ -1579,9 +1579,32 @@ function renderRouteSummary(rows) {
 
   box.querySelectorAll(".route-button").forEach(btn => btn.addEventListener("click", () => {
     try {
+      // สำคัญ: ไม่เรียก renderRouteSummary() ซ้ำตอนคลิก เพราะทำให้เว็บค้างในโหมดวันปกติ/ออกตลาดทั่วไป
       selectedRouteKey = btn.dataset.routeKey;
       routeCollapsedToSelected = true;
-      renderRouteSummary(plannedRows);
+
+      box.querySelectorAll(".route-button").forEach(b => {
+        const isActive = b.dataset.routeKey === selectedRouteKey;
+        b.classList.toggle("active", isActive);
+        b.style.display = isActive ? "block" : "none";
+      });
+
+      if (!document.getElementById("showRouteCardsBtn")) {
+        const backBtn = document.createElement("button");
+        backBtn.id = "showRouteCardsBtn";
+        backBtn.className = "route-show-all";
+        backBtn.type = "button";
+        backBtn.textContent = "แสดงแผนทั้งหมด";
+        backBtn.addEventListener("click", () => {
+          routeCollapsedToSelected = false;
+          renderRouteSummary(plannedRows);
+        });
+        box.prepend(backBtn);
+      }
+
+      renderRouteDetail(currentRouteGroups.get(selectedRouteKey) || []);
+      const form = document.getElementById("planForm");
+      if (form) applySelectedRouteToForm(form);
     } catch (err) {
       console.error(err);
       const detail = document.getElementById("routeDetail");
@@ -1636,13 +1659,21 @@ function detailAreaHtml(row, index) {
   return `<span class="geo-area" data-lat="${escapeHtml(row.lat)}" data-lng="${escapeHtml(row.lng)}">กำลังค้นหาพื้นที่...</span>`;
 }
 async function hydrateDetailAreas() {
+  // ทำแบบไม่บล็อกหน้าเว็บ และจำกัดจำนวนครั้งที่เรียก Reverse Geocode
   const nodes = Array.from(document.querySelectorAll(".geo-area"));
-  for (const node of nodes) {
+  const limit = Math.min(nodes.length, 9);
+  for (let i = 0; i < limit; i++) {
+    const node = nodes[i];
     const lat = node.dataset.lat;
     const lng = node.dataset.lng;
     if (!lat || !lng) continue;
-    const area = await reverseGeocode(lat, lng);
-    node.textContent = area || "ไม่พบข้อมูลพื้นที่";
+    try {
+      const area = await reverseGeocode(lat, lng);
+      node.textContent = area || `${lat}, ${lng}`;
+    } catch (e) {
+      node.textContent = `${lat}, ${lng}`;
+    }
+    await new Promise(resolve => setTimeout(resolve, 0));
   }
 }
 function makeNumberIcon(number, variant = "normal") {
