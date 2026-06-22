@@ -1021,9 +1021,9 @@ function normalLoopBacktrackPenalty(start, order) {
 }
 
 function makeTwoSideLoopCandidates(start, points) {
-  // อัลกอริทึมทั่วไปสำหรับทุกสาย: แบ่งจุดเป็น 2 ฝั่งของแกนจากฐานไปจุดไกลสุด
-  // แล้วจัดเป็น “ขาออกฝั่งหนึ่ง → ขากลับอีกฝั่งหนึ่ง” เพื่อลดการวกกลับไปเก็บย้อนหลัง
-  const valid = points.filter(validCoord).map(p => ({ ...p }));
+  // อัลกอริทึมกลางแบบไม่ใช้ recursion เพื่อกันหน้าเว็บ Error/ค้างเวลาเปิดรายละเอียดแผน
+  // แบ่งจุดเป็น 2 ฝั่งของแกนจากจุดเริ่มไปจุดไกลสุด แล้วสร้าง candidate ขาออก/ขากลับ
+  const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
   if (valid.length < 4) return [valid];
 
   const far = [...valid].sort((a, b) =>
@@ -1036,46 +1036,47 @@ function makeTwoSideLoopCandidates(start, points) {
     p,
     side: signedSideFromAxis(start, far, p),
     t: projectionOnAxis(start, far, p),
-    d: haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) })
+    d: haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }),
+    ang: angleFromStart(start, p)
   }));
 
   const sideA = enriched.filter(x => x.side >= 0).sort((a, b) => a.t - b.t || a.d - b.d).map(x => x.p);
   const sideB = enriched.filter(x => x.side < 0).sort((a, b) => a.t - b.t || a.d - b.d).map(x => x.p);
-  const candidates = [];
+  const byAngle = [...enriched].sort((a, b) => a.ang - b.ang).map(x => x.p);
+  const byAngleReverse = [...byAngle].reverse();
+  const byDistanceOut = [...enriched].sort((a, b) => a.d - b.d).map(x => x.p);
 
-  const add = (arr) => { if (arr && arr.length === valid.length) candidates.push(arr); };
+  const candidates = [];
+  const add = (arr) => {
+    if (arr && arr.length === valid.length) candidates.push(arr);
+  };
+
   add([...sideA, ...[...sideB].reverse()]);
   add([...sideB, ...[...sideA].reverse()]);
   add([...sideA].reverse().concat(sideB));
   add([...sideB].reverse().concat(sideA));
+  add(byAngle);
+  add(byAngleReverse);
+  add(byDistanceOut);
 
-  // สร้าง candidate แบบล็อกจุดใกล้ฐาน 1 จุดแรกไว้ แล้ววน 2 ฝั่งต่อ
-  const first = [...valid].sort((a, b) =>
-    haversine(start, { lat: toNumber(a.lat), lng: toNumber(a.lng) }) -
-    haversine(start, { lat: toNumber(b.lat), lng: toNumber(b.lng) })
-  )[0];
-  if (first) {
-    const rest = removeSameStop(valid, first);
-    const restCandidates = makeTwoSideLoopCandidates(start, rest).filter(c => c.length === rest.length);
-    restCandidates.forEach(c => add([first, ...c]));
-  }
-
-  // ลองกลับทิศทาง/หมุนตำแหน่ง เพื่อเลือกวงที่เข้า-ออกจากฐานดีที่สุด
-  const more = [];
+  // ลองหมุน candidate หลักไม่เกินจำนวนจุด เพื่อเลือกจุดเริ่มของวงที่ดีที่สุด โดยไม่สร้าง recursion
+  const rotated = [];
   candidates.forEach(base => {
-    [base, [...base].reverse()].forEach(b => {
-      for (let i = 0; i < b.length; i++) more.push([...b.slice(i), ...b.slice(0, i)]);
-    });
+    for (let i = 0; i < base.length; i++) rotated.push([...base.slice(i), ...base.slice(0, i)]);
   });
 
   const unique = [];
   const seen = new Set();
-  [...candidates, ...more].forEach(c => {
-    const key = c.map(x => rowUniqueKey(x)).join('|');
-    if (!seen.has(key) && c.length === valid.length) { seen.add(key); unique.push(c); }
+  [...candidates, ...rotated].forEach(c => {
+    const key = c.map(rowUniqueKey).join('|');
+    if (!seen.has(key) && c.length === valid.length) {
+      seen.add(key);
+      unique.push(c);
+    }
   });
   return unique.length ? unique : [valid];
 }
+
 
 function makeNormalSweepCandidates(start, fixed, remaining) {
   if (!remaining.length) return [fixed];
@@ -1220,16 +1221,24 @@ function makeCentroidCircularCandidates(start, points) {
 }
 
 function orderNormalMarketRoute(start, points) {
-  // โหมดวันปกติ/ออกตลาดทั่วไป ทุกสาย:
-  // ใช้หลัก “วิ่งวนรอบกลุ่มลูกค้า” เหมือนตัวอย่างสาย 55/57
-  // ไม่ล็อกแก้ทีละคัน และไม่ใช้ลำดับที่ทำให้เป็นเส้นตรงไป-กลับ
-  const valid = points.filter(validCoord).map(p => ({ ...p }));
-  const noCoord = points.filter(p => !validCoord(p));
+  // โหมดวันปกติ/ออกตลาดทั่วไป ทุกสาย
+  // ใช้ candidate หลายแบบ แต่จำกัดจำนวนและไม่ recursion เพื่อไม่ให้คลิกแผนแล้ว Error
+  const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
+  const noCoord = (points || []).filter(p => !validCoord(p));
   if (valid.length <= 2) return [...valid, ...noCoord];
 
-  const candidates = makeCentroidCircularCandidates(start, valid)
-    .map(c => pullPointsThatAreOnTheWay(start, c))
-    .concat(makeCentroidCircularCandidates(start, valid));
+  const candidates = [];
+  const add = (arr) => {
+    if (!arr || arr.length !== valid.length) return;
+    candidates.push(arr);
+    const pulled = pullPointsThatAreOnTheWay(start, arr);
+    if (pulled && pulled.length === valid.length) candidates.push(pulled);
+  };
+
+  makeCentroidCircularCandidates(start, valid).forEach(add);
+  makeTwoSideLoopCandidates(start, valid).forEach(add);
+  add(circularSweepClosedOrder(start, valid));
+  add(nearestNeighborOrder(start, valid));
 
   const unique = [];
   const seen = new Set();
@@ -1569,9 +1578,15 @@ function renderRouteSummary(rows) {
   });
 
   box.querySelectorAll(".route-button").forEach(btn => btn.addEventListener("click", () => {
-    selectedRouteKey = btn.dataset.routeKey;
-    routeCollapsedToSelected = true;
-    renderRouteSummary(plannedRows);
+    try {
+      selectedRouteKey = btn.dataset.routeKey;
+      routeCollapsedToSelected = true;
+      renderRouteSummary(plannedRows);
+    } catch (err) {
+      console.error(err);
+      const detail = document.getElementById("routeDetail");
+      if (detail) detail.innerHTML = `เกิดข้อผิดพลาดตอนเปิดแผน: ${escapeHtml(err.message || err)}`;
+    }
   }));
   renderRouteDetail(groups.get(selectedRouteKey) || []);
   const form = document.getElementById("planForm");
