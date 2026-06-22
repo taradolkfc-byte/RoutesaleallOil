@@ -5,13 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ระบบวางแผนออกตลาด KCE</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="style.css?v=20260620-repair-all-01" />
+  <link rel="stylesheet" href="style.css?v=20260622-normal-loop-04" />
 </head>
 <body>
   <header class="app-header">
     <div>
       <h1>ระบบวางแผนออกตลาด KCE</h1>
-      <p>แสดงแผนเฉพาะเดือนปัจจุบัน • ตัดจุดที่ออกตลาดแล้ว • เลือกจุดเริ่มต้นที่ใกล้ทั้งเส้นทางที่สุด</p>
+      <p>แสดงแผนเฉพาะเดือนปัจจุบัน • ตัดจุดที่ออกตลาดแล้ว • วางลำดับเส้นทางวนกลับแบบลดการย้อนทาง</p>
     </div>
     <button id="reloadBtn" type="button">รีเฟรชข้อมูล</button>
   </header>
@@ -29,35 +29,6 @@
         <h2>แผนเส้นทางแบบวงกลม</h2>
         <p>คลิกการ์ดแผนแต่ละสายเพื่อดูรายละเอียดและแผนที่ทันที</p>
         <p class="month-note">เดือนที่แสดง: <strong id="currentMonthLabel">-</strong></p>
-        <div class="plan-controls">
-          <label>จุดเริ่ม
-            <select id="startPointInput">
-              <option value="อัตโนมัติ">อัตโนมัติ</option>
-              <option value="สามทองบริการ">สามทองบริการ</option>
-              <option value="เค.ซี.ปิโตรเลียม2006">เค.ซี.ปิโตรเลียม2006</option>
-              <option value="เค.ซี.จี.ปิโตรเลียม">เค.ซี.จี.ปิโตรเลียม</option>
-              <option value="เค.ซี. กรีน เอ็นเนอร์จี">เค.ซี. กรีน เอ็นเนอร์จี</option>
-            </select>
-          </label>
-          <label>โหมดวางแผน
-            <select id="planMode">
-              <option value="pump">ตามแผนปรับปรุงปั๊ม</option>
-              <option value="normal">วันปกติ / ออกตลาดทั่วไป</option>
-              <option value="repair">ตารางซ่อม</option>
-            </select>
-          </label>
-          <label>วางแผนล่วงหน้า
-            <select id="planDays">
-              <option value="1">1 วัน</option>
-              <option value="2">2 วัน</option>
-              <option value="3">3 วัน</option>
-              <option value="4">4 วัน</option>
-              <option value="5">5 วัน</option>
-              <option value="6">6 วัน</option>
-              <option value="7">7 วัน</option>
-            </select>
-          </label>
-        </div>
       </div>
       <label class="check-inline">
         <input id="showAllToggle" type="checkbox" />
@@ -76,10 +47,10 @@
       <label>วันที่ออกตลาด<input name="visit_date" type="date" required /></label>
       <label>ประเภทงาน
         <select name="job_type">
-          <option value="ออกเยี่ยมลูกค้า">ออกเยี่ยมลูกค้า</option>
-          <option value="ลูกค้าใหม่/มุ่งหวัง">ลูกค้าใหม่/มุ่งหวัง</option>
+          <option value="ออกตลาด">ออกตลาด</option>
           <option value="ปรับปรุงปั๊ม">ปรับปรุงปั๊ม</option>
           <option value="ซ่อม">ซ่อม</option>
+          <option value="ติดตามลูกค้า">ติดตามลูกค้า</option>
         </select>
       </label>
       <label>รหัสลูกค้า<input name="customer_id" placeholder="เช่น C001" /></label>
@@ -108,14 +79,6 @@
       <label>เบอร์โทร<input name="phone" placeholder="เบอร์โทร" /></label>
       <label>ละติจูด<input name="lat" placeholder="ละ" /></label>
       <label>ลองจิจูด<input name="lng" placeholder="ลอง" /></label>
-      <label>สถานะเข้าพบ
-        <select name="visit_status">
-          <option value="สำเร็จ">สำเร็จ</option>
-          <option value="ไม่พบลูกค้า">ไม่พบลูกค้า</option>
-          <option value="ปิดร้าน">ปิดร้าน</option>
-          <option value="เลิกกิจการ">เลิกกิจการ</option>
-        </select>
-      </label>
       <button id="checkinBtn" class="checkin-btn" type="button">เช็คอิน GPS</button>
       <label class="wide">หมายเหตุ<textarea name="note" placeholder="หมายเหตุเพิ่มเติม"></textarea></label>
       <button class="submit-btn" type="submit">บันทึกลงชีต “เก็บข้อมูล”</button>
@@ -157,6 +120,6 @@
   </main>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="script.js?v=20260620-repair-all-01"></script>
+  <script src="script.js?v=20260622-normal-loop-04"></script>
 </body>
 </html>
