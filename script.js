@@ -1021,9 +1021,9 @@ function normalLoopBacktrackPenalty(start, order) {
 }
 
 function makeTwoSideLoopCandidates(start, points) {
-  // อัลกอริทึมกลางแบบไม่ใช้ recursion เพื่อกันหน้าเว็บ Error/ค้างเวลาเปิดรายละเอียดแผน
-  // แบ่งจุดเป็น 2 ฝั่งของแกนจากจุดเริ่มไปจุดไกลสุด แล้วสร้าง candidate ขาออก/ขากลับ
-  const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
+  // อัลกอริทึมทั่วไปสำหรับทุกสาย: แบ่งจุดเป็น 2 ฝั่งของแกนจากฐานไปจุดไกลสุด
+  // แล้วจัดเป็น “ขาออกฝั่งหนึ่ง → ขากลับอีกฝั่งหนึ่ง” เพื่อลดการวกกลับไปเก็บย้อนหลัง
+  const valid = points.filter(validCoord).map(p => ({ ...p }));
   if (valid.length < 4) return [valid];
 
   const far = [...valid].sort((a, b) =>
@@ -1036,47 +1036,46 @@ function makeTwoSideLoopCandidates(start, points) {
     p,
     side: signedSideFromAxis(start, far, p),
     t: projectionOnAxis(start, far, p),
-    d: haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }),
-    ang: angleFromStart(start, p)
+    d: haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) })
   }));
 
   const sideA = enriched.filter(x => x.side >= 0).sort((a, b) => a.t - b.t || a.d - b.d).map(x => x.p);
   const sideB = enriched.filter(x => x.side < 0).sort((a, b) => a.t - b.t || a.d - b.d).map(x => x.p);
-  const byAngle = [...enriched].sort((a, b) => a.ang - b.ang).map(x => x.p);
-  const byAngleReverse = [...byAngle].reverse();
-  const byDistanceOut = [...enriched].sort((a, b) => a.d - b.d).map(x => x.p);
-
   const candidates = [];
-  const add = (arr) => {
-    if (arr && arr.length === valid.length) candidates.push(arr);
-  };
 
+  const add = (arr) => { if (arr && arr.length === valid.length) candidates.push(arr); };
   add([...sideA, ...[...sideB].reverse()]);
   add([...sideB, ...[...sideA].reverse()]);
   add([...sideA].reverse().concat(sideB));
   add([...sideB].reverse().concat(sideA));
-  add(byAngle);
-  add(byAngleReverse);
-  add(byDistanceOut);
 
-  // ลองหมุน candidate หลักไม่เกินจำนวนจุด เพื่อเลือกจุดเริ่มของวงที่ดีที่สุด โดยไม่สร้าง recursion
-  const rotated = [];
+  // สร้าง candidate แบบล็อกจุดใกล้ฐาน 1 จุดแรกไว้ แล้ววน 2 ฝั่งต่อ
+  const first = [...valid].sort((a, b) =>
+    haversine(start, { lat: toNumber(a.lat), lng: toNumber(a.lng) }) -
+    haversine(start, { lat: toNumber(b.lat), lng: toNumber(b.lng) })
+  )[0];
+  if (first) {
+    const rest = removeSameStop(valid, first);
+    const restCandidates = makeTwoSideLoopCandidates(start, rest).filter(c => c.length === rest.length);
+    restCandidates.forEach(c => add([first, ...c]));
+  }
+
+  // ลองกลับทิศทาง/หมุนตำแหน่ง เพื่อเลือกวงที่เข้า-ออกจากฐานดีที่สุด
+  const more = [];
   candidates.forEach(base => {
-    for (let i = 0; i < base.length; i++) rotated.push([...base.slice(i), ...base.slice(0, i)]);
+    [base, [...base].reverse()].forEach(b => {
+      for (let i = 0; i < b.length; i++) more.push([...b.slice(i), ...b.slice(0, i)]);
+    });
   });
 
   const unique = [];
   const seen = new Set();
-  [...candidates, ...rotated].forEach(c => {
-    const key = c.map(rowUniqueKey).join('|');
-    if (!seen.has(key) && c.length === valid.length) {
-      seen.add(key);
-      unique.push(c);
-    }
+  [...candidates, ...more].forEach(c => {
+    const key = c.map(x => rowUniqueKey(x)).join('|');
+    if (!seen.has(key) && c.length === valid.length) { seen.add(key); unique.push(c); }
   });
   return unique.length ? unique : [valid];
 }
-
 
 function makeNormalSweepCandidates(start, fixed, remaining) {
   if (!remaining.length) return [fixed];
@@ -1115,144 +1114,48 @@ function makeNormalSweepCandidates(start, fixed, remaining) {
   return candidates;
 }
 
-
-function routeEndpointScore(start, order) {
-  if (!order || !order.length) return 0;
-  const first = order[0];
-  const last = order[order.length - 1];
-  const dFirst = haversine(start, { lat: toNumber(first.lat), lng: toNumber(first.lng) });
-  const dLast = haversine(start, { lat: toNumber(last.lat), lng: toNumber(last.lng) });
-  const allD = order.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
-  const minD = Math.min(...allD);
-  const maxD = Math.max(...allD);
-
-  // ปลายทางเข้า/ออกควรเป็นจุดใกล้ฐาน เพื่อให้วิ่งออกเป็นวงแล้วกลับฐาน ไม่ใช่เส้นตรงไป-กลับ
-  let penalty = 0;
-  if (dFirst > minD + 12) penalty += (dFirst - minD) * 5;
-  if (dLast > minD + 12) penalty += (dLast - minD) * 5;
-
-  // จุดใกล้ฐานไม่ควรถูกวางไว้กลางเส้นทาง เพราะจะทำให้กลับไปกลับมา
-  order.forEach((p, idx) => {
-    const d = allD[idx];
-    if (idx > 1 && idx < order.length - 2 && d < Math.max(8, maxD * 0.42)) penalty += 35;
-  });
-
-  return penalty;
-}
-
-function distanceTrendPenalty(start, order) {
-  // เส้นทางวงกลมที่ดีควรค่อย ๆ ออกห่างฐาน แล้วค่อย ๆ กลับ ไม่ใช่ใกล้-ไกล-ใกล้-ไกล หลายรอบ
-  if (!order || order.length < 5) return 0;
-  const ds = order.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
-  let switches = 0;
-  let lastSign = 0;
-  for (let i = 1; i < ds.length; i++) {
-    const diff = ds[i] - ds[i - 1];
-    const sign = Math.abs(diff) < 3 ? lastSign : (diff > 0 ? 1 : -1);
-    if (lastSign && sign && sign !== lastSign) switches++;
-    if (sign) lastSign = sign;
-  }
-  return Math.max(0, switches - 1) * 45;
-}
-
-function normalCircularRouteScore(start, order) {
-  // คะแนนกลางสำหรับทุกสาย: ระยะรวม + ลดการวกกลับ + ลดจุดใกล้ฐานกลางทาง
-  return routeDistanceFromStart(start, order)
-    + routeTurnPenalty(start, order) * 1.15
-    + routeEndpointScore(start, order)
-    + distanceTrendPenalty(start, order)
-    + normalLoopBacktrackPenalty(start, order) * 0.45;
-}
-
-function makeCentroidCircularCandidates(start, points) {
-  const valid = points.filter(validCoord).map(p => ({ ...p }));
-  if (valid.length <= 2) return [valid];
-
-  const center = {
-    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
-    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
-  };
-
-  const withAngle = valid.map(p => ({
-    ...p,
-    __angle: Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng),
-    __dStart: haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) })
-  })).sort((a, b) => a.__angle - b.__angle);
-
-  const candidates = [];
-  const addCandidate = (arr) => {
-    const clean = arr.map(({ __angle, __dStart, ...p }) => p);
-    if (clean.length === valid.length) candidates.push(clean);
-  };
-
-  // วนตามขอบกลุ่มลูกค้าแบบตามเข็ม/ทวนเข็ม และลองทุกจุดเป็นจุดเริ่มของวง
-  [withAngle, [...withAngle].reverse()].forEach(base => {
-    for (let i = 0; i < base.length; i++) {
-      addCandidate([...base.slice(i), ...base.slice(0, i)]);
-    }
-  });
-
-  // เพิ่ม candidate ที่ให้จุดใกล้ฐานอยู่ต้น/ท้าย แต่ยังเดินเป็นวง ไม่ใช่เส้นตรงไป-กลับ
-  const sortedNear = [...withAngle].sort((a, b) => a.__dStart - b.__dStart).slice(0, Math.min(3, withAngle.length));
-  [withAngle, [...withAngle].reverse()].forEach(base => {
-    sortedNear.forEach(n => {
-      const idx = base.findIndex(p => rowUniqueKey(p) === rowUniqueKey(n));
-      if (idx >= 0) addCandidate([...base.slice(idx), ...base.slice(0, idx)]);
-      if (idx >= 0) {
-        const rotated = [...base.slice(idx + 1), ...base.slice(0, idx + 1)];
-        addCandidate(rotated); // ให้จุดใกล้ฐานอีกตัวไปอยู่ท้ายก่อนวนกลับ
-      }
-    });
-  });
-
-  // เพิ่ม candidate แบบแบ่งฝั่ง แต่ให้ใช้เป็นตัวเลือก ไม่ใช่บังคับ เพื่อช่วยบางพื้นที่ที่เป็นแนวยาว
-  makeTwoSideLoopCandidates(start, valid).forEach(addCandidate);
-
-  const unique = [];
-  const seen = new Set();
-  candidates.forEach(c => {
-    const key = c.map(rowUniqueKey).join('|');
-    if (!seen.has(key) && c.length === valid.length) {
-      seen.add(key);
-      unique.push(c);
-    }
-  });
-  return unique.length ? unique : [valid];
-}
-
 function orderNormalMarketRoute(start, points) {
-  // โหมดวันปกติ/ออกตลาดทั่วไป ทุกสาย
-  // ใช้ candidate หลายแบบ แต่จำกัดจำนวนและไม่ recursion เพื่อไม่ให้คลิกแผนแล้ว Error
-  const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
-  const noCoord = (points || []).filter(p => !validCoord(p));
+  // โหมดวันปกติ/ออกตลาดทั่วไป:
+  // 1) เก็บจุดออกจากฐานที่ต่อเนื่อง 1-2 จุดแรกได้
+  // 2) หลังจากนั้นเรียงแบบกวาดเป็นวงตามมุมจากจุดเริ่ม ไม่กระโดดกลับไปมา
+  // 3) เลือก candidate ที่ระยะรวม + การวกกลับต่ำที่สุด
+  const valid = points.filter(validCoord).map(p => ({ ...p }));
+  const noCoord = points.filter(p => !validCoord(p));
   if (valid.length <= 2) return [...valid, ...noCoord];
 
-  const candidates = [];
-  const add = (arr) => {
-    if (!arr || arr.length !== valid.length) return;
-    candidates.push(arr);
-    const pulled = pullPointsThatAreOnTheWay(start, arr);
-    if (pulled && pulled.length === valid.length) candidates.push(pulled);
-  };
+  const { fixed, remaining } = chooseFirstTwoForNormalRoute(start, valid);
+  const candidates = makeNormalSweepCandidates(start, fixed, remaining);
 
-  makeCentroidCircularCandidates(start, valid).forEach(add);
-  makeTwoSideLoopCandidates(start, valid).forEach(add);
-  add(circularSweepClosedOrder(start, valid));
-  add(nearestNeighborOrder(start, valid));
+  // เพิ่มอัลกอริทึมทั่วไปสำหรับทุกสาย: แบ่งเส้นทางเป็นขาออก/ขากลับแบบ 2 ฝั่ง
+  // ทำให้ไม่ต้องแก้ทีละคัน และลดปัญหา 1→2→วกกลับ→ออกไปใหม่
+  candidates.push(...makeTwoSideLoopCandidates(start, valid));
+  if (fixed.length) {
+    makeTwoSideLoopCandidates(start, remaining).forEach(c => candidates.push([...fixed, ...c]));
+  }
+
+  // สำหรับกรณีที่จุดแรกที่ใกล้ฐานทำให้ภาพรวมแย่ ให้ลองไม่ล็อก fixed ด้วย แต่ให้ penalty นิดหน่อย
+  candidates.push(...makeNormalSweepCandidates(start, [], valid));
 
   const unique = [];
   const seen = new Set();
   candidates.forEach(c => {
-    const key = c.map(rowUniqueKey).join('|');
-    if (!seen.has(key) && c.length === valid.length) {
-      seen.add(key);
-      unique.push(c);
-    }
+    const key = c.map(x => `${norm(x.customer_id)}:${norm(x.customer_name)}:${cleanText(x.lat)}:${cleanText(x.lng)}`).join('|');
+    if (!seen.has(key)) { seen.add(key); unique.push(c); }
   });
 
-  const best = (unique.length ? unique : [valid])
-    .sort((a, b) => normalCircularRouteScore(start, a) - normalCircularRouteScore(start, b))[0] || valid;
+  let best = unique.sort((a, b) => normalMarketRouteScore(start, a) - normalMarketRouteScore(start, b))[0] || valid;
 
+  // ถ้าจุดแรก/สองที่ระบบเลือกไว้ไม่ได้ทำให้ระยะพัง ให้คงไว้ตามที่ผู้ใช้ต้องการในเคส ST สาย 57
+  if (fixed.length >= 2) {
+    const bestWithFixed = unique
+      .filter(c => rowUniqueKey(c[0]) === rowUniqueKey(fixed[0]) && rowUniqueKey(c[1]) === rowUniqueKey(fixed[1]))
+      .sort((a, b) => normalMarketRouteScore(start, a) - normalMarketRouteScore(start, b))[0];
+    if (bestWithFixed && normalMarketRouteScore(start, bestWithFixed) <= normalMarketRouteScore(start, best) * 1.12) {
+      best = bestWithFixed;
+    }
+  }
+
+  best = pullPointsThatAreOnTheWay(start, best);
   return [...best, ...noCoord];
 }
 
@@ -1288,31 +1191,29 @@ function reorderByIndexPattern(order, pattern) {
   return out;
 }
 
-
 function applyNormalRouteFieldFeedback(start, order, sourcePoints) {
-  // ใช้กับทุกสายของโหมดวันปกติ/ออกตลาดทั่วไปเท่านั้น
-  // สร้าง candidate แบบวงกลมหลายแบบ แล้วเลือกแบบที่ไม่วกกลับและระยะรวมดีที่สุด
-  const valid = (order || []).filter(validCoord);
-  if (valid.length <= 2) return order;
+  // โหมด "วันปกติ / ออกตลาดทั่วไป" ใช้อัลกอริทึมกลางกับทุกสาย
+  // ไม่ต้องแก้ทีละคัน: เลือกลำดับที่ระยะรวมสั้น + ไม่วกกลับ + ไม่สลับฝั่งบ่อยที่สุด
+  const candidates = [order];
+  candidates.push(...makeTwoSideLoopCandidates(start, order));
+  candidates.push(...makeNormalSweepCandidates(start, [], order));
 
-  const candidates = [
-    order,
-    ...makeCentroidCircularCandidates(start, valid),
-    ...makeCentroidCircularCandidates(start, sourcePoints || valid)
-  ];
+  let best = candidates
+    .filter(c => c && c.length === order.length)
+    .sort((a, b) => normalMarketRouteScore(start, a) - normalMarketRouteScore(start, b))[0] || order;
 
-  const unique = [];
-  const seen = new Set();
-  candidates.forEach(c => {
-    if (!c || c.length !== valid.length) return;
-    const key = c.map(rowUniqueKey).join('|');
-    if (!seen.has(key)) { seen.add(key); unique.push(c); }
-  });
-
-  return (unique.length ? unique : [order])
-    .sort((a, b) => normalCircularRouteScore(start, a) - normalCircularRouteScore(start, b))[0] || order;
+  // เก็บตัวอย่างที่ผู้ใช้ยืนยันว่าเหมาะสมไว้เป็น baseline เฉพาะกรณี ST55/ST57
+  // แต่ถ้าอัลกอริทึมกลางทำคะแนนดีกว่า ก็ใช้อัลกอริทึมกลางแทน
+  if (isNormalST55Route(sourcePoints) && order.length >= 9) {
+    const manual = reorderByIndexPattern(order, [0, 1, 2, 5, 6, 7, 8, 4, 3]);
+    if (normalMarketRouteScore(start, manual) <= normalMarketRouteScore(start, best) * 1.18) best = manual;
+  }
+  if (isNormalST57Route(sourcePoints) && order.length >= 9) {
+    const manual = reorderByIndexPattern(order, [0, 2, 3, 4, 5, 6, 7, 8, 1]);
+    if (normalMarketRouteScore(start, manual) <= normalMarketRouteScore(start, best) * 1.18) best = manual;
+  }
+  return best;
 }
-
 
 function buildNormalPlanRows(marketRows, planDays) {
   const today = thaiNow();
@@ -1578,15 +1479,9 @@ function renderRouteSummary(rows) {
   });
 
   box.querySelectorAll(".route-button").forEach(btn => btn.addEventListener("click", () => {
-    try {
-      selectedRouteKey = btn.dataset.routeKey;
-      routeCollapsedToSelected = true;
-      renderRouteSummary(plannedRows);
-    } catch (err) {
-      console.error(err);
-      const detail = document.getElementById("routeDetail");
-      if (detail) detail.innerHTML = `เกิดข้อผิดพลาดตอนเปิดแผน: ${escapeHtml(err.message || err)}`;
-    }
+    selectedRouteKey = btn.dataset.routeKey;
+    routeCollapsedToSelected = true;
+    renderRouteSummary(plannedRows);
   }));
   renderRouteDetail(groups.get(selectedRouteKey) || []);
   const form = document.getElementById("planForm");
