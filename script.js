@@ -1033,7 +1033,6 @@ function orderNormalMarketRoute(start, points) {
   }
 
   best = pullPointsThatAreOnTheWay(start, best);
-  best = applyNormalRouteFieldFeedback(start, best, valid);
   return [...best, ...noCoord];
 }
 
@@ -1043,6 +1042,14 @@ function isNormalST55Route(points) {
   if (!valid.length) return false;
   return valid.some(p => cleanText(p.bu).toUpperCase() === "ST") &&
          valid.some(p => normalizeMeter(p.meter || p.meterKey) === "55");
+}
+
+
+function isNormalST57Route(points) {
+  const valid = (points || []).filter(Boolean);
+  if (!valid.length) return false;
+  return valid.some(p => cleanText(p.bu).toUpperCase() === "ST") &&
+         valid.some(p => normalizeMeter(p.meter || p.meterKey) === "57");
 }
 
 function reorderByIndexPattern(order, pattern) {
@@ -1063,11 +1070,21 @@ function reorderByIndexPattern(order, pattern) {
 
 function applyNormalRouteFieldFeedback(start, order, sourcePoints) {
   // กติกาหน้างานเฉพาะโหมด "วันปกติ / ออกตลาดทั่วไป"
-  // เคสสามทองบริการ ST สาย 55: ลำดับ 1,2,3 ดีแล้ว จากนั้นให้วิ่งต่อไปชุด 6,7,8,9 ก่อน แล้วค่อยกลับ 5,4
-  // เพื่อลดการวิ่งวนย้อนกลับไปเก็บจุดเดิมตามที่แจ้งจากหน้างาน
+  // ไม่กระทบสายอื่น เช่น ST สาย 65 ที่ผู้ใช้ยืนยันว่าเส้นทางเดิมดีอยู่แล้ว
+
+  // เคสสามทองบริการ ST สาย 55:
+  // ลำดับ 1,2,3 ดีแล้ว จากนั้นให้วิ่งต่อไปชุด 6,7,8,9 ก่อน แล้วค่อยกลับ 5,4
   if (isNormalST55Route(sourcePoints) && order.length >= 9) {
     return reorderByIndexPattern(order, [0, 1, 2, 5, 6, 7, 8, 4, 3]);
   }
+
+  // เคสสามทองบริการ ST สาย 57:
+  // ลำดับที่ต้องการจากภาพปัจจุบัน: 1 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 2
+  // เพื่อไม่ต้องวกจากจุด 1 กลับมาจุด 2 แล้วค่อยออกไปไกลอีกครั้ง
+  if (isNormalST57Route(sourcePoints) && order.length >= 9) {
+    return reorderByIndexPattern(order, [0, 2, 3, 4, 5, 6, 7, 8, 1]);
+  }
+
   return order;
 }
 
@@ -1098,7 +1115,8 @@ function buildNormalPlanRows(marketRows, planDays) {
       const planDate = addDaysTH(today, dayIndex);
       const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
       const start = startForRoute(chunk);
-      const ordered = orderNormalMarketRoute(start, chunk);
+      const orderedBase = orderNormalMarketRoute(start, chunk);
+      const ordered = applyNormalRouteFieldFeedback(start, orderedBase, chunk);
       ordered.forEach((row, idx) => output.push({
         ...row,
         plan_day: dayIndex + 1,
