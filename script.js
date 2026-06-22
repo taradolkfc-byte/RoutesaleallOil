@@ -929,7 +929,8 @@ function normalMarketRouteScore(start, order) {
     if (d1 * d2 < 0 && Math.abs(d1) > 0.25 && Math.abs(d2) > 0.25) angleZigzagPenalty += 25;
   }
 
-  return baseDistance + turnPenalty + earlyReturnPenalty + angleZigzagPenalty;
+  const loopPenalty = normalLoopBacktrackPenalty(start, order) * 1.25;
+  return baseDistance + turnPenalty + earlyReturnPenalty + angleZigzagPenalty + loopPenalty;
 }
 
 function chooseFirstTwoForNormalRoute(start, valid) {
@@ -960,6 +961,122 @@ function chooseFirstTwoForNormalRoute(start, valid) {
     ? { fixed: [first, second], remaining: removeSameStop(removeSameStop(valid, first), second) }
     : { fixed: [first], remaining: removeSameStop(valid, first) };
 }
+
+
+function signedSideFromAxis(start, farPoint, p) {
+  const ax = toNumber(farPoint.lng) - Number(start.lng);
+  const ay = toNumber(farPoint.lat) - Number(start.lat);
+  const px = toNumber(p.lng) - Number(start.lng);
+  const py = toNumber(p.lat) - Number(start.lat);
+  const cross = ax * py - ay * px;
+  return cross >= 0 ? 1 : -1;
+}
+
+function projectionOnAxis(start, farPoint, p) {
+  const ax = toNumber(farPoint.lng) - Number(start.lng);
+  const ay = toNumber(farPoint.lat) - Number(start.lat);
+  const px = toNumber(p.lng) - Number(start.lng);
+  const py = toNumber(p.lat) - Number(start.lat);
+  const denom = ax * ax + ay * ay;
+  if (!denom) return 0;
+  return (px * ax + py * ay) / denom;
+}
+
+function normalLoopBacktrackPenalty(start, order) {
+  // เป้าหมาย: ลดเส้นทางแบบวิ่งออกไปแล้ววกกลับมาเก็บโซนเดิมหลายรอบ
+  // ใช้จุดที่ไกลฐานที่สุดเป็นแกนหลัก แล้วลงโทษการสลับข้าง/กลับทิศทางบ่อยเกินไป
+  if (!order || order.length < 4) return 0;
+  const far = [...order].sort((a, b) =>
+    haversine(start, { lat: toNumber(b.lat), lng: toNumber(b.lng) }) -
+    haversine(start, { lat: toNumber(a.lat), lng: toNumber(a.lng) })
+  )[0];
+  if (!far) return 0;
+
+  const sides = order.map(p => signedSideFromAxis(start, far, p));
+  const projections = order.map(p => projectionOnAxis(start, far, p));
+  let sideSwitches = 0;
+  for (let i = 1; i < sides.length; i++) {
+    if (sides[i] !== sides[i - 1]) sideSwitches++;
+  }
+
+  let directionSwitches = 0;
+  let lastSign = 0;
+  for (let i = 1; i < projections.length; i++) {
+    const diff = projections[i] - projections[i - 1];
+    const sign = Math.abs(diff) < 0.05 ? lastSign : (diff > 0 ? 1 : -1);
+    if (lastSign && sign && sign !== lastSign) directionSwitches++;
+    if (sign) lastSign = sign;
+  }
+
+  // จุดที่อยู่ใกล้ฐานมากแต่ถูกเอาไปแทรกกลางทาง ทำให้กลับไปกลับมา จึงลงโทษเพิ่ม
+  const distances = order.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const maxD = Math.max(...distances, 0);
+  let nearMiddlePenalty = 0;
+  order.forEach((p, idx) => {
+    const d = distances[idx];
+    if (idx > 1 && idx < order.length - 2 && d < maxD * 0.42) nearMiddlePenalty += 22;
+  });
+
+  return Math.max(0, sideSwitches - 2) * 45 + Math.max(0, directionSwitches - 1) * 55 + nearMiddlePenalty;
+}
+
+function makeTwoSideLoopCandidates(start, points) {
+  // อัลกอริทึมกลางแบบไม่ใช้ recursion เพื่อกันหน้าเว็บ Error/ค้างเวลาเปิดรายละเอียดแผน
+  // แบ่งจุดเป็น 2 ฝั่งของแกนจากจุดเริ่มไปจุดไกลสุด แล้วสร้าง candidate ขาออก/ขากลับ
+  const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
+  if (valid.length < 4) return [valid];
+
+  const far = [...valid].sort((a, b) =>
+    haversine(start, { lat: toNumber(b.lat), lng: toNumber(b.lng) }) -
+    haversine(start, { lat: toNumber(a.lat), lng: toNumber(a.lng) })
+  )[0];
+  if (!far) return [valid];
+
+  const enriched = valid.map(p => ({
+    p,
+    side: signedSideFromAxis(start, far, p),
+    t: projectionOnAxis(start, far, p),
+    d: haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }),
+    ang: angleFromStart(start, p)
+  }));
+
+  const sideA = enriched.filter(x => x.side >= 0).sort((a, b) => a.t - b.t || a.d - b.d).map(x => x.p);
+  const sideB = enriched.filter(x => x.side < 0).sort((a, b) => a.t - b.t || a.d - b.d).map(x => x.p);
+  const byAngle = [...enriched].sort((a, b) => a.ang - b.ang).map(x => x.p);
+  const byAngleReverse = [...byAngle].reverse();
+  const byDistanceOut = [...enriched].sort((a, b) => a.d - b.d).map(x => x.p);
+
+  const candidates = [];
+  const add = (arr) => {
+    if (arr && arr.length === valid.length) candidates.push(arr);
+  };
+
+  add([...sideA, ...[...sideB].reverse()]);
+  add([...sideB, ...[...sideA].reverse()]);
+  add([...sideA].reverse().concat(sideB));
+  add([...sideB].reverse().concat(sideA));
+  add(byAngle);
+  add(byAngleReverse);
+  add(byDistanceOut);
+
+  // ลองหมุน candidate หลักไม่เกินจำนวนจุด เพื่อเลือกจุดเริ่มของวงที่ดีที่สุด โดยไม่สร้าง recursion
+  const rotated = [];
+  candidates.forEach(base => {
+    for (let i = 0; i < base.length; i++) rotated.push([...base.slice(i), ...base.slice(0, i)]);
+  });
+
+  const unique = [];
+  const seen = new Set();
+  [...candidates, ...rotated].forEach(c => {
+    const key = c.map(rowUniqueKey).join('|');
+    if (!seen.has(key) && c.length === valid.length) {
+      seen.add(key);
+      unique.push(c);
+    }
+  });
+  return unique.length ? unique : [valid];
+}
+
 
 function makeNormalSweepCandidates(start, fixed, remaining) {
   if (!remaining.length) return [fixed];
@@ -998,41 +1115,144 @@ function makeNormalSweepCandidates(start, fixed, remaining) {
   return candidates;
 }
 
-function orderNormalMarketRoute(start, points) {
-  // โหมดวันปกติ/ออกตลาดทั่วไป:
-  // 1) เก็บจุดออกจากฐานที่ต่อเนื่อง 1-2 จุดแรกได้
-  // 2) หลังจากนั้นเรียงแบบกวาดเป็นวงตามมุมจากจุดเริ่ม ไม่กระโดดกลับไปมา
-  // 3) เลือก candidate ที่ระยะรวม + การวกกลับต่ำที่สุด
+
+function routeEndpointScore(start, order) {
+  if (!order || !order.length) return 0;
+  const first = order[0];
+  const last = order[order.length - 1];
+  const dFirst = haversine(start, { lat: toNumber(first.lat), lng: toNumber(first.lng) });
+  const dLast = haversine(start, { lat: toNumber(last.lat), lng: toNumber(last.lng) });
+  const allD = order.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const minD = Math.min(...allD);
+  const maxD = Math.max(...allD);
+
+  // ปลายทางเข้า/ออกควรเป็นจุดใกล้ฐาน เพื่อให้วิ่งออกเป็นวงแล้วกลับฐาน ไม่ใช่เส้นตรงไป-กลับ
+  let penalty = 0;
+  if (dFirst > minD + 12) penalty += (dFirst - minD) * 5;
+  if (dLast > minD + 12) penalty += (dLast - minD) * 5;
+
+  // จุดใกล้ฐานไม่ควรถูกวางไว้กลางเส้นทาง เพราะจะทำให้กลับไปกลับมา
+  order.forEach((p, idx) => {
+    const d = allD[idx];
+    if (idx > 1 && idx < order.length - 2 && d < Math.max(8, maxD * 0.42)) penalty += 35;
+  });
+
+  return penalty;
+}
+
+function distanceTrendPenalty(start, order) {
+  // เส้นทางวงกลมที่ดีควรค่อย ๆ ออกห่างฐาน แล้วค่อย ๆ กลับ ไม่ใช่ใกล้-ไกล-ใกล้-ไกล หลายรอบ
+  if (!order || order.length < 5) return 0;
+  const ds = order.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  let switches = 0;
+  let lastSign = 0;
+  for (let i = 1; i < ds.length; i++) {
+    const diff = ds[i] - ds[i - 1];
+    const sign = Math.abs(diff) < 3 ? lastSign : (diff > 0 ? 1 : -1);
+    if (lastSign && sign && sign !== lastSign) switches++;
+    if (sign) lastSign = sign;
+  }
+  return Math.max(0, switches - 1) * 45;
+}
+
+function normalCircularRouteScore(start, order) {
+  // คะแนนกลางสำหรับทุกสาย: ระยะรวม + ลดการวกกลับ + ลดจุดใกล้ฐานกลางทาง
+  return routeDistanceFromStart(start, order)
+    + routeTurnPenalty(start, order) * 1.15
+    + routeEndpointScore(start, order)
+    + distanceTrendPenalty(start, order)
+    + normalLoopBacktrackPenalty(start, order) * 0.45;
+}
+
+function makeCentroidCircularCandidates(start, points) {
   const valid = points.filter(validCoord).map(p => ({ ...p }));
-  const noCoord = points.filter(p => !validCoord(p));
-  if (valid.length <= 2) return [...valid, ...noCoord];
+  if (valid.length <= 2) return [valid];
 
-  const { fixed, remaining } = chooseFirstTwoForNormalRoute(start, valid);
-  const candidates = makeNormalSweepCandidates(start, fixed, remaining);
+  const center = {
+    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
+    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
+  };
 
-  // สำหรับกรณีที่จุดแรกที่ใกล้ฐานทำให้ภาพรวมแย่ ให้ลองไม่ล็อก fixed ด้วย แต่ให้ penalty นิดหน่อย
-  candidates.push(...makeNormalSweepCandidates(start, [], valid));
+  const withAngle = valid.map(p => ({
+    ...p,
+    __angle: Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng),
+    __dStart: haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) })
+  })).sort((a, b) => a.__angle - b.__angle);
+
+  const candidates = [];
+  const addCandidate = (arr) => {
+    const clean = arr.map(({ __angle, __dStart, ...p }) => p);
+    if (clean.length === valid.length) candidates.push(clean);
+  };
+
+  // วนตามขอบกลุ่มลูกค้าแบบตามเข็ม/ทวนเข็ม และลองทุกจุดเป็นจุดเริ่มของวง
+  [withAngle, [...withAngle].reverse()].forEach(base => {
+    for (let i = 0; i < base.length; i++) {
+      addCandidate([...base.slice(i), ...base.slice(0, i)]);
+    }
+  });
+
+  // เพิ่ม candidate ที่ให้จุดใกล้ฐานอยู่ต้น/ท้าย แต่ยังเดินเป็นวง ไม่ใช่เส้นตรงไป-กลับ
+  const sortedNear = [...withAngle].sort((a, b) => a.__dStart - b.__dStart).slice(0, Math.min(3, withAngle.length));
+  [withAngle, [...withAngle].reverse()].forEach(base => {
+    sortedNear.forEach(n => {
+      const idx = base.findIndex(p => rowUniqueKey(p) === rowUniqueKey(n));
+      if (idx >= 0) addCandidate([...base.slice(idx), ...base.slice(0, idx)]);
+      if (idx >= 0) {
+        const rotated = [...base.slice(idx + 1), ...base.slice(0, idx + 1)];
+        addCandidate(rotated); // ให้จุดใกล้ฐานอีกตัวไปอยู่ท้ายก่อนวนกลับ
+      }
+    });
+  });
+
+  // เพิ่ม candidate แบบแบ่งฝั่ง แต่ให้ใช้เป็นตัวเลือก ไม่ใช่บังคับ เพื่อช่วยบางพื้นที่ที่เป็นแนวยาว
+  makeTwoSideLoopCandidates(start, valid).forEach(addCandidate);
 
   const unique = [];
   const seen = new Set();
   candidates.forEach(c => {
-    const key = c.map(x => `${norm(x.customer_id)}:${norm(x.customer_name)}:${cleanText(x.lat)}:${cleanText(x.lng)}`).join('|');
-    if (!seen.has(key)) { seen.add(key); unique.push(c); }
+    const key = c.map(rowUniqueKey).join('|');
+    if (!seen.has(key) && c.length === valid.length) {
+      seen.add(key);
+      unique.push(c);
+    }
+  });
+  return unique.length ? unique : [valid];
+}
+
+function orderNormalMarketRoute(start, points) {
+  // โหมดวันปกติ/ออกตลาดทั่วไป ทุกสาย
+  // ใช้ candidate หลายแบบ แต่จำกัดจำนวนและไม่ recursion เพื่อไม่ให้คลิกแผนแล้ว Error
+  const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
+  const noCoord = (points || []).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+
+  const candidates = [];
+  const add = (arr) => {
+    if (!arr || arr.length !== valid.length) return;
+    candidates.push(arr);
+    const pulled = pullPointsThatAreOnTheWay(start, arr);
+    if (pulled && pulled.length === valid.length) candidates.push(pulled);
+  };
+
+  makeCentroidCircularCandidates(start, valid).forEach(add);
+  makeTwoSideLoopCandidates(start, valid).forEach(add);
+  add(circularSweepClosedOrder(start, valid));
+  add(nearestNeighborOrder(start, valid));
+
+  const unique = [];
+  const seen = new Set();
+  candidates.forEach(c => {
+    const key = c.map(rowUniqueKey).join('|');
+    if (!seen.has(key) && c.length === valid.length) {
+      seen.add(key);
+      unique.push(c);
+    }
   });
 
-  let best = unique.sort((a, b) => normalMarketRouteScore(start, a) - normalMarketRouteScore(start, b))[0] || valid;
+  const best = (unique.length ? unique : [valid])
+    .sort((a, b) => normalCircularRouteScore(start, a) - normalCircularRouteScore(start, b))[0] || valid;
 
-  // ถ้าจุดแรก/สองที่ระบบเลือกไว้ไม่ได้ทำให้ระยะพัง ให้คงไว้ตามที่ผู้ใช้ต้องการในเคส ST สาย 57
-  if (fixed.length >= 2) {
-    const bestWithFixed = unique
-      .filter(c => rowUniqueKey(c[0]) === rowUniqueKey(fixed[0]) && rowUniqueKey(c[1]) === rowUniqueKey(fixed[1]))
-      .sort((a, b) => normalMarketRouteScore(start, a) - normalMarketRouteScore(start, b))[0];
-    if (bestWithFixed && normalMarketRouteScore(start, bestWithFixed) <= normalMarketRouteScore(start, best) * 1.12) {
-      best = bestWithFixed;
-    }
-  }
-
-  best = pullPointsThatAreOnTheWay(start, best);
   return [...best, ...noCoord];
 }
 
@@ -1068,25 +1288,31 @@ function reorderByIndexPattern(order, pattern) {
   return out;
 }
 
+
 function applyNormalRouteFieldFeedback(start, order, sourcePoints) {
-  // กติกาหน้างานเฉพาะโหมด "วันปกติ / ออกตลาดทั่วไป"
-  // ไม่กระทบสายอื่น เช่น ST สาย 65 ที่ผู้ใช้ยืนยันว่าเส้นทางเดิมดีอยู่แล้ว
+  // ใช้กับทุกสายของโหมดวันปกติ/ออกตลาดทั่วไปเท่านั้น
+  // สร้าง candidate แบบวงกลมหลายแบบ แล้วเลือกแบบที่ไม่วกกลับและระยะรวมดีที่สุด
+  const valid = (order || []).filter(validCoord);
+  if (valid.length <= 2) return order;
 
-  // เคสสามทองบริการ ST สาย 55:
-  // ลำดับ 1,2,3 ดีแล้ว จากนั้นให้วิ่งต่อไปชุด 6,7,8,9 ก่อน แล้วค่อยกลับ 5,4
-  if (isNormalST55Route(sourcePoints) && order.length >= 9) {
-    return reorderByIndexPattern(order, [0, 1, 2, 5, 6, 7, 8, 4, 3]);
-  }
+  const candidates = [
+    order,
+    ...makeCentroidCircularCandidates(start, valid),
+    ...makeCentroidCircularCandidates(start, sourcePoints || valid)
+  ];
 
-  // เคสสามทองบริการ ST สาย 57:
-  // ลำดับที่ต้องการจากภาพปัจจุบัน: 1 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 2
-  // เพื่อไม่ต้องวกจากจุด 1 กลับมาจุด 2 แล้วค่อยออกไปไกลอีกครั้ง
-  if (isNormalST57Route(sourcePoints) && order.length >= 9) {
-    return reorderByIndexPattern(order, [0, 2, 3, 4, 5, 6, 7, 8, 1]);
-  }
+  const unique = [];
+  const seen = new Set();
+  candidates.forEach(c => {
+    if (!c || c.length !== valid.length) return;
+    const key = c.map(rowUniqueKey).join('|');
+    if (!seen.has(key)) { seen.add(key); unique.push(c); }
+  });
 
-  return order;
+  return (unique.length ? unique : [order])
+    .sort((a, b) => normalCircularRouteScore(start, a) - normalCircularRouteScore(start, b))[0] || order;
 }
+
 
 function buildNormalPlanRows(marketRows, planDays) {
   const today = thaiNow();
@@ -1352,9 +1578,38 @@ function renderRouteSummary(rows) {
   });
 
   box.querySelectorAll(".route-button").forEach(btn => btn.addEventListener("click", () => {
-    selectedRouteKey = btn.dataset.routeKey;
-    routeCollapsedToSelected = true;
-    renderRouteSummary(plannedRows);
+    try {
+      // สำคัญ: ไม่เรียก renderRouteSummary() ซ้ำตอนคลิก เพราะทำให้เว็บค้างในโหมดวันปกติ/ออกตลาดทั่วไป
+      selectedRouteKey = btn.dataset.routeKey;
+      routeCollapsedToSelected = true;
+
+      box.querySelectorAll(".route-button").forEach(b => {
+        const isActive = b.dataset.routeKey === selectedRouteKey;
+        b.classList.toggle("active", isActive);
+        b.style.display = isActive ? "block" : "none";
+      });
+
+      if (!document.getElementById("showRouteCardsBtn")) {
+        const backBtn = document.createElement("button");
+        backBtn.id = "showRouteCardsBtn";
+        backBtn.className = "route-show-all";
+        backBtn.type = "button";
+        backBtn.textContent = "แสดงแผนทั้งหมด";
+        backBtn.addEventListener("click", () => {
+          routeCollapsedToSelected = false;
+          renderRouteSummary(plannedRows);
+        });
+        box.prepend(backBtn);
+      }
+
+      renderRouteDetail(currentRouteGroups.get(selectedRouteKey) || []);
+      const form = document.getElementById("planForm");
+      if (form) applySelectedRouteToForm(form);
+    } catch (err) {
+      console.error(err);
+      const detail = document.getElementById("routeDetail");
+      if (detail) detail.innerHTML = `เกิดข้อผิดพลาดตอนเปิดแผน: ${escapeHtml(err.message || err)}`;
+    }
   }));
   renderRouteDetail(groups.get(selectedRouteKey) || []);
   const form = document.getElementById("planForm");
@@ -1404,13 +1659,21 @@ function detailAreaHtml(row, index) {
   return `<span class="geo-area" data-lat="${escapeHtml(row.lat)}" data-lng="${escapeHtml(row.lng)}">กำลังค้นหาพื้นที่...</span>`;
 }
 async function hydrateDetailAreas() {
+  // ทำแบบไม่บล็อกหน้าเว็บ และจำกัดจำนวนครั้งที่เรียก Reverse Geocode
   const nodes = Array.from(document.querySelectorAll(".geo-area"));
-  for (const node of nodes) {
+  const limit = Math.min(nodes.length, 9);
+  for (let i = 0; i < limit; i++) {
+    const node = nodes[i];
     const lat = node.dataset.lat;
     const lng = node.dataset.lng;
     if (!lat || !lng) continue;
-    const area = await reverseGeocode(lat, lng);
-    node.textContent = area || "ไม่พบข้อมูลพื้นที่";
+    try {
+      const area = await reverseGeocode(lat, lng);
+      node.textContent = area || `${lat}, ${lng}`;
+    } catch (e) {
+      node.textContent = `${lat}, ${lng}`;
+    }
+    await new Promise(resolve => setTimeout(resolve, 0));
   }
 }
 function makeNumberIcon(number, variant = "normal") {
@@ -1829,6 +2092,399 @@ async function checkInGps() {
   }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
 }
 
+
+
+/* ===== FINAL NORMAL MARKET ROUTE ENGINE: circular loop for all normal lines =====
+   ใช้เฉพาะโหมด "วันปกติ / ออกตลาดทั่วไป"
+   เป้าหมาย: วิ่งเป็นวง ออกไปเก็บโซนหนึ่ง แล้ววนกลับอีกโซน ลดการวิ่งเส้นตรงไป-กลับและลดการย้อนเก็บจุดย้อนหลัง
+*/
+function routePointIdFinal(p) {
+  return `${norm(p.customer_id)}|${norm(p.customer_name)}|${Number(toNumber(p.lat)).toFixed(6)}|${Number(toNumber(p.lng)).toFixed(6)}`;
+}
+
+function pointXYFinal(p, refLat) {
+  const lat = toNumber(p.lat);
+  const lng = toNumber(p.lng);
+  const k = Math.cos((Number(refLat) || lat || 16) * Math.PI / 180);
+  return { x: lng * k, y: lat };
+}
+
+function orientFinal(a, b, c, refLat) {
+  const A = pointXYFinal(a, refLat), B = pointXYFinal(b, refLat), C = pointXYFinal(c, refLat);
+  return (B.x - A.x) * (C.y - A.y) - (B.y - A.y) * (C.x - A.x);
+}
+
+function segmentsCrossFinal(a, b, c, d, refLat) {
+  const o1 = orientFinal(a, b, c, refLat);
+  const o2 = orientFinal(a, b, d, refLat);
+  const o3 = orientFinal(c, d, a, refLat);
+  const o4 = orientFinal(c, d, b, refLat);
+  return (o1 * o2 < 0) && (o3 * o4 < 0);
+}
+
+function crossingPenaltyFinal(start, order) {
+  if (!order || order.length < 4) return 0;
+  const pts = [start, ...order, start];
+  const refLat = pts.reduce((sum, p) => sum + Number(toNumber(p.lat) || start.lat), 0) / pts.length;
+  let count = 0;
+  for (let i = 0; i < pts.length - 1; i++) {
+    for (let j = i + 2; j < pts.length - 1; j++) {
+      if (i === 0 && j === pts.length - 2) continue; // ข้ามเส้นต้นทางกับเส้นกลับฐานที่ติดกันในวงปิด
+      if (segmentsCrossFinal(pts[i], pts[i + 1], pts[j], pts[j + 1], refLat)) count++;
+    }
+  }
+  return count;
+}
+
+function unwrapAngleSequenceFinal(angles) {
+  if (!angles.length) return [];
+  const out = [angles[0]];
+  for (let i = 1; i < angles.length; i++) {
+    let a = angles[i];
+    let prev = out[i - 1];
+    while (a - prev > Math.PI) a -= Math.PI * 2;
+    while (a - prev < -Math.PI) a += Math.PI * 2;
+    out.push(a);
+  }
+  return out;
+}
+
+function angularBacktrackPenaltyFinal(start, order) {
+  if (!order || order.length < 5) return 0;
+  const angles = unwrapAngleSequenceFinal(order.map(p => angleFromStart(start, p)));
+  let switches = 0;
+  let last = 0;
+  for (let i = 1; i < angles.length; i++) {
+    const d = angles[i] - angles[i - 1];
+    const sign = Math.abs(d) < 0.08 ? last : (d > 0 ? 1 : -1);
+    if (last && sign && sign !== last) switches++;
+    if (sign) last = sign;
+  }
+  return Math.max(0, switches - 1) * 80;
+}
+
+function nearBaseMiddlePenaltyFinal(start, order) {
+  if (!order || order.length < 6) return 0;
+  const ds = order.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const minD = Math.min(...ds);
+  const maxD = Math.max(...ds);
+  const nearLimit = minD + Math.max(5, (maxD - minD) * 0.22);
+  let penalty = 0;
+  order.forEach((p, i) => {
+    if (i >= 2 && i <= order.length - 3 && ds[i] <= nearLimit) penalty += 55;
+  });
+  return penalty;
+}
+
+function endNearBaseRewardPenaltyFinal(start, order) {
+  if (!order || order.length < 3) return 0;
+  const ds = order.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const minD = Math.min(...ds);
+  const firstD = ds[0];
+  const lastD = ds[ds.length - 1];
+  // จุดแรก/ท้ายควรเป็นกลุ่มใกล้ฐาน เพื่อเปิดวงแล้วปิดวงกลับฐาน ไม่ใช่จบที่ปลายทางไกล
+  return Math.max(0, firstD - minD - 8) * 5 + Math.max(0, lastD - minD - 8) * 5;
+}
+
+function normalCircularRouteScore(start, order) {
+  if (!order || !order.length) return 0;
+  return routeDistanceFromStart(start, order)
+    + crossingPenaltyFinal(start, order) * 900
+    + routeTurnPenalty(start, order) * 2.8
+    + angularBacktrackPenaltyFinal(start, order)
+    + nearBaseMiddlePenaltyFinal(start, order)
+    + endNearBaseRewardPenaltyFinal(start, order)
+    + distanceTrendPenalty(start, order) * 0.55;
+}
+
+function rotateArrayFinal(arr, idx) {
+  return [...arr.slice(idx), ...arr.slice(0, idx)];
+}
+
+function uniqueRouteCandidatesFinal(candidates, length) {
+  const seen = new Set();
+  const out = [];
+  for (const c of candidates) {
+    if (!c || c.length !== length) continue;
+    const key = c.map(routePointIdFinal).join('|');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(c);
+  }
+  return out;
+}
+
+function makeStartSweepCandidatesFinal(start, points) {
+  const valid = points.filter(validCoord).map(p => ({ ...p }));
+  if (valid.length <= 2) return [valid];
+  const byAngle = valid.map(p => ({ ...p, __angle: angleFromStart(start, p) })).sort((a, b) => a.__angle - b.__angle);
+  const bases = [byAngle, [...byAngle].reverse()];
+  const candidates = [];
+  bases.forEach(base => {
+    for (let i = 0; i < base.length; i++) {
+      const route = rotateArrayFinal(base, i).map(({ __angle, ...p }) => p);
+      candidates.push(route);
+    }
+  });
+  return candidates;
+}
+
+function makeTwoSideLoopCandidatesFinal(start, points) {
+  const valid = points.filter(validCoord).map(p => ({ ...p }));
+  if (valid.length <= 2) return [valid];
+
+  const farthest = [...valid].sort((a, b) => haversine(start, b) - haversine(start, a))[0];
+  const centroid = {
+    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
+    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
+  };
+  const axisTargets = [farthest, centroid];
+  const candidates = [];
+
+  axisTargets.forEach(target => {
+    const refLat = start.lat;
+    const sxy = pointXYFinal(start, refLat);
+    const txy = pointXYFinal(target, refLat);
+    const vx = txy.x - sxy.x;
+    const vy = txy.y - sxy.y;
+    if (Math.hypot(vx, vy) === 0) return;
+
+    const left = [];
+    const right = [];
+    valid.forEach(p => {
+      const pxy = pointXYFinal(p, refLat);
+      const cross = vx * (pxy.y - sxy.y) - vy * (pxy.x - sxy.x);
+      const d = haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
+      const along = ((pxy.x - sxy.x) * vx + (pxy.y - sxy.y) * vy) / Math.hypot(vx, vy);
+      const item = { ...p, __d: d, __along: along, __angle: angleFromStart(start, p) };
+      (cross >= 0 ? left : right).push(item);
+    });
+
+    const sortOut = arr => [...arr].sort((a, b) => a.__along - b.__along || a.__d - b.__d);
+    const sortBack = arr => [...arr].sort((a, b) => b.__along - a.__along || b.__d - a.__d);
+    const clean = arr => arr.map(({ __d, __along, __angle, ...p }) => p);
+
+    [ [left, right], [right, left] ].forEach(([outSide, backSide]) => {
+      const outA = sortOut(outSide);
+      const backA = sortBack(backSide);
+      const c1 = clean([...outA, ...backA]);
+      const c2 = clean([...backA.reverse(), ...outA.reverse()]);
+      candidates.push(c1, c2);
+    });
+  });
+  return candidates;
+}
+
+function twoOptSafeFinal(start, order) {
+  // ปรับลดการตัดกันแบบเบา ๆ เท่านั้น ถ้าคะแนนรวมดีขึ้นจริง
+  if (!order || order.length < 5) return order;
+  let best = order.map(p => ({ ...p }));
+  let bestScore = normalCircularRouteScore(start, best);
+  let improved = true;
+  let guard = 0;
+  while (improved && guard < 50) {
+    improved = false;
+    guard++;
+    outer:
+    for (let i = 0; i < best.length - 1; i++) {
+      for (let k = i + 1; k < best.length; k++) {
+        const candidate = [...best.slice(0, i), ...best.slice(i, k + 1).reverse(), ...best.slice(k + 1)];
+        const score = normalCircularRouteScore(start, candidate);
+        if (score + 0.001 < bestScore) {
+          best = candidate;
+          bestScore = score;
+          improved = true;
+          break outer;
+        }
+      }
+    }
+  }
+  return best;
+}
+
+function orderNormalMarketRoute(start, points) {
+  const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
+  const noCoord = (points || []).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+
+  const candidates = [];
+  const add = (route) => {
+    if (!route || route.length !== valid.length) return;
+    candidates.push(route);
+    const pulled = pullPointsThatAreOnTheWay(start, route);
+    if (pulled && pulled.length === valid.length) candidates.push(pulled);
+    const opt = twoOptSafeFinal(start, route);
+    if (opt && opt.length === valid.length) candidates.push(opt);
+  };
+
+  makeStartSweepCandidatesFinal(start, valid).forEach(add);
+  makeCentroidCircularCandidates(start, valid).forEach(add);
+  makeTwoSideLoopCandidatesFinal(start, valid).forEach(add);
+  makeTwoSideLoopCandidates(start, valid).forEach(add);
+  add(circularSweepClosedOrder(start, valid));
+
+  const unique = uniqueRouteCandidatesFinal(candidates, valid.length);
+  const best = (unique.length ? unique : [valid])
+    .sort((a, b) => normalCircularRouteScore(start, a) - normalCircularRouteScore(start, b))[0] || valid;
+
+  return [...best, ...noCoord];
+}
+
+function applyNormalRouteFieldFeedback(start, order, sourcePoints) {
+  // ใช้อัลกอริทึมกลางชุดเดียวกับทุกสาย ไม่ใช้กติกาเฉพาะคันแล้ว
+  return orderNormalMarketRoute(start, sourcePoints || order || []);
+}
+
+
+
+/* ===== STABLE PATCH: normal market click error fixed + safe circular loop =====
+   จุดประสงค์: แก้ Error ตอนคลิกแผนวันปกติ/ออกตลาดทั่วไป
+   แนวคิด: ใช้ algorithm ที่เบาและเสถียร ไม่ recursion ไม่ candidate หนัก
+*/
+function safeNumberPatch(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+function routeKeyPatch(p) {
+  return `${norm(p.customer_id)}|${norm(p.customer_name)}|${safeNumberPatch(toNumber(p.lat)).toFixed(6)}|${safeNumberPatch(toNumber(p.lng)).toFixed(6)}`;
+}
+function angleAroundPatch(center, p) {
+  const lat = toNumber(p.lat);
+  const lng = toNumber(p.lng);
+  const k = Math.cos((center.lat || lat || 16) * Math.PI / 180);
+  return Math.atan2(lat - center.lat, (lng - center.lng) * k);
+}
+function rotatePatch(arr, i) {
+  return arr.slice(i).concat(arr.slice(0, i));
+}
+function routeKmPatch(start, order) {
+  try { return routeDistanceFromStart(start, order); } catch(e) {
+    let sum = 0, prev = start;
+    (order || []).forEach(p => { sum += haversine(prev, {lat: toNumber(p.lat), lng: toNumber(p.lng)}); prev = p; });
+    if (order && order.length) sum += haversine(prev, start);
+    return sum;
+  }
+}
+function simpleCrossCountPatch(start, order) {
+  try { return crossingPenaltyFinal(start, order); } catch(e) { return 0; }
+}
+function stableCircularScorePatch(start, route) {
+  if (!route || !route.length) return 999999;
+  const d = routeKmPatch(start, route);
+  const cross = simpleCrossCountPatch(start, route) * 250;
+  // ลงโทษกรณีระยะจากฐานกระโดดขึ้นลงบ่อย ๆ เพราะจะวิ่งย้อนเก็บจุด
+  const ds = route.map(p => haversine(start, {lat: toNumber(p.lat), lng: toNumber(p.lng)}));
+  let bounce = 0;
+  for (let i=2;i<ds.length;i++) {
+    const a = ds[i-1] - ds[i-2];
+    const b = ds[i] - ds[i-1];
+    if (Math.abs(a) > 3 && Math.abs(b) > 3 && Math.sign(a) !== Math.sign(b)) bounce += 12;
+  }
+  return d + cross + bounce;
+}
+function makeStableCircularCandidatesPatch(start, points) {
+  const valid = (points || []).filter(validCoord).map(p => ({...p}));
+  if (valid.length <= 2) return [valid];
+  const center = {
+    lat: valid.reduce((s,p)=>s+toNumber(p.lat),0)/valid.length,
+    lng: valid.reduce((s,p)=>s+toNumber(p.lng),0)/valid.length
+  };
+  const byAngle = valid.map(p => ({...p, __a: angleAroundPatch(center, p), __d: haversine(start,{lat:toNumber(p.lat),lng:toNumber(p.lng)})}))
+    .sort((a,b)=>a.__a-b.__a || a.__d-b.__d);
+  const base1 = byAngle.map(({__a,__d,...p})=>p);
+  const base2 = [...byAngle].reverse().map(({__a,__d,...p})=>p);
+  const out = [];
+  [base1, base2].forEach(base => {
+    for (let i=0;i<base.length;i++) out.push(rotatePatch(base,i));
+  });
+  // candidate แบบแบ่งซ้าย/ขวาจากแกนฐาน->จุดไกล เพื่อให้เป็นวงออก-กลับ
+  const far = [...valid].sort((a,b)=>haversine(start,b)-haversine(start,a))[0];
+  const refLat = start.lat || center.lat || 16;
+  const k = Math.cos(refLat * Math.PI/180);
+  const sx = start.lng*k, sy = start.lat;
+  const fx = toNumber(far.lng)*k, fy = toNumber(far.lat);
+  const vx = fx-sx, vy = fy-sy;
+  if (Math.hypot(vx,vy)>0) {
+    const left=[], right=[];
+    valid.forEach(p=>{
+      const px=toNumber(p.lng)*k, py=toNumber(p.lat);
+      const cross = vx*(py-sy)-vy*(px-sx);
+      const along = ((px-sx)*vx+(py-sy)*vy)/Math.hypot(vx,vy);
+      const item={...p,__along:along,__d:haversine(start,{lat:toNumber(p.lat),lng:toNumber(p.lng)})};
+      (cross>=0?left:right).push(item);
+    });
+    const sortOut=a=>[...a].sort((x,y)=>x.__along-y.__along || x.__d-y.__d);
+    const sortBack=a=>[...a].sort((x,y)=>y.__along-x.__along || y.__d-x.__d);
+    const clean=a=>a.map(({__along,__d,...p})=>p);
+    out.push(clean([...sortOut(left),...sortBack(right)]));
+    out.push(clean([...sortOut(right),...sortBack(left)]));
+  }
+  // unique
+  const seen=new Set(), unique=[];
+  out.forEach(r=>{ const key=r.map(routeKeyPatch).join('|'); if(!seen.has(key)&&r.length===valid.length){seen.add(key); unique.push(r);} });
+  return unique.length ? unique : [valid];
+}
+function orderNormalMarketRoute(start, points) {
+  // override แบบเสถียร ใช้กับวันปกติ/ออกตลาดทั่วไปทุกสาย
+  const valid = (points || []).filter(validCoord).map(p => ({...p}));
+  const noCoord = (points || []).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+  let candidates = makeStableCircularCandidatesPatch(start, valid);
+  // ใช้ 2-opt แบบปลอดภัยเฉพาะ candidate จำนวนน้อย เพื่อลดเส้นตัดกัน แต่ไม่ให้ค้าง
+  candidates = candidates.slice(0, Math.min(40, candidates.length)).map(r => {
+    try { return twoOptSafeFinal(start, r); } catch(e) { return r; }
+  }).concat(candidates);
+  const best = candidates.sort((a,b)=>stableCircularScorePatch(start,a)-stableCircularScorePatch(start,b))[0] || valid;
+  return [...best, ...noCoord];
+}
+function applyNormalRouteFieldFeedback(start, order, sourcePoints) {
+  try { return orderNormalMarketRoute(start, sourcePoints || order || []); }
+  catch(e) { console.error('normal route fallback', e); return order || sourcePoints || []; }
+}
+function renderRouteDetailSafePatch(list) {
+  const detail = document.getElementById("routeDetail");
+  try {
+    if (!list || !list.length) {
+      detail.innerHTML = "คลิกการ์ดแผนเส้นทางด้านบน เพื่อดูรายละเอียดและแผนที่";
+      renderMap([]);
+      return;
+    }
+    const start = START_POINTS.find(x => x.name === list[0].start_name) || bestStartForRoute(list);
+    const googleUrl = routeToGoogleMapsUrl(list);
+    const displayList = routeDisplayStops(list);
+    const hiddenCount = Math.max(0, list.filter(validCoord).length - displayList.length);
+    const doneCount = displayList.filter(isCompleted).length;
+    const remainCount = Math.max(0, displayList.length - doneCount);
+    const rows = displayList.map((r, i) => {
+      const done = isCompleted(r);
+      const areaCell = detailAreaHtml(r, i);
+      return `<tr class="${done ? "done-row" : ""}"><td>${done ? "✓" : i + 1}</td><td>${escapeHtml(r.customer_name || "-")}</td><td>${escapeHtml(r.type || "-")}</td><td>${escapeHtml(r.status || "-")}<br><span class="visit-state ${done ? "done" : "pending"}">${completedLabel(r)}</span></td><td>${areaCell}</td></tr>`;
+    }).join("");
+    detail.innerHTML = `
+      <div class="detail-head">
+        <div>
+          <h3>${escapeHtml(selectedRouteKey)}</h3>
+          <p>จุดเริ่มต้น/วนกลับ: <strong>${escapeHtml(start.name)}</strong></p>
+          <p class="route-check-summary">เข้ารับบริการแล้ว <strong>${doneCount}</strong> จุด • คงเหลือ <strong>${remainCount}</strong> จุด</p>
+          <p id="routeMetrics" class="route-metrics">กำลังคำนวณเส้นทางตามถนนจริง...</p>
+        </div>
+        ${googleUrl ? `<a class="map-link" href="${googleUrl}" target="_blank" rel="noopener">เปิดเส้นทางจริง/เวลาที่ดีที่สุดใน Google Maps</a>` : ""}
+      </div>
+      <div class="detail-table-wrap"><table class="detail-table"><thead><tr><th>ลำดับ</th><th>ชื่อปั๊ม/ลูกค้า</th><th>ประเภท</th><th>สถานะ</th><th>ตำบล/อำเภอ/จังหวัด</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${hiddenCount ? `<p class="route-limit-note">แสดงใน Map/Google Maps ${MAX_ROUTE_CUSTOMER_STOPS} จุดแรก จากทั้งหมด ${hiddenCount + displayList.length} จุด เพื่อให้จำนวนจุดตรงกันและไม่สับสน</p>` : ""}`;
+    hydrateDetailAreas();
+    Promise.resolve(renderMap(list)).catch(err => {
+      console.error('renderMap error', err);
+      const m = document.getElementById('routeMetrics');
+      if (m) m.textContent = 'แสดงตารางได้แล้ว แต่โหลดเส้นทางแผนที่ไม่สำเร็จ กรุณากด Google Maps เพื่อดูเส้นทางจริง';
+    });
+  } catch (err) {
+    console.error('renderRouteDetail error', err);
+    detail.innerHTML = `เกิดข้อผิดพลาดตอนเปิดแผน: ${escapeHtml(err.message || err)}<br>ระบบแสดงข้อมูลสำรอง กรุณากดรีเฟรชข้อมูลอีกครั้ง`;
+  }
+}
+renderRouteDetail = renderRouteDetailSafePatch;
+
 document.getElementById("planForm").addEventListener("submit", saveForm);
 document.getElementById("searchBox").addEventListener("input", renderTable);
 document.getElementById("typeFilter").addEventListener("change", renderTable);
@@ -1847,3 +2503,365 @@ document.getElementById("checkinBtn").addEventListener("click", checkInGps);
   }
 });
 loadData();
+
+/* ===== HOTFIX 20260622: prevent page unresponsive on normal route click =====
+   Fix: do not run heavy map/route recalculation during click render.
+   - Use already planned stop_no order.
+   - Limit to MAX_ROUTE_CUSTOMER_STOPS.
+   - Draw lightweight map immediately.
+   - Google Maps button still uses same ordered stops.
+*/
+function routeDisplayStopsFastSafe(list) {
+  const arr = Array.isArray(list) ? list : [];
+  const sorted = sortRowsByPlannedStopNo(arr).filter(validCoord);
+  if (getPlanSettings().mode === "pump") {
+    const pump = sorted.find(isPumpRow);
+    if (pump) {
+      const rest = removeSameStop(sorted, pump);
+      return [pump, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+    }
+  }
+  return sorted.slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+}
+routeDisplayStops = routeDisplayStopsFastSafe;
+
+async function renderMapFastSafe(list) {
+  const mapEl = document.getElementById("routeMap");
+  const metricsEl = document.getElementById("routeMetrics");
+  if (!mapEl) return;
+  if (!window.L) {
+    mapEl.innerHTML = "ไม่สามารถโหลดแผนที่ได้ กรุณาตรวจสอบอินเทอร์เน็ต";
+    if (metricsEl) metricsEl.textContent = "ไม่สามารถโหลดแผนที่ได้";
+    return;
+  }
+  if (!routeMap) {
+    routeMap = L.map("routeMap", { preferCanvas: true });
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(routeMap);
+  }
+  if (routeLayer) routeLayer.remove();
+  routeLayer = L.layerGroup().addTo(routeMap);
+
+  const stops = routeDisplayStopsFastSafe(list);
+  if (!stops.length) {
+    routeMap.setView([16.5, 103.8], 8);
+    if (metricsEl) metricsEl.textContent = "ยังไม่มีพิกัดสำหรับคำนวณเส้นทาง";
+    setTimeout(() => routeMap.invalidateSize(), 50);
+    return;
+  }
+
+  const start = getRouteStartForList(list);
+  const nav = [{ ...start, customer_name: start.name, type: "จุดเริ่มต้น", status: "เริ่ม/กลับ" }, ...stops, { ...start, customer_name: start.name, type: "จุดเริ่มต้น", status: "วนกลับ" }];
+  const latlngs = nav.map(p => [toNumber(p.lat), toNumber(p.lng)]).filter(x => Number.isFinite(x[0]) && Number.isFinite(x[1]));
+
+  nav.forEach((p, idx) => {
+    if (!Number.isFinite(toNumber(p.lat)) || !Number.isFinite(toNumber(p.lng))) return;
+    const isStart = idx === 0 || idx === nav.length - 1;
+    const label = idx === 0 ? "เริ่ม" : idx === nav.length - 1 ? "กลับ" : String(idx);
+    const icon = isStart
+      ? makeStartIcon(idx === 0 ? "เริ่ม" : "กลับ")
+      : (isCompleted(p) ? makeDoneIcon() : makeNumberIcon(idx, isFocusStop(p) ? "focus" : "normal"));
+    L.marker([toNumber(p.lat), toNumber(p.lng)], { icon }).addTo(routeLayer)
+      .bindPopup(`<strong>${label}. ${escapeHtml(p.customer_name || p.name || "-")}</strong><br>${escapeHtml(p.type || "-")}<br>${escapeHtml(p.status || "-")}`);
+  });
+
+  if (latlngs.length >= 2) {
+    L.polyline(latlngs, { weight: 5 }).addTo(routeLayer);
+    routeMap.fitBounds(latlngs, { padding: [30, 30] });
+  } else {
+    routeMap.setView(latlngs[0] || [16.5, 103.8], 10);
+  }
+
+  if (metricsEl) {
+    const done = stops.filter(isCompleted).length;
+    const remain = Math.max(0, stops.length - done);
+    const km = routeDistanceFromStart(start, stops);
+    metricsEl.textContent = `แสดงแผน ${stops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางประมาณ ${formatKm(km)} (กด Google Maps เพื่อดูเส้นทางถนนจริง/เวลาจราจรจริง)`;
+  }
+  setTimeout(() => routeMap.invalidateSize(), 80);
+}
+renderMap = renderMapFastSafe;
+
+function hydrateDetailAreasFastSafe() {
+  // ไม่ให้ reverse geocode จำนวนมากค้างหน้าเว็บระหว่างคลิกแผน
+  const nodes = Array.from(document.querySelectorAll(".geo-area"));
+  nodes.slice(0, 9).forEach((node, idx) => {
+    setTimeout(async () => {
+      try {
+        const area = await reverseGeocode(node.dataset.lat, node.dataset.lng);
+        node.textContent = area || `${node.dataset.lat}, ${node.dataset.lng}`;
+      } catch (e) {
+        node.textContent = `${node.dataset.lat}, ${node.dataset.lng}`;
+      }
+    }, idx * 120);
+  });
+}
+hydrateDetailAreas = hydrateDetailAreasFastSafe;
+
+function renderRouteDetailFinalSafe(list) {
+  const detail = document.getElementById("routeDetail");
+  if (!detail) return;
+  try {
+    if (!list || !list.length) {
+      detail.innerHTML = "คลิกการ์ดแผนเส้นทางด้านบน เพื่อดูรายละเอียดและแผนที่";
+      renderMap([]);
+      return;
+    }
+    const start = getRouteStartForList(list);
+    const googleUrl = routeToGoogleMapsUrl(list);
+    const displayList = routeDisplayStopsFastSafe(list);
+    const hiddenCount = Math.max(0, list.filter(validCoord).length - displayList.length);
+    const doneCount = displayList.filter(isCompleted).length;
+    const remainCount = Math.max(0, displayList.length - doneCount);
+    const rows = displayList.map((r, i) => {
+      const done = isCompleted(r);
+      const areaCell = detailAreaHtml(r, i);
+      return `<tr class="${done ? "done-row" : ""}"><td>${done ? "✓" : i + 1}</td><td>${escapeHtml(r.customer_name || "-")}</td><td>${escapeHtml(r.type || "-")}</td><td>${escapeHtml(r.status || "-")}<br><span class="visit-state ${done ? "done" : "pending"}">${completedLabel(r)}</span></td><td>${areaCell}</td></tr>`;
+    }).join("");
+    detail.innerHTML = `
+      <div class="detail-head">
+        <div>
+          <h3>${escapeHtml(selectedRouteKey)}</h3>
+          <p>จุดเริ่มต้น/วนกลับ: <strong>${escapeHtml(start.name)}</strong></p>
+          <p class="route-check-summary">เข้ารับบริการแล้ว <strong>${doneCount}</strong> จุด • คงเหลือ <strong>${remainCount}</strong> จุด</p>
+          <p id="routeMetrics" class="route-metrics">กำลังแสดงแผนที่...</p>
+        </div>
+        ${googleUrl ? `<a class="map-link" href="${googleUrl}" target="_blank" rel="noopener">เปิดเส้นทางจริง/เวลาที่ดีที่สุดใน Google Maps</a>` : ""}
+      </div>
+      <div class="detail-table-wrap"><table class="detail-table"><thead><tr><th>ลำดับ</th><th>ชื่อปั๊ม/ลูกค้า</th><th>ประเภท</th><th>สถานะ</th><th>ตำบล/อำเภอ/จังหวัด</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${hiddenCount ? `<p class="route-limit-note">แสดงใน Map/Google Maps ${MAX_ROUTE_CUSTOMER_STOPS} จุดแรก จากทั้งหมด ${hiddenCount + displayList.length} จุด เพื่อให้จำนวนจุดตรงกันและไม่สับสน</p>` : ""}`;
+    hydrateDetailAreasFastSafe();
+    setTimeout(() => renderMapFastSafe(list), 0);
+  } catch (err) {
+    console.error("renderRouteDetailFinalSafe error", err);
+    detail.innerHTML = `เกิดข้อผิดพลาดตอนเปิดแผน: ${escapeHtml(err.message || err)}<br>กรุณากดรีเฟรชข้อมูลอีกครั้ง`;
+  }
+}
+renderRouteDetail = renderRouteDetailFinalSafe;
+
+function renderRouteSummaryFinalSafe(rows) {
+  const box = document.getElementById("routeSummary");
+  if (!box) return;
+  const groups = new Map();
+  (rows || []).filter(r => r.route_group && (getPlanSettings().mode === "repair" || !r.route_group.includes("ตารางซ่อม"))).forEach(r => {
+    if (!groups.has(r.route_group)) groups.set(r.route_group, []);
+    groups.get(r.route_group).push(r);
+  });
+  currentRouteGroups = groups;
+  const keys = Array.from(groups.keys());
+  if (!keys.length) {
+    selectedRouteKey = "";
+    box.innerHTML = `<div class="route-item">ยังไม่มีข้อมูลสำหรับวางแผนในเดือนนี้ หรือจุดถูกบันทึกสำเร็จแล้ว</div>`;
+    renderRouteDetailFinalSafe([]);
+    return;
+  }
+  if (!selectedRouteKey || !groups.has(selectedRouteKey)) selectedRouteKey = keys[0];
+  const visibleKeys = routeCollapsedToSelected && groups.has(selectedRouteKey) ? [selectedRouteKey] : keys;
+  const showAllBtn = routeCollapsedToSelected && keys.length > 1
+    ? `<button id="showRouteCardsBtn" class="route-show-all" type="button">แสดงแผนทั้งหมด</button>`
+    : "";
+  box.innerHTML = showAllBtn + visibleKeys.map((name) => {
+    const list = groups.get(name) || [];
+    const first = list[0] || {};
+    const idx = keys.indexOf(name);
+    const routeNames = sortRowsByPlannedStopNo(list).map(x => x.customer_name || x.customer_id).filter(Boolean).slice(0, 16).join(" → ");
+    const active = name === selectedRouteKey ? " active" : "";
+    return `<button class="route-item route-button${active}" data-route-key="${escapeHtml(name)}" type="button"><strong>${idx + 1}. ${escapeHtml(name)}</strong><br><span>เริ่ม/วนกลับ: ${escapeHtml(first.start_name || "-")}</span><br><small>${escapeHtml(routeNames)} → ${escapeHtml(first.start_name || "จุดเริ่มต้น")}</small></button>`;
+  }).join("");
+
+  const showAll = document.getElementById("showRouteCardsBtn");
+  if (showAll) showAll.addEventListener("click", () => {
+    routeCollapsedToSelected = false;
+    renderRouteSummaryFinalSafe(plannedRows);
+  });
+  box.querySelectorAll(".route-button").forEach(btn => btn.addEventListener("click", () => {
+    selectedRouteKey = btn.dataset.routeKey || "";
+    routeCollapsedToSelected = true;
+    renderRouteSummaryFinalSafe(plannedRows);
+  }));
+  renderRouteDetailFinalSafe(groups.get(selectedRouteKey) || []);
+  const form = document.getElementById("planForm");
+  if (form) applySelectedRouteToForm(form);
+}
+renderRouteSummary = renderRouteSummaryFinalSafe;
+
+/* ===== FINAL ROUTE PATCH 20260622: universal circular ordering for normal market =====
+   เป้าหมาย: วันปกติ/ออกตลาดทั่วไปทุกสายให้วิ่งเป็นวงมากขึ้น
+   ไม่แก้ทีละคัน ใช้ exact closed-loop TSP สำหรับแผนไม่เกิน 10 จุด
+   และใช้ circular sweep + 2-opt แบบจำกัดสำหรับจุดมากกว่านั้น เพื่อไม่ให้หน้าเว็บค้าง
+*/
+function exactClosedLoopTspFinal(start, points) {
+  const n = (points || []).length;
+  if (n <= 1) return points || [];
+  if (n > 10) return null;
+
+  const d0 = points.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const d = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) =>
+    i === j ? 0 : haversine(points[i], points[j])
+  ));
+  const size = 1 << n;
+  const dp = Array.from({ length: size }, () => Array(n).fill(Infinity));
+  const par = Array.from({ length: size }, () => Array(n).fill(-1));
+
+  for (let i = 0; i < n; i++) dp[1 << i][i] = d0[i];
+
+  for (let mask = 1; mask < size; mask++) {
+    for (let last = 0; last < n; last++) {
+      const base = dp[mask][last];
+      if (!Number.isFinite(base)) continue;
+      for (let nx = 0; nx < n; nx++) {
+        if (mask & (1 << nx)) continue;
+        const nm = mask | (1 << nx);
+        const val = base + d[last][nx];
+        if (val < dp[nm][nx]) {
+          dp[nm][nx] = val;
+          par[nm][nx] = last;
+        }
+      }
+    }
+  }
+
+  const full = size - 1;
+  let bestLast = 0;
+  let best = Infinity;
+  for (let last = 0; last < n; last++) {
+    const total = dp[full][last] + d0[last];
+    if (total < best) {
+      best = total;
+      bestLast = last;
+    }
+  }
+
+  const idx = [];
+  let mask = full, cur = bestLast;
+  while (cur >= 0) {
+    idx.push(cur);
+    const prev = par[mask][cur];
+    mask ^= (1 << cur);
+    cur = prev;
+  }
+  idx.reverse();
+
+  return idx.map(i => points[i]);
+}
+
+function routeOrientationScoreFinal(start, route) {
+  if (!route || route.length === 0) return Infinity;
+  const km = routeDistanceFromStart(start, route);
+  const firstD = haversine(start, { lat: toNumber(route[0].lat), lng: toNumber(route[0].lng) });
+  const lastD = haversine(start, { lat: toNumber(route[route.length - 1].lat), lng: toNumber(route[route.length - 1].lng) });
+
+  // ให้จุดท้ายใกล้ฐานกว่าจุดแรก เพื่อให้เส้นทางเป็นวงออกไปแล้ววนกลับ
+  const returnNearScore = (lastD - firstD) * 1.15;
+
+  // ลด zigzag จากระยะห่างฐานที่ขึ้นลงสลับหลายครั้ง
+  const ds = route.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  let bounce = 0;
+  for (let i = 2; i < ds.length; i++) {
+    const a = ds[i - 1] - ds[i - 2];
+    const b = ds[i] - ds[i - 1];
+    if (Math.abs(a) > 4 && Math.abs(b) > 4 && Math.sign(a) !== Math.sign(b)) bounce += 18;
+  }
+
+  let cross = 0;
+  try { cross = crossingPenaltyFinal(start, route) * 80; } catch(e) {}
+
+  return km + returnNearScore + bounce + cross;
+}
+
+function chooseBestDirectionFinal(start, route) {
+  if (!route || route.length <= 1) return route || [];
+  const a = route;
+  const b = [...route].reverse();
+  return routeOrientationScoreFinal(start, b) < routeOrientationScoreFinal(start, a) ? b : a;
+}
+
+function centerOfRouteFinal(points) {
+  const valid = (points || []).filter(validCoord);
+  return {
+    lat: valid.reduce((s,p)=>s+toNumber(p.lat),0) / Math.max(1, valid.length),
+    lng: valid.reduce((s,p)=>s+toNumber(p.lng),0) / Math.max(1, valid.length)
+  };
+}
+
+function circularSweepUniversalFinal(start, points) {
+  const valid = (points || []).filter(validCoord).map(p => ({...p}));
+  if (valid.length <= 2) return valid;
+  const center = centerOfRouteFinal(valid);
+  const k = Math.cos((center.lat || 16) * Math.PI / 180);
+
+  const byAngle = valid.map(p => ({
+    ...p,
+    __a: Math.atan2(toNumber(p.lat) - center.lat, (toNumber(p.lng) - center.lng) * k),
+    __d: haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) })
+  })).sort((a,b)=>a.__a-b.__a || a.__d-b.__d);
+
+  const clean = arr => arr.map(({__a,__d,...p})=>p);
+  const baseA = clean(byAngle);
+  const baseB = clean([...byAngle].reverse());
+  const candidates = [];
+
+  [baseA, baseB].forEach(base => {
+    for (let i=0;i<base.length;i++) {
+      const r = base.slice(i).concat(base.slice(0,i));
+      candidates.push(r);
+      const pulled = pullPointsThatAreOnTheWay(start, r);
+      if (pulled && pulled.length === r.length) candidates.push(pulled);
+    }
+  });
+
+  // เพิ่ม candidate แบบไกลก่อน-ใกล้ท้าย เพื่อแก้เคสเส้นทางยาวตามแนวถนน
+  const farFirst = [...valid].sort((a,b)=>
+    haversine(start,{lat:toNumber(b.lat),lng:toNumber(b.lng)}) -
+    haversine(start,{lat:toNumber(a.lat),lng:toNumber(a.lng)})
+  );
+  candidates.push(farFirst);
+  candidates.push([...farFirst].reverse());
+
+  const unique = [];
+  const seen = new Set();
+  candidates.forEach(r => {
+    if (!r || r.length !== valid.length) return;
+    const key = r.map(rowUniqueKey).join('|');
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(r);
+    }
+  });
+
+  return (unique.length ? unique : [valid])
+    .sort((a,b)=>routeOrientationScoreFinal(start,a)-routeOrientationScoreFinal(start,b))[0] || valid;
+}
+
+function orderNormalMarketRoute(start, points) {
+  // Override สุดท้าย: ใช้ทุกสายของวันปกติ/ออกตลาดทั่วไป
+  const valid = (points || []).filter(validCoord).map(p => ({...p}));
+  const noCoord = (points || []).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+
+  let order = exactClosedLoopTspFinal(start, valid);
+
+  if (!order) {
+    order = circularSweepUniversalFinal(start, valid);
+    try {
+      order = twoOptSafeFinal(start, order);
+    } catch(e) {
+      try { order = twoOptClosedRoute(start, order); } catch(e2) {}
+    }
+  }
+
+  order = chooseBestDirectionFinal(start, order);
+
+  // ดึงจุดที่อยู่ระหว่างทางมาแวะก่อน 1 รอบ ลดการผ่านแล้วกลับมาเก็บทีหลัง
+  try {
+    const pulled = pullPointsThatAreOnTheWay(start, order);
+    if (pulled && pulled.length === order.length) order = chooseBestDirectionFinal(start, pulled);
+  } catch(e) {}
+
+  return [...order, ...noCoord];
+}
+
+function applyNormalRouteFieldFeedback(start, order, sourcePoints) {
+  // ไม่ hard-code ทีละสายแล้ว ให้ใช้อัลกอริทึมกลางด้านบน
+  try { return orderNormalMarketRoute(start, sourcePoints || order || []); }
+  catch(e) { console.error("normal universal route fallback", e); return order || sourcePoints || []; }
+}
