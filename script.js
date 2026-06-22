@@ -2472,3 +2472,183 @@ document.getElementById("checkinBtn").addEventListener("click", checkInGps);
   }
 });
 loadData();
+
+/* ===== HOTFIX 20260622: prevent page unresponsive on normal route click =====
+   Fix: do not run heavy map/route recalculation during click render.
+   - Use already planned stop_no order.
+   - Limit to MAX_ROUTE_CUSTOMER_STOPS.
+   - Draw lightweight map immediately.
+   - Google Maps button still uses same ordered stops.
+*/
+function routeDisplayStopsFastSafe(list) {
+  const arr = Array.isArray(list) ? list : [];
+  const sorted = sortRowsByPlannedStopNo(arr).filter(validCoord);
+  if (getPlanSettings().mode === "pump") {
+    const pump = sorted.find(isPumpRow);
+    if (pump) {
+      const rest = removeSameStop(sorted, pump);
+      return [pump, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+    }
+  }
+  return sorted.slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+}
+routeDisplayStops = routeDisplayStopsFastSafe;
+
+async function renderMapFastSafe(list) {
+  const mapEl = document.getElementById("routeMap");
+  const metricsEl = document.getElementById("routeMetrics");
+  if (!mapEl) return;
+  if (!window.L) {
+    mapEl.innerHTML = "ไม่สามารถโหลดแผนที่ได้ กรุณาตรวจสอบอินเทอร์เน็ต";
+    if (metricsEl) metricsEl.textContent = "ไม่สามารถโหลดแผนที่ได้";
+    return;
+  }
+  if (!routeMap) {
+    routeMap = L.map("routeMap", { preferCanvas: true });
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(routeMap);
+  }
+  if (routeLayer) routeLayer.remove();
+  routeLayer = L.layerGroup().addTo(routeMap);
+
+  const stops = routeDisplayStopsFastSafe(list);
+  if (!stops.length) {
+    routeMap.setView([16.5, 103.8], 8);
+    if (metricsEl) metricsEl.textContent = "ยังไม่มีพิกัดสำหรับคำนวณเส้นทาง";
+    setTimeout(() => routeMap.invalidateSize(), 50);
+    return;
+  }
+
+  const start = getRouteStartForList(list);
+  const nav = [{ ...start, customer_name: start.name, type: "จุดเริ่มต้น", status: "เริ่ม/กลับ" }, ...stops, { ...start, customer_name: start.name, type: "จุดเริ่มต้น", status: "วนกลับ" }];
+  const latlngs = nav.map(p => [toNumber(p.lat), toNumber(p.lng)]).filter(x => Number.isFinite(x[0]) && Number.isFinite(x[1]));
+
+  nav.forEach((p, idx) => {
+    if (!Number.isFinite(toNumber(p.lat)) || !Number.isFinite(toNumber(p.lng))) return;
+    const isStart = idx === 0 || idx === nav.length - 1;
+    const label = idx === 0 ? "เริ่ม" : idx === nav.length - 1 ? "กลับ" : String(idx);
+    const icon = isStart
+      ? makeStartIcon(idx === 0 ? "เริ่ม" : "กลับ")
+      : (isCompleted(p) ? makeDoneIcon() : makeNumberIcon(idx, isFocusStop(p) ? "focus" : "normal"));
+    L.marker([toNumber(p.lat), toNumber(p.lng)], { icon }).addTo(routeLayer)
+      .bindPopup(`<strong>${label}. ${escapeHtml(p.customer_name || p.name || "-")}</strong><br>${escapeHtml(p.type || "-")}<br>${escapeHtml(p.status || "-")}`);
+  });
+
+  if (latlngs.length >= 2) {
+    L.polyline(latlngs, { weight: 5 }).addTo(routeLayer);
+    routeMap.fitBounds(latlngs, { padding: [30, 30] });
+  } else {
+    routeMap.setView(latlngs[0] || [16.5, 103.8], 10);
+  }
+
+  if (metricsEl) {
+    const done = stops.filter(isCompleted).length;
+    const remain = Math.max(0, stops.length - done);
+    const km = routeDistanceFromStart(start, stops);
+    metricsEl.textContent = `แสดงแผน ${stops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางประมาณ ${formatKm(km)} (กด Google Maps เพื่อดูเส้นทางถนนจริง/เวลาจราจรจริง)`;
+  }
+  setTimeout(() => routeMap.invalidateSize(), 80);
+}
+renderMap = renderMapFastSafe;
+
+function hydrateDetailAreasFastSafe() {
+  // ไม่ให้ reverse geocode จำนวนมากค้างหน้าเว็บระหว่างคลิกแผน
+  const nodes = Array.from(document.querySelectorAll(".geo-area"));
+  nodes.slice(0, 9).forEach((node, idx) => {
+    setTimeout(async () => {
+      try {
+        const area = await reverseGeocode(node.dataset.lat, node.dataset.lng);
+        node.textContent = area || `${node.dataset.lat}, ${node.dataset.lng}`;
+      } catch (e) {
+        node.textContent = `${node.dataset.lat}, ${node.dataset.lng}`;
+      }
+    }, idx * 120);
+  });
+}
+hydrateDetailAreas = hydrateDetailAreasFastSafe;
+
+function renderRouteDetailFinalSafe(list) {
+  const detail = document.getElementById("routeDetail");
+  if (!detail) return;
+  try {
+    if (!list || !list.length) {
+      detail.innerHTML = "คลิกการ์ดแผนเส้นทางด้านบน เพื่อดูรายละเอียดและแผนที่";
+      renderMap([]);
+      return;
+    }
+    const start = getRouteStartForList(list);
+    const googleUrl = routeToGoogleMapsUrl(list);
+    const displayList = routeDisplayStopsFastSafe(list);
+    const hiddenCount = Math.max(0, list.filter(validCoord).length - displayList.length);
+    const doneCount = displayList.filter(isCompleted).length;
+    const remainCount = Math.max(0, displayList.length - doneCount);
+    const rows = displayList.map((r, i) => {
+      const done = isCompleted(r);
+      const areaCell = detailAreaHtml(r, i);
+      return `<tr class="${done ? "done-row" : ""}"><td>${done ? "✓" : i + 1}</td><td>${escapeHtml(r.customer_name || "-")}</td><td>${escapeHtml(r.type || "-")}</td><td>${escapeHtml(r.status || "-")}<br><span class="visit-state ${done ? "done" : "pending"}">${completedLabel(r)}</span></td><td>${areaCell}</td></tr>`;
+    }).join("");
+    detail.innerHTML = `
+      <div class="detail-head">
+        <div>
+          <h3>${escapeHtml(selectedRouteKey)}</h3>
+          <p>จุดเริ่มต้น/วนกลับ: <strong>${escapeHtml(start.name)}</strong></p>
+          <p class="route-check-summary">เข้ารับบริการแล้ว <strong>${doneCount}</strong> จุด • คงเหลือ <strong>${remainCount}</strong> จุด</p>
+          <p id="routeMetrics" class="route-metrics">กำลังแสดงแผนที่...</p>
+        </div>
+        ${googleUrl ? `<a class="map-link" href="${googleUrl}" target="_blank" rel="noopener">เปิดเส้นทางจริง/เวลาที่ดีที่สุดใน Google Maps</a>` : ""}
+      </div>
+      <div class="detail-table-wrap"><table class="detail-table"><thead><tr><th>ลำดับ</th><th>ชื่อปั๊ม/ลูกค้า</th><th>ประเภท</th><th>สถานะ</th><th>ตำบล/อำเภอ/จังหวัด</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${hiddenCount ? `<p class="route-limit-note">แสดงใน Map/Google Maps ${MAX_ROUTE_CUSTOMER_STOPS} จุดแรก จากทั้งหมด ${hiddenCount + displayList.length} จุด เพื่อให้จำนวนจุดตรงกันและไม่สับสน</p>` : ""}`;
+    hydrateDetailAreasFastSafe();
+    setTimeout(() => renderMapFastSafe(list), 0);
+  } catch (err) {
+    console.error("renderRouteDetailFinalSafe error", err);
+    detail.innerHTML = `เกิดข้อผิดพลาดตอนเปิดแผน: ${escapeHtml(err.message || err)}<br>กรุณากดรีเฟรชข้อมูลอีกครั้ง`;
+  }
+}
+renderRouteDetail = renderRouteDetailFinalSafe;
+
+function renderRouteSummaryFinalSafe(rows) {
+  const box = document.getElementById("routeSummary");
+  if (!box) return;
+  const groups = new Map();
+  (rows || []).filter(r => r.route_group && (getPlanSettings().mode === "repair" || !r.route_group.includes("ตารางซ่อม"))).forEach(r => {
+    if (!groups.has(r.route_group)) groups.set(r.route_group, []);
+    groups.get(r.route_group).push(r);
+  });
+  currentRouteGroups = groups;
+  const keys = Array.from(groups.keys());
+  if (!keys.length) {
+    selectedRouteKey = "";
+    box.innerHTML = `<div class="route-item">ยังไม่มีข้อมูลสำหรับวางแผนในเดือนนี้ หรือจุดถูกบันทึกสำเร็จแล้ว</div>`;
+    renderRouteDetailFinalSafe([]);
+    return;
+  }
+  if (!selectedRouteKey || !groups.has(selectedRouteKey)) selectedRouteKey = keys[0];
+  const visibleKeys = routeCollapsedToSelected && groups.has(selectedRouteKey) ? [selectedRouteKey] : keys;
+  const showAllBtn = routeCollapsedToSelected && keys.length > 1
+    ? `<button id="showRouteCardsBtn" class="route-show-all" type="button">แสดงแผนทั้งหมด</button>`
+    : "";
+  box.innerHTML = showAllBtn + visibleKeys.map((name) => {
+    const list = groups.get(name) || [];
+    const first = list[0] || {};
+    const idx = keys.indexOf(name);
+    const routeNames = sortRowsByPlannedStopNo(list).map(x => x.customer_name || x.customer_id).filter(Boolean).slice(0, 16).join(" → ");
+    const active = name === selectedRouteKey ? " active" : "";
+    return `<button class="route-item route-button${active}" data-route-key="${escapeHtml(name)}" type="button"><strong>${idx + 1}. ${escapeHtml(name)}</strong><br><span>เริ่ม/วนกลับ: ${escapeHtml(first.start_name || "-")}</span><br><small>${escapeHtml(routeNames)} → ${escapeHtml(first.start_name || "จุดเริ่มต้น")}</small></button>`;
+  }).join("");
+
+  const showAll = document.getElementById("showRouteCardsBtn");
+  if (showAll) showAll.addEventListener("click", () => {
+    routeCollapsedToSelected = false;
+    renderRouteSummaryFinalSafe(plannedRows);
+  });
+  box.querySelectorAll(".route-button").forEach(btn => btn.addEventListener("click", () => {
+    selectedRouteKey = btn.dataset.routeKey || "";
+    routeCollapsedToSelected = true;
+    renderRouteSummaryFinalSafe(plannedRows);
+  }));
+  renderRouteDetailFinalSafe(groups.get(selectedRouteKey) || []);
+  const form = document.getElementById("planForm");
+  if (form) applySelectedRouteToForm(form);
+}
+renderRouteSummary = renderRouteSummaryFinalSafe;
