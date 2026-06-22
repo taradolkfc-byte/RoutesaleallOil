@@ -790,6 +790,34 @@ function orderCircularRoute(start, points) {
   best = pullPointsThatAreOnTheWay(start, best);
   return [...best, ...noCoord];
 }
+
+
+function rowUniqueKey(row) {
+  return `${norm(row.customer_id)}|${norm(row.customer_name)}|${cleanText(row.lat)}|${cleanText(row.lng)}|${cleanText(row.type)}`;
+}
+
+function isPumpRow(row) {
+  return cleanText(row && row.type) === "ปรับปรุงปั๊ม";
+}
+
+function removeSameStop(rows, target) {
+  const key = rowUniqueKey(target);
+  return rows.filter(r => rowUniqueKey(r) !== key);
+}
+
+function orderPumpFirstRoute(start, pumpRow, otherRows) {
+  // เงื่อนไขสำหรับ “ตามแผนปรับปรุงปั๊ม”:
+  // จุดที่ 1 ต้องเป็นจุดปรับปรุงปั๊มเสมอ แล้วค่อยจัดจุดออกตลาดที่เหลือแบบวงกลม
+  if (!pumpRow) return orderCircularRoute(start, otherRows || []);
+
+  const pivot = validCoord(pumpRow)
+    ? { lat: toNumber(pumpRow.lat), lng: toNumber(pumpRow.lng) }
+    : start;
+
+  const rest = removeSameStop(otherRows || [], pumpRow);
+  const orderedRest = orderCircularRoute(pivot, rest);
+  return [pumpRow, ...orderedRest];
+}
 function takeByStatusForMeter(marketRows, pump) {
   const selectedBU = getSelectedStartBU();
   const sameMeter = marketRows
@@ -820,7 +848,7 @@ function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
     const routeId = `${pump.bu || "BU-?"} สาย ${pump.meterKey} วันที่ ${routeDate}`;
     const routePoints = [pump, ...relatedMarkets];
     const start = startForRoute(routePoints);
-    const ordered = orderCircularRoute(start, routePoints);
+    const ordered = orderPumpFirstRoute(start, pump, relatedMarkets);
     ordered.forEach((row, idx) => output.push({
       ...row,
       plan_day: 1,
@@ -1150,7 +1178,19 @@ function optimizeStopsForDisplay(list) {
 function routeDisplayStops(list) {
   // สำคัญ: ใช้ลำดับที่คำนวณไว้ตอนสร้างแผนแล้ว ไม่คำนวณซ้ำในหน้า Map
   // เพื่อให้การ์ดแผน / ตาราง / Map / Google Maps ตรงกัน และไม่เพิ่มจุดเกิน 9 จุด
-  return sortRowsByPlannedStopNo(list).filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  const sorted = sortRowsByPlannedStopNo(list).filter(validCoord);
+
+  // โหมดปรับปรุงปั๊ม: บังคับให้จุดปรับปรุงปั๊มเป็นจุดที่ 1 ใน Map/Google Maps เสมอ
+  // และจุดอื่น ๆ ยังคงไม่เกิน 8 จุด รวมทั้งหมดไม่เกิน 9 จุด
+  if (getPlanSettings().mode === "pump") {
+    const pump = sorted.find(isPumpRow);
+    if (pump) {
+      const rest = removeSameStop(sorted, pump);
+      return [pump, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+    }
+  }
+
+  return sorted.slice(0, MAX_ROUTE_CUSTOMER_STOPS);
 }
 function routeNavPoints(list) {
   const valid = routeDisplayStops(list);
