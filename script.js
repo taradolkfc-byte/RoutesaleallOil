@@ -2304,6 +2304,156 @@ function applyNormalRouteFieldFeedback(start, order, sourcePoints) {
   return orderNormalMarketRoute(start, sourcePoints || order || []);
 }
 
+
+
+/* ===== STABLE PATCH: normal market click error fixed + safe circular loop =====
+   จุดประสงค์: แก้ Error ตอนคลิกแผนวันปกติ/ออกตลาดทั่วไป
+   แนวคิด: ใช้ algorithm ที่เบาและเสถียร ไม่ recursion ไม่ candidate หนัก
+*/
+function safeNumberPatch(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+function routeKeyPatch(p) {
+  return `${norm(p.customer_id)}|${norm(p.customer_name)}|${safeNumberPatch(toNumber(p.lat)).toFixed(6)}|${safeNumberPatch(toNumber(p.lng)).toFixed(6)}`;
+}
+function angleAroundPatch(center, p) {
+  const lat = toNumber(p.lat);
+  const lng = toNumber(p.lng);
+  const k = Math.cos((center.lat || lat || 16) * Math.PI / 180);
+  return Math.atan2(lat - center.lat, (lng - center.lng) * k);
+}
+function rotatePatch(arr, i) {
+  return arr.slice(i).concat(arr.slice(0, i));
+}
+function routeKmPatch(start, order) {
+  try { return routeDistanceFromStart(start, order); } catch(e) {
+    let sum = 0, prev = start;
+    (order || []).forEach(p => { sum += haversine(prev, {lat: toNumber(p.lat), lng: toNumber(p.lng)}); prev = p; });
+    if (order && order.length) sum += haversine(prev, start);
+    return sum;
+  }
+}
+function simpleCrossCountPatch(start, order) {
+  try { return crossingPenaltyFinal(start, order); } catch(e) { return 0; }
+}
+function stableCircularScorePatch(start, route) {
+  if (!route || !route.length) return 999999;
+  const d = routeKmPatch(start, route);
+  const cross = simpleCrossCountPatch(start, route) * 250;
+  // ลงโทษกรณีระยะจากฐานกระโดดขึ้นลงบ่อย ๆ เพราะจะวิ่งย้อนเก็บจุด
+  const ds = route.map(p => haversine(start, {lat: toNumber(p.lat), lng: toNumber(p.lng)}));
+  let bounce = 0;
+  for (let i=2;i<ds.length;i++) {
+    const a = ds[i-1] - ds[i-2];
+    const b = ds[i] - ds[i-1];
+    if (Math.abs(a) > 3 && Math.abs(b) > 3 && Math.sign(a) !== Math.sign(b)) bounce += 12;
+  }
+  return d + cross + bounce;
+}
+function makeStableCircularCandidatesPatch(start, points) {
+  const valid = (points || []).filter(validCoord).map(p => ({...p}));
+  if (valid.length <= 2) return [valid];
+  const center = {
+    lat: valid.reduce((s,p)=>s+toNumber(p.lat),0)/valid.length,
+    lng: valid.reduce((s,p)=>s+toNumber(p.lng),0)/valid.length
+  };
+  const byAngle = valid.map(p => ({...p, __a: angleAroundPatch(center, p), __d: haversine(start,{lat:toNumber(p.lat),lng:toNumber(p.lng)})}))
+    .sort((a,b)=>a.__a-b.__a || a.__d-b.__d);
+  const base1 = byAngle.map(({__a,__d,...p})=>p);
+  const base2 = [...byAngle].reverse().map(({__a,__d,...p})=>p);
+  const out = [];
+  [base1, base2].forEach(base => {
+    for (let i=0;i<base.length;i++) out.push(rotatePatch(base,i));
+  });
+  // candidate แบบแบ่งซ้าย/ขวาจากแกนฐาน->จุดไกล เพื่อให้เป็นวงออก-กลับ
+  const far = [...valid].sort((a,b)=>haversine(start,b)-haversine(start,a))[0];
+  const refLat = start.lat || center.lat || 16;
+  const k = Math.cos(refLat * Math.PI/180);
+  const sx = start.lng*k, sy = start.lat;
+  const fx = toNumber(far.lng)*k, fy = toNumber(far.lat);
+  const vx = fx-sx, vy = fy-sy;
+  if (Math.hypot(vx,vy)>0) {
+    const left=[], right=[];
+    valid.forEach(p=>{
+      const px=toNumber(p.lng)*k, py=toNumber(p.lat);
+      const cross = vx*(py-sy)-vy*(px-sx);
+      const along = ((px-sx)*vx+(py-sy)*vy)/Math.hypot(vx,vy);
+      const item={...p,__along:along,__d:haversine(start,{lat:toNumber(p.lat),lng:toNumber(p.lng)})};
+      (cross>=0?left:right).push(item);
+    });
+    const sortOut=a=>[...a].sort((x,y)=>x.__along-y.__along || x.__d-y.__d);
+    const sortBack=a=>[...a].sort((x,y)=>y.__along-x.__along || y.__d-x.__d);
+    const clean=a=>a.map(({__along,__d,...p})=>p);
+    out.push(clean([...sortOut(left),...sortBack(right)]));
+    out.push(clean([...sortOut(right),...sortBack(left)]));
+  }
+  // unique
+  const seen=new Set(), unique=[];
+  out.forEach(r=>{ const key=r.map(routeKeyPatch).join('|'); if(!seen.has(key)&&r.length===valid.length){seen.add(key); unique.push(r);} });
+  return unique.length ? unique : [valid];
+}
+function orderNormalMarketRoute(start, points) {
+  // override แบบเสถียร ใช้กับวันปกติ/ออกตลาดทั่วไปทุกสาย
+  const valid = (points || []).filter(validCoord).map(p => ({...p}));
+  const noCoord = (points || []).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+  let candidates = makeStableCircularCandidatesPatch(start, valid);
+  // ใช้ 2-opt แบบปลอดภัยเฉพาะ candidate จำนวนน้อย เพื่อลดเส้นตัดกัน แต่ไม่ให้ค้าง
+  candidates = candidates.slice(0, Math.min(40, candidates.length)).map(r => {
+    try { return twoOptSafeFinal(start, r); } catch(e) { return r; }
+  }).concat(candidates);
+  const best = candidates.sort((a,b)=>stableCircularScorePatch(start,a)-stableCircularScorePatch(start,b))[0] || valid;
+  return [...best, ...noCoord];
+}
+function applyNormalRouteFieldFeedback(start, order, sourcePoints) {
+  try { return orderNormalMarketRoute(start, sourcePoints || order || []); }
+  catch(e) { console.error('normal route fallback', e); return order || sourcePoints || []; }
+}
+function renderRouteDetailSafePatch(list) {
+  const detail = document.getElementById("routeDetail");
+  try {
+    if (!list || !list.length) {
+      detail.innerHTML = "คลิกการ์ดแผนเส้นทางด้านบน เพื่อดูรายละเอียดและแผนที่";
+      renderMap([]);
+      return;
+    }
+    const start = START_POINTS.find(x => x.name === list[0].start_name) || bestStartForRoute(list);
+    const googleUrl = routeToGoogleMapsUrl(list);
+    const displayList = routeDisplayStops(list);
+    const hiddenCount = Math.max(0, list.filter(validCoord).length - displayList.length);
+    const doneCount = displayList.filter(isCompleted).length;
+    const remainCount = Math.max(0, displayList.length - doneCount);
+    const rows = displayList.map((r, i) => {
+      const done = isCompleted(r);
+      const areaCell = detailAreaHtml(r, i);
+      return `<tr class="${done ? "done-row" : ""}"><td>${done ? "✓" : i + 1}</td><td>${escapeHtml(r.customer_name || "-")}</td><td>${escapeHtml(r.type || "-")}</td><td>${escapeHtml(r.status || "-")}<br><span class="visit-state ${done ? "done" : "pending"}">${completedLabel(r)}</span></td><td>${areaCell}</td></tr>`;
+    }).join("");
+    detail.innerHTML = `
+      <div class="detail-head">
+        <div>
+          <h3>${escapeHtml(selectedRouteKey)}</h3>
+          <p>จุดเริ่มต้น/วนกลับ: <strong>${escapeHtml(start.name)}</strong></p>
+          <p class="route-check-summary">เข้ารับบริการแล้ว <strong>${doneCount}</strong> จุด • คงเหลือ <strong>${remainCount}</strong> จุด</p>
+          <p id="routeMetrics" class="route-metrics">กำลังคำนวณเส้นทางตามถนนจริง...</p>
+        </div>
+        ${googleUrl ? `<a class="map-link" href="${googleUrl}" target="_blank" rel="noopener">เปิดเส้นทางจริง/เวลาที่ดีที่สุดใน Google Maps</a>` : ""}
+      </div>
+      <div class="detail-table-wrap"><table class="detail-table"><thead><tr><th>ลำดับ</th><th>ชื่อปั๊ม/ลูกค้า</th><th>ประเภท</th><th>สถานะ</th><th>ตำบล/อำเภอ/จังหวัด</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${hiddenCount ? `<p class="route-limit-note">แสดงใน Map/Google Maps ${MAX_ROUTE_CUSTOMER_STOPS} จุดแรก จากทั้งหมด ${hiddenCount + displayList.length} จุด เพื่อให้จำนวนจุดตรงกันและไม่สับสน</p>` : ""}`;
+    hydrateDetailAreas();
+    Promise.resolve(renderMap(list)).catch(err => {
+      console.error('renderMap error', err);
+      const m = document.getElementById('routeMetrics');
+      if (m) m.textContent = 'แสดงตารางได้แล้ว แต่โหลดเส้นทางแผนที่ไม่สำเร็จ กรุณากด Google Maps เพื่อดูเส้นทางจริง';
+    });
+  } catch (err) {
+    console.error('renderRouteDetail error', err);
+    detail.innerHTML = `เกิดข้อผิดพลาดตอนเปิดแผน: ${escapeHtml(err.message || err)}<br>ระบบแสดงข้อมูลสำรอง กรุณากดรีเฟรชข้อมูลอีกครั้ง`;
+  }
+}
+renderRouteDetail = renderRouteDetailSafePatch;
+
 document.getElementById("planForm").addEventListener("submit", saveForm);
 document.getElementById("searchBox").addEventListener("input", renderTable);
 document.getElementById("typeFilter").addEventListener("change", renderTable);
