@@ -1033,7 +1033,42 @@ function orderNormalMarketRoute(start, points) {
   }
 
   best = pullPointsThatAreOnTheWay(start, best);
+  best = applyNormalRouteFieldFeedback(start, best, valid);
   return [...best, ...noCoord];
+}
+
+
+function isNormalST55Route(points) {
+  const valid = (points || []).filter(Boolean);
+  if (!valid.length) return false;
+  return valid.some(p => cleanText(p.bu).toUpperCase() === "ST") &&
+         valid.some(p => normalizeMeter(p.meter || p.meterKey) === "55");
+}
+
+function reorderByIndexPattern(order, pattern) {
+  if (!order || order.length < pattern.length) return order;
+  const out = [];
+  const used = new Set();
+  pattern.forEach(idx => {
+    if (idx >= 0 && idx < order.length && !used.has(idx)) {
+      out.push(order[idx]);
+      used.add(idx);
+    }
+  });
+  order.forEach((p, idx) => {
+    if (!used.has(idx)) out.push(p);
+  });
+  return out;
+}
+
+function applyNormalRouteFieldFeedback(start, order, sourcePoints) {
+  // กติกาหน้างานเฉพาะโหมด "วันปกติ / ออกตลาดทั่วไป"
+  // เคสสามทองบริการ ST สาย 55: ลำดับ 1,2,3 ดีแล้ว จากนั้นให้วิ่งต่อไปชุด 6,7,8,9 ก่อน แล้วค่อยกลับ 5,4
+  // เพื่อลดการวิ่งวนย้อนกลับไปเก็บจุดเดิมตามที่แจ้งจากหน้างาน
+  if (isNormalST55Route(sourcePoints) && order.length >= 9) {
+    return reorderByIndexPattern(order, [0, 1, 2, 5, 6, 7, 8, 4, 3]);
+  }
+  return order;
 }
 
 function buildNormalPlanRows(marketRows, planDays) {
