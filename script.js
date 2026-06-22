@@ -896,82 +896,122 @@ function routeTurnPenalty(start, order) {
   return penalty;
 }
 
+function angleFromStart(start, p) {
+  return Math.atan2(toNumber(p.lat) - Number(start.lat), toNumber(p.lng) - Number(start.lng));
+}
+
+function angularDiff(a, b) {
+  let d = Math.abs(a - b);
+  while (d > Math.PI) d = Math.abs(d - Math.PI * 2);
+  return d;
+}
+
 function normalMarketRouteScore(start, order) {
   if (!order.length) return 0;
-  const distsFromStart = order.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
-  const maxD = Math.max(...distsFromStart, 0);
-  const nearLimit = Math.max(8, maxD * 0.42);
+  const baseDistance = routeDistanceFromStart(start, order);
+  const turnPenalty = routeTurnPenalty(start, order) * 1.6;
 
-  // ห้ามให้จุดใกล้ฐานมาก ๆ มาเป็นจุดแรก ๆ ในโหมดวันปกติ เพราะจะทำให้วิ่งออกไปแล้วกลับมาเก็บซ้ำ
-  let nearStartPenalty = 0;
-  order.slice(0, Math.min(3, order.length)).forEach((p, idx) => {
-    const d = haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
-    if (d < nearLimit) nearStartPenalty += (nearLimit - d) * (idx === 0 ? 35 : idx === 1 ? 22 : 12);
+  // ลงโทษการวิ่งย้อนกลับเข้าหาฐานเร็วเกินไปในช่วงกลางทาง
+  // เพื่อให้เส้นทางเป็น “ออกไปก่อน แล้วค่อยวนกลับ” มากกว่า 1→2→วกกลับ→ออกไปใหม่
+  const ds = order.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const maxD = Math.max(...ds, 0);
+  let earlyReturnPenalty = 0;
+  for (let i = 1; i < ds.length - 2; i++) {
+    if (ds[i] < maxD * 0.55 && ds[i + 1] > ds[i] + 8) earlyReturnPenalty += 35;
+  }
+
+  // ลงโทษการกระโดดข้ามโซนมุม แล้วค่อยย้อนกลับมาเก็บมุมเดิม
+  const angles = order.map(p => angleFromStart(start, p));
+  let angleZigzagPenalty = 0;
+  for (let i = 1; i < angles.length - 1; i++) {
+    const d1 = angles[i] - angles[i - 1];
+    const d2 = angles[i + 1] - angles[i];
+    if (d1 * d2 < 0 && Math.abs(d1) > 0.25 && Math.abs(d2) > 0.25) angleZigzagPenalty += 25;
+  }
+
+  return baseDistance + turnPenalty + earlyReturnPenalty + angleZigzagPenalty;
+}
+
+function chooseFirstTwoForNormalRoute(start, valid) {
+  // โหมดวันปกติ: อนุญาตให้เริ่มจากจุดใกล้ทางออก 1-2 จุดก่อน
+  // จากนั้นค่อยวนออกโซนนอก เพื่อลดการ “วิ่งฟรี” กลับมาเก็บจุดใกล้ฐานในภายหลัง
+  const sortedByStart = [...valid].sort((a, b) =>
+    haversine(start, { lat: toNumber(a.lat), lng: toNumber(a.lng) }) -
+    haversine(start, { lat: toNumber(b.lat), lng: toNumber(b.lng) })
+  );
+  const first = sortedByStart[0];
+  if (!first || valid.length === 1) return { fixed: first ? [first] : [], remaining: first ? removeSameStop(valid, first) : valid };
+
+  const firstD = haversine(start, { lat: toNumber(first.lat), lng: toNumber(first.lng) });
+  const firstAngle = angleFromStart(start, first);
+  const candidates = removeSameStop(valid, first)
+    .map(p => {
+      const dStart = haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
+      const dFirst = haversine(first, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
+      const a = angleFromStart(start, p);
+      // เลือกจุดที่ต่อเนื่องจากจุดแรก ไม่ใช่ย้อนกลับเข้าฐาน และไม่กระโดดข้ามคนละโซนมากเกินไป
+      const score = dFirst + angularDiff(a, firstAngle) * 18 + Math.max(0, firstD - dStart) * 3;
+      return { p, score, dStart };
+    })
+    .sort((a, b) => a.score - b.score);
+
+  const second = candidates[0] && candidates[0].p;
+  return second
+    ? { fixed: [first, second], remaining: removeSameStop(removeSameStop(valid, first), second) }
+    : { fixed: [first], remaining: removeSameStop(valid, first) };
+}
+
+function makeNormalSweepCandidates(start, fixed, remaining) {
+  if (!remaining.length) return [fixed];
+  const candidates = [];
+  const anchor = fixed.length ? fixed[fixed.length - 1] : start;
+  const anchorAngle = angleFromStart(start, anchor);
+
+  const byAngleAsc = [...remaining].sort((a, b) => angleFromStart(start, a) - angleFromStart(start, b));
+  const byAngleDesc = [...byAngleAsc].reverse();
+  const bases = [byAngleAsc, byAngleDesc];
+
+  bases.forEach(base => {
+    // หมุนลำดับให้จุดแรกของกลุ่มที่เหลือ อยู่ใกล้มุมของจุดก่อนหน้า
+    for (let i = 0; i < base.length; i++) {
+      const rotated = [...base.slice(i), ...base.slice(0, i)];
+      const firstAngle = angleFromStart(start, rotated[0]);
+      const connectPenalty = angularDiff(anchorAngle, firstAngle);
+      if (connectPenalty <= Math.PI * 0.85) {
+        candidates.push([...fixed, ...rotated]);
+        candidates.push(pullPointsThatAreOnTheWay(start, [...fixed, ...rotated]));
+      }
+    }
+    candidates.push([...fixed, ...base]);
+    candidates.push(pullPointsThatAreOnTheWay(start, [...fixed, ...base]));
   });
 
-  // จุดใกล้ฐานควรไปอยู่ท้ายเส้นทางก่อนวนกลับ
-  order.slice(-3).forEach((p, idx) => {
-    const d = haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
-    if (d < nearLimit) nearStartPenalty -= (nearLimit - d) * (idx === 2 ? 10 : 4);
+  // candidate แบบ “ออกโซนไกลก่อนแล้ววนกลับ” แต่ยังล็อก fixed 1-2 จุดแรกไว้
+  const maxD = Math.max(...remaining.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) })), 0);
+  const farFirst = [...remaining].sort((a, b) => {
+    const da = haversine(start, { lat: toNumber(a.lat), lng: toNumber(a.lng) });
+    const db = haversine(start, { lat: toNumber(b.lat), lng: toNumber(b.lng) });
+    return db - da;
   });
+  if (maxD > 0) candidates.push([...fixed, ...pullPointsThatAreOnTheWay(start, farFirst)]);
 
-  return routeDistanceFromStart(start, order) + routeTurnPenalty(start, order) + nearStartPenalty;
+  return candidates;
 }
 
 function orderNormalMarketRoute(start, points) {
-  // โหมดวันปกติ/ออกตลาดทั่วไป: วางเป็นวง โดยเปิดออกไปโซนไกล/แนวนอกก่อน แล้วเก็บจุดใกล้ฐานช่วงท้าย
+  // โหมดวันปกติ/ออกตลาดทั่วไป:
+  // 1) เก็บจุดออกจากฐานที่ต่อเนื่อง 1-2 จุดแรกได้
+  // 2) หลังจากนั้นเรียงแบบกวาดเป็นวงตามมุมจากจุดเริ่ม ไม่กระโดดกลับไปมา
+  // 3) เลือก candidate ที่ระยะรวม + การวกกลับต่ำที่สุด
   const valid = points.filter(validCoord).map(p => ({ ...p }));
   const noCoord = points.filter(p => !validCoord(p));
   if (valid.length <= 2) return [...valid, ...noCoord];
 
-  const center = {
-    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
-    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
-  };
-  const withAngle = valid.map(p => ({
-    ...p,
-    __angle: Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng),
-    __r: haversine(center, { lat: toNumber(p.lat), lng: toNumber(p.lng) }),
-    __sd: haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) })
-  }));
+  const { fixed, remaining } = chooseFirstTwoForNormalRoute(start, valid);
+  const candidates = makeNormalSweepCandidates(start, fixed, remaining);
 
-  const bases = [];
-  const cw = [...withAngle].sort((a, b) => a.__angle - b.__angle);
-  const ccw = [...cw].reverse();
-  bases.push(cw, ccw);
-
-  const candidates = [];
-  bases.forEach(base => {
-    for (let i = 0; i < base.length; i++) {
-      const rotated = [...base.slice(i), ...base.slice(0, i)].map(({ __angle, __r, __sd, ...p }) => p);
-      candidates.push(rotated);
-      candidates.push(pullPointsThatAreOnTheWay(start, rotated));
-    }
-  });
-
-  // candidate เสริม: เรียงจุดวงนอกก่อน จุดใกล้ฐานไว้ท้าย แล้วค่อยดึงจุดที่อยู่ระหว่างทาง
-  const maxStartD = Math.max(...withAngle.map(p => p.__sd), 0);
-  const nearLimit = Math.max(8, maxStartD * 0.42);
-  const outerFirst = [...withAngle]
-    .sort((a, b) => (b.__r - a.__r) || (b.__sd - a.__sd))
-    .map(({ __angle, __r, __sd, ...p }) => p);
-  candidates.push(outerFirst);
-  candidates.push(pullPointsThatAreOnTheWay(start, outerFirst));
-
-  // candidate เสริม: เอากลุ่มใกล้ฐานไปไว้ท้าย ตามที่ต้องการไม่ให้แวะ 1,2 ก่อน
-  candidates.slice(0).forEach(route => {
-    const far = [];
-    const near = [];
-    route.forEach(p => {
-      const d = haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
-      if (d < nearLimit) near.push(p); else far.push(p);
-    });
-    if (far.length && near.length) {
-      const nearSorted = [...near].sort((a, b) => haversine(start, { lat: toNumber(b.lat), lng: toNumber(b.lng) }) - haversine(start, { lat: toNumber(a.lat), lng: toNumber(a.lng) }));
-      candidates.push([...far, ...nearSorted]);
-      candidates.push(pullPointsThatAreOnTheWay(start, [...far, ...nearSorted]));
-    }
-  });
+  // สำหรับกรณีที่จุดแรกที่ใกล้ฐานทำให้ภาพรวมแย่ ให้ลองไม่ล็อก fixed ด้วย แต่ให้ penalty นิดหน่อย
+  candidates.push(...makeNormalSweepCandidates(start, [], valid));
 
   const unique = [];
   const seen = new Set();
@@ -981,6 +1021,17 @@ function orderNormalMarketRoute(start, points) {
   });
 
   let best = unique.sort((a, b) => normalMarketRouteScore(start, a) - normalMarketRouteScore(start, b))[0] || valid;
+
+  // ถ้าจุดแรก/สองที่ระบบเลือกไว้ไม่ได้ทำให้ระยะพัง ให้คงไว้ตามที่ผู้ใช้ต้องการในเคส ST สาย 57
+  if (fixed.length >= 2) {
+    const bestWithFixed = unique
+      .filter(c => rowUniqueKey(c[0]) === rowUniqueKey(fixed[0]) && rowUniqueKey(c[1]) === rowUniqueKey(fixed[1]))
+      .sort((a, b) => normalMarketRouteScore(start, a) - normalMarketRouteScore(start, b))[0];
+    if (bestWithFixed && normalMarketRouteScore(start, bestWithFixed) <= normalMarketRouteScore(start, best) * 1.12) {
+      best = bestWithFixed;
+    }
+  }
+
   best = pullPointsThatAreOnTheWay(start, best);
   return [...best, ...noCoord];
 }
