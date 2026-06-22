@@ -2061,6 +2061,249 @@ async function checkInGps() {
   }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
 }
 
+
+
+/* ===== FINAL NORMAL MARKET ROUTE ENGINE: circular loop for all normal lines =====
+   ใช้เฉพาะโหมด "วันปกติ / ออกตลาดทั่วไป"
+   เป้าหมาย: วิ่งเป็นวง ออกไปเก็บโซนหนึ่ง แล้ววนกลับอีกโซน ลดการวิ่งเส้นตรงไป-กลับและลดการย้อนเก็บจุดย้อนหลัง
+*/
+function routePointIdFinal(p) {
+  return `${norm(p.customer_id)}|${norm(p.customer_name)}|${Number(toNumber(p.lat)).toFixed(6)}|${Number(toNumber(p.lng)).toFixed(6)}`;
+}
+
+function pointXYFinal(p, refLat) {
+  const lat = toNumber(p.lat);
+  const lng = toNumber(p.lng);
+  const k = Math.cos((Number(refLat) || lat || 16) * Math.PI / 180);
+  return { x: lng * k, y: lat };
+}
+
+function orientFinal(a, b, c, refLat) {
+  const A = pointXYFinal(a, refLat), B = pointXYFinal(b, refLat), C = pointXYFinal(c, refLat);
+  return (B.x - A.x) * (C.y - A.y) - (B.y - A.y) * (C.x - A.x);
+}
+
+function segmentsCrossFinal(a, b, c, d, refLat) {
+  const o1 = orientFinal(a, b, c, refLat);
+  const o2 = orientFinal(a, b, d, refLat);
+  const o3 = orientFinal(c, d, a, refLat);
+  const o4 = orientFinal(c, d, b, refLat);
+  return (o1 * o2 < 0) && (o3 * o4 < 0);
+}
+
+function crossingPenaltyFinal(start, order) {
+  if (!order || order.length < 4) return 0;
+  const pts = [start, ...order, start];
+  const refLat = pts.reduce((sum, p) => sum + Number(toNumber(p.lat) || start.lat), 0) / pts.length;
+  let count = 0;
+  for (let i = 0; i < pts.length - 1; i++) {
+    for (let j = i + 2; j < pts.length - 1; j++) {
+      if (i === 0 && j === pts.length - 2) continue; // ข้ามเส้นต้นทางกับเส้นกลับฐานที่ติดกันในวงปิด
+      if (segmentsCrossFinal(pts[i], pts[i + 1], pts[j], pts[j + 1], refLat)) count++;
+    }
+  }
+  return count;
+}
+
+function unwrapAngleSequenceFinal(angles) {
+  if (!angles.length) return [];
+  const out = [angles[0]];
+  for (let i = 1; i < angles.length; i++) {
+    let a = angles[i];
+    let prev = out[i - 1];
+    while (a - prev > Math.PI) a -= Math.PI * 2;
+    while (a - prev < -Math.PI) a += Math.PI * 2;
+    out.push(a);
+  }
+  return out;
+}
+
+function angularBacktrackPenaltyFinal(start, order) {
+  if (!order || order.length < 5) return 0;
+  const angles = unwrapAngleSequenceFinal(order.map(p => angleFromStart(start, p)));
+  let switches = 0;
+  let last = 0;
+  for (let i = 1; i < angles.length; i++) {
+    const d = angles[i] - angles[i - 1];
+    const sign = Math.abs(d) < 0.08 ? last : (d > 0 ? 1 : -1);
+    if (last && sign && sign !== last) switches++;
+    if (sign) last = sign;
+  }
+  return Math.max(0, switches - 1) * 80;
+}
+
+function nearBaseMiddlePenaltyFinal(start, order) {
+  if (!order || order.length < 6) return 0;
+  const ds = order.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const minD = Math.min(...ds);
+  const maxD = Math.max(...ds);
+  const nearLimit = minD + Math.max(5, (maxD - minD) * 0.22);
+  let penalty = 0;
+  order.forEach((p, i) => {
+    if (i >= 2 && i <= order.length - 3 && ds[i] <= nearLimit) penalty += 55;
+  });
+  return penalty;
+}
+
+function endNearBaseRewardPenaltyFinal(start, order) {
+  if (!order || order.length < 3) return 0;
+  const ds = order.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const minD = Math.min(...ds);
+  const firstD = ds[0];
+  const lastD = ds[ds.length - 1];
+  // จุดแรก/ท้ายควรเป็นกลุ่มใกล้ฐาน เพื่อเปิดวงแล้วปิดวงกลับฐาน ไม่ใช่จบที่ปลายทางไกล
+  return Math.max(0, firstD - minD - 8) * 5 + Math.max(0, lastD - minD - 8) * 5;
+}
+
+function normalCircularRouteScore(start, order) {
+  if (!order || !order.length) return 0;
+  return routeDistanceFromStart(start, order)
+    + crossingPenaltyFinal(start, order) * 900
+    + routeTurnPenalty(start, order) * 2.8
+    + angularBacktrackPenaltyFinal(start, order)
+    + nearBaseMiddlePenaltyFinal(start, order)
+    + endNearBaseRewardPenaltyFinal(start, order)
+    + distanceTrendPenalty(start, order) * 0.55;
+}
+
+function rotateArrayFinal(arr, idx) {
+  return [...arr.slice(idx), ...arr.slice(0, idx)];
+}
+
+function uniqueRouteCandidatesFinal(candidates, length) {
+  const seen = new Set();
+  const out = [];
+  for (const c of candidates) {
+    if (!c || c.length !== length) continue;
+    const key = c.map(routePointIdFinal).join('|');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(c);
+  }
+  return out;
+}
+
+function makeStartSweepCandidatesFinal(start, points) {
+  const valid = points.filter(validCoord).map(p => ({ ...p }));
+  if (valid.length <= 2) return [valid];
+  const byAngle = valid.map(p => ({ ...p, __angle: angleFromStart(start, p) })).sort((a, b) => a.__angle - b.__angle);
+  const bases = [byAngle, [...byAngle].reverse()];
+  const candidates = [];
+  bases.forEach(base => {
+    for (let i = 0; i < base.length; i++) {
+      const route = rotateArrayFinal(base, i).map(({ __angle, ...p }) => p);
+      candidates.push(route);
+    }
+  });
+  return candidates;
+}
+
+function makeTwoSideLoopCandidatesFinal(start, points) {
+  const valid = points.filter(validCoord).map(p => ({ ...p }));
+  if (valid.length <= 2) return [valid];
+
+  const farthest = [...valid].sort((a, b) => haversine(start, b) - haversine(start, a))[0];
+  const centroid = {
+    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
+    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
+  };
+  const axisTargets = [farthest, centroid];
+  const candidates = [];
+
+  axisTargets.forEach(target => {
+    const refLat = start.lat;
+    const sxy = pointXYFinal(start, refLat);
+    const txy = pointXYFinal(target, refLat);
+    const vx = txy.x - sxy.x;
+    const vy = txy.y - sxy.y;
+    if (Math.hypot(vx, vy) === 0) return;
+
+    const left = [];
+    const right = [];
+    valid.forEach(p => {
+      const pxy = pointXYFinal(p, refLat);
+      const cross = vx * (pxy.y - sxy.y) - vy * (pxy.x - sxy.x);
+      const d = haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
+      const along = ((pxy.x - sxy.x) * vx + (pxy.y - sxy.y) * vy) / Math.hypot(vx, vy);
+      const item = { ...p, __d: d, __along: along, __angle: angleFromStart(start, p) };
+      (cross >= 0 ? left : right).push(item);
+    });
+
+    const sortOut = arr => [...arr].sort((a, b) => a.__along - b.__along || a.__d - b.__d);
+    const sortBack = arr => [...arr].sort((a, b) => b.__along - a.__along || b.__d - a.__d);
+    const clean = arr => arr.map(({ __d, __along, __angle, ...p }) => p);
+
+    [ [left, right], [right, left] ].forEach(([outSide, backSide]) => {
+      const outA = sortOut(outSide);
+      const backA = sortBack(backSide);
+      const c1 = clean([...outA, ...backA]);
+      const c2 = clean([...backA.reverse(), ...outA.reverse()]);
+      candidates.push(c1, c2);
+    });
+  });
+  return candidates;
+}
+
+function twoOptSafeFinal(start, order) {
+  // ปรับลดการตัดกันแบบเบา ๆ เท่านั้น ถ้าคะแนนรวมดีขึ้นจริง
+  if (!order || order.length < 5) return order;
+  let best = order.map(p => ({ ...p }));
+  let bestScore = normalCircularRouteScore(start, best);
+  let improved = true;
+  let guard = 0;
+  while (improved && guard < 50) {
+    improved = false;
+    guard++;
+    outer:
+    for (let i = 0; i < best.length - 1; i++) {
+      for (let k = i + 1; k < best.length; k++) {
+        const candidate = [...best.slice(0, i), ...best.slice(i, k + 1).reverse(), ...best.slice(k + 1)];
+        const score = normalCircularRouteScore(start, candidate);
+        if (score + 0.001 < bestScore) {
+          best = candidate;
+          bestScore = score;
+          improved = true;
+          break outer;
+        }
+      }
+    }
+  }
+  return best;
+}
+
+function orderNormalMarketRoute(start, points) {
+  const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
+  const noCoord = (points || []).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+
+  const candidates = [];
+  const add = (route) => {
+    if (!route || route.length !== valid.length) return;
+    candidates.push(route);
+    const pulled = pullPointsThatAreOnTheWay(start, route);
+    if (pulled && pulled.length === valid.length) candidates.push(pulled);
+    const opt = twoOptSafeFinal(start, route);
+    if (opt && opt.length === valid.length) candidates.push(opt);
+  };
+
+  makeStartSweepCandidatesFinal(start, valid).forEach(add);
+  makeCentroidCircularCandidates(start, valid).forEach(add);
+  makeTwoSideLoopCandidatesFinal(start, valid).forEach(add);
+  makeTwoSideLoopCandidates(start, valid).forEach(add);
+  add(circularSweepClosedOrder(start, valid));
+
+  const unique = uniqueRouteCandidatesFinal(candidates, valid.length);
+  const best = (unique.length ? unique : [valid])
+    .sort((a, b) => normalCircularRouteScore(start, a) - normalCircularRouteScore(start, b))[0] || valid;
+
+  return [...best, ...noCoord];
+}
+
+function applyNormalRouteFieldFeedback(start, order, sourcePoints) {
+  // ใช้อัลกอริทึมกลางชุดเดียวกับทุกสาย ไม่ใช้กติกาเฉพาะคันแล้ว
+  return orderNormalMarketRoute(start, sourcePoints || order || []);
+}
+
 document.getElementById("planForm").addEventListener("submit", saveForm);
 document.getElementById("searchBox").addEventListener("input", renderTable);
 document.getElementById("typeFilter").addEventListener("change", renderTable);
