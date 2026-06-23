@@ -1,7 +1,7 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
 // URL Apps Script ของคุณ
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxu0zeUAfHU1YBI0KJRTFC97xRTsPvXPx8cbw-8iXKqzHomAy0T48reAcQouaS0Ob1A/exec";
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxLDIGniwUc2lNzG0ten-T4f7UMJ_RyA9dMYg1rphu9ZuVWicfiFOPpfdO_HyRNCTJ5/exec";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
@@ -1793,52 +1793,11 @@ function findMasterForSavedVisit(row) {
 
 function visitDashboardGroup(row) {
   const master = findMasterForSavedVisit(row);
-  const status = master ? master.status : cleanText(cell(row, 13) || cell(row, 14) || cell(row, 2));
+  const status = master ? master.status : cleanText(cell(row, 14) || cell(row, 2));
   const group = statusGroup(status);
   if (group === "ลูกค้าซื้อขายประจำ") return "ลูกค้าปัจจุบัน";
   if (group === "ลูกค้าใหม่/Winback") return "ลูกค้าใหม่";
   return group;
-}
-
-function normalizeDashboardCustomerStatus(group) {
-  const g = cleanText(group);
-  const compact = g.replace(/\s+/g, "");
-  const low = compact.toLowerCase();
-  if (compact.includes("หายเกิน60") || low.includes("dormant>60") || low.includes("dormant60")) return "ลูกค้าหายเกิน60วัน";
-  if (compact.includes("เสี่ยงหาย") || low.includes("risky")) return "ลูกค้าเสี่ยงหาย";
-  if (compact.includes("ลูกค้าหาย") || low.includes("lost") || low.includes("dormant")) return "ลูกค้าหาย";
-  if (compact.includes("ปัจจุบัน") || compact.includes("ซื้อขายประจำ") || low === "active") return "ลูกค้าปัจจุบัน";
-  if (compact.includes("ลูกค้าใหม่") || compact.includes("มุ่งหวัง") || low.includes("winback") || low.includes("newcustomer")) return "ลูกค้าใหม่";
-  return g || "ไม่ระบุสถานะ";
-}
-
-function visitDashboardJobType(row) {
-  // ใช้คอลัมน์ C "ประเภทงาน" จากชีตเก็บข้อมูลเป็นหลัก
-  // รองรับชื่อเก่าที่เคยใช้ก่อนหน้า เพื่อไม่ให้ข้อมูลย้อนหลังหายจาก Dashboard
-  const raw = cleanText(cell(row, 2));
-  const text = raw.toLowerCase();
-
-  if (raw.includes("ลูกค้าใหม่") || raw.includes("มุ่งหวัง") || text.includes("new") || text.includes("winback")) {
-    return "ลูกค้าใหม่/มุ่งหวัง";
-  }
-  if (raw.includes("ปรับปรุงปั๊ม") || raw.includes("ปรับปรุงปั้ม") || raw.includes("ปรับปรุง")) {
-    return "ปรับปรุงปั๊ม";
-  }
-  if (raw.includes("ซ่อม")) {
-    return "ซ่อม";
-  }
-  if (raw.includes("ออกเยี่ยม") || raw.includes("เยี่ยม") || raw.includes("ติดตาม") || raw.includes("ออกตลาด") || raw.includes("พื้นที่ออกตลาด")) {
-    return "ออกเยี่ยมลูกค้า";
-  }
-  return raw || "ออกเยี่ยมลูกค้า";
-}
-
-function dashboardJobClass(jobType) {
-  if (jobType === "ออกเยี่ยมลูกค้า") return "job-visit";
-  if (jobType === "ลูกค้าใหม่/มุ่งหวัง") return "job-prospect";
-  if (jobType === "ปรับปรุงปั๊ม") return "job-pump";
-  if (jobType === "ซ่อม") return "job-repair";
-  return "p4";
 }
 
 function normalizeSavedVisitRow(row) {
@@ -1855,11 +1814,8 @@ function normalizeSavedVisitRow(row) {
     buName: branchNameFromBU(bu) || bu || "-",
     meter: cleanText(cell(row, 6) || master.meter),
     area: cleanText(cell(row, 7) || master.area),
-    // โครงสร้างชีตล่าสุดไม่มีวัตถุประสงค์: สถานะเข้าพบอยู่คอลัมน์ N index 13
-    // เผื่อข้อมูลเก่าที่เคยมีวัตถุประสงค์ สถานะอาจอยู่ index 14
-    visit_status: cleanText(cell(row, 13) || cell(row, 14) || "สำเร็จ"),
-    customer_group: visitDashboardGroup(row),
-    dashboard_job: visitDashboardJobType(row)
+    visit_status: cleanText(cell(row, 14) || "สำเร็จ"),
+    customer_group: visitDashboardGroup(row)
   };
 }
 
@@ -1885,24 +1841,18 @@ function renderVisitDashboard() {
   const total = rows.length;
   const success = rows.filter(isVisitSuccess).length;
   const pct = total ? Math.round((success / total) * 100) : 0;
-  const countJob = (name) => rows.filter(r => r.dashboard_job === name).length;
-  const countCustomerStatus = (name) => rows.filter(r => normalizeDashboardCustomerStatus(r.customer_group) === name).length;
+  const countGroup = (name) => rows.filter(r => r.customer_group === name).length;
 
   const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
   setText("dashTotal", total);
   setText("dashSuccess", `${pct}%`);
   setText("dashSuccessText", `${success}/${total} จุด`);
-  setText("dashVisit", countJob("ออกเยี่ยมลูกค้า"));
-  setText("dashProspect", countJob("ลูกค้าใหม่/มุ่งหวัง"));
-  setText("dashPumpJob", countJob("ปรับปรุงปั๊ม"));
-  setText("dashRepairJob", countJob("ซ่อม"));
-  setText("dashCustomerLost", countCustomerStatus("ลูกค้าหาย"));
-  setText("dashCustomerRisk", countCustomerStatus("ลูกค้าเสี่ยงหาย"));
-  setText("dashCustomerCurrent", countCustomerStatus("ลูกค้าปัจจุบัน"));
-  setText("dashCustomerNew", countCustomerStatus("ลูกค้าใหม่"));
-  setText("dashCustomerLost60", countCustomerStatus("ลูกค้าหายเกิน60วัน"));
+  setText("dashLost", countGroup("ลูกค้าหาย"));
+  setText("dashDormant", countGroup("ลูกค้าหายเกิน 60 วัน"));
+  setText("dashRisky", countGroup("ลูกค้าเสี่ยงหาย"));
+  setText("dashActive", countGroup("ลูกค้าปัจจุบัน"));
+  setText("dashNew", countGroup("ลูกค้าใหม่"));
   renderVisitDashboardCharts(rows, { total, success, pct, days });
-  renderVisitCustomerStatusDashboard(rows);
 
   const note = document.getElementById("dashboardListNote");
   if (note) note.textContent = `แสดง ${Math.min(rows.length, 50)} รายการล่าสุด จากทั้งหมด ${rows.length} จุด`;
@@ -1916,7 +1866,7 @@ function renderVisitDashboard() {
       <td>${i + 1}</td>
       <td>${escapeHtml(r.visitDateLabel)}</td>
       <td><strong>${escapeHtml(r.customer_name) || "-"}</strong><br><small>${escapeHtml(r.buName)} ${escapeHtml(r.meter) || ""}</small></td>
-      <td><span class="badge ${dashboardJobClass(r.dashboard_job)}">${escapeHtml(r.dashboard_job)}</span></td>
+      <td><span class="badge ${dashboardGroupClass(r.customer_group)}">${escapeHtml(r.customer_group)}</span></td>
       <td><span class="visit-status-pill ${isVisitSuccess(r) ? "ok" : "warn"}">${escapeHtml(r.visit_status) || "-"}</span></td>
     </tr>`).join("");
 }
@@ -1924,12 +1874,13 @@ function renderVisitDashboard() {
 function renderVisitDashboardCharts(rows, summary) {
   const total = summary.total || 0;
   const groupDefs = [
-    { key:"ออกเยี่ยมลูกค้า", label:"ออกเยี่ยมลูกค้า", color:"#2563eb" },
-    { key:"ลูกค้าใหม่/มุ่งหวัง", label:"ลูกค้าใหม่/มุ่งหวัง", color:"#16a34a" },
-    { key:"ปรับปรุงปั๊ม", label:"ปรับปรุงปั๊ม", color:"#f97316" },
-    { key:"ซ่อม", label:"ซ่อม", color:"#ef4444" }
+    { key:"ลูกค้าหาย", label:"ลูกค้าหาย", color:"#f97316" },
+    { key:"ลูกค้าหายเกิน 60 วัน", label:"หายเกิน 60 วัน", color:"#ef4444" },
+    { key:"ลูกค้าเสี่ยงหาย", label:"เสี่ยงหาย", color:"#f59e0b" },
+    { key:"ลูกค้าปัจจุบัน", label:"ลูกค้าปัจจุบัน", color:"#16a34a" },
+    { key:"ลูกค้าใหม่", label:"ลูกค้าใหม่", color:"#2563eb" }
   ];
-  const counts = groupDefs.map(g => ({ ...g, count: rows.filter(r => r.dashboard_job === g.key).length }));
+  const counts = groupDefs.map(g => ({ ...g, count: rows.filter(r => r.customer_group === g.key).length }));
 
   const donut = document.getElementById("dashDonut");
   const donutCenter = document.getElementById("dashDonutCenter");
@@ -1975,58 +1926,9 @@ function renderVisitDashboardCharts(rows, summary) {
   if (strip) strip.textContent = `แผนที่วางไว้ ${total} จุด • เข้าพบสำเร็จ ${summary.success || 0} จุด • อัตราสำเร็จ ${summary.pct || 0}% • เฉลี่ย ${(total / Math.max(1, summary.days || 1)).toFixed(1)} จุด/วัน`;
 }
 
-function renderVisitCustomerStatusDashboard(rows) {
-  const total = rows.length;
-  const customerDefs = [
-    { key:"ลูกค้าหาย", label:"ลูกค้าหาย", color:"#f97316" },
-    { key:"ลูกค้าเสี่ยงหาย", label:"ลูกค้าเสี่ยงหาย", color:"#ef4444" },
-    { key:"ลูกค้าปัจจุบัน", label:"ลูกค้าปัจจุบัน", color:"#16a34a" },
-    { key:"ลูกค้าใหม่", label:"ลูกค้าใหม่", color:"#2563eb" },
-    { key:"ลูกค้าหายเกิน60วัน", label:"ลูกค้าหายเกิน60วัน", color:"#a855f7" }
-  ];
-  const counts = customerDefs.map(g => ({
-    ...g,
-    count: rows.filter(r => normalizeDashboardCustomerStatus(r.customer_group) === g.key).length
-  }));
-
-  const donut = document.getElementById("dashCustomerDonut");
-  const donutCenter = document.getElementById("dashCustomerDonutCenter");
-  const legend = document.getElementById("dashCustomerLegend");
-  if (donut) {
-    if (!total) {
-      donut.style.background = "#e5e7eb";
-    } else {
-      let cursor = 0;
-      const parts = counts.filter(c => c.count > 0).map(c => {
-        const start = cursor;
-        const deg = (c.count / total) * 360;
-        cursor += deg;
-        return `${c.color} ${start}deg ${cursor}deg`;
-      });
-      donut.style.background = `conic-gradient(${parts.join(",") || "#e5e7eb 0deg 360deg"})`;
-    }
-  }
-  if (donutCenter) donutCenter.innerHTML = `${total}<br><small>จุด</small>`;
-  if (legend) {
-    legend.innerHTML = counts.map(c => {
-      const pct = total ? Math.round((c.count / total) * 100) : 0;
-      return `<div class="legend-row"><span class="legend-dot" style="background:${c.color}"></span><span>${escapeHtml(c.label)}</span><strong>${c.count} จุด (${pct}%)</strong></div>`;
-    }).join("");
-  }
-
-  const bars = document.getElementById("dashCustomerBars");
-  if (bars) {
-    const max = Math.max(1, ...counts.map(c => c.count));
-    bars.innerHTML = counts.map(c => {
-      const pct = Math.round((c.count / max) * 100);
-      return `<div class="bar-row"><div class="bar-label"><span>${escapeHtml(c.label)}</span><strong>${c.count} จุด</strong></div><div class="bar-track"><div class="bar-fill customer-bar" style="width:${pct}%; background:${c.color}"></div></div></div>`;
-    }).join("");
-  }
-}
-
 function dashboardGroupClass(group) {
   if (group === "ลูกค้าหาย") return "p2";
-  if (group === "ลูกค้าหายเกิน 60 วัน" || group === "ลูกค้าหายเกิน60วัน") return "p3";
+  if (group === "ลูกค้าหายเกิน 60 วัน") return "p3";
   if (group === "ลูกค้าเสี่ยงหาย") return "p3";
   if (group === "ลูกค้าปัจจุบัน") return "p4";
   if (group === "ลูกค้าใหม่") return "p4";
