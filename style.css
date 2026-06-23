@@ -192,3 +192,79 @@ tr:nth-child(even) td { background:#f9fafb; }
     width:100%;
   }
 }
+
+/* ===== Visit Dashboard replaces bottom blue table ===== */
+.visit-dashboard {
+  margin:0 18px 18px;
+  background:#fff;
+  border-radius:16px;
+  padding:18px;
+  box-shadow:0 4px 16px rgba(15,23,42,.08);
+}
+.dashboard-head {
+  display:flex;
+  justify-content:space-between;
+  gap:16px;
+  align-items:flex-start;
+  margin-bottom:14px;
+}
+.dashboard-head h2 { margin:0 0 6px; color:#0f172a; }
+.dashboard-head p { margin:0; color:#64748b; }
+.dashboard-controls {
+  display:grid;
+  grid-template-columns:180px 220px;
+  gap:10px;
+  min-width:420px;
+}
+.dashboard-grid {
+  display:grid;
+  grid-template-columns:repeat(7,minmax(0,1fr));
+  gap:10px;
+  margin:12px 0 14px;
+}
+.dashboard-card {
+  border:1px solid #dbe3ef;
+  border-radius:14px;
+  padding:14px;
+  background:#f8fafc;
+}
+.dashboard-card span { display:block; color:#64748b; font-size:13px; margin-bottom:6px; }
+.dashboard-card strong { display:block; font-size:26px; color:#0b3b70; line-height:1.1; }
+.dashboard-card small { color:#475569; font-weight:700; }
+.dashboard-card.total { border-left:5px solid #0b3b70; }
+.dashboard-card.success { border-left:5px solid #16a34a; }
+.dashboard-table-wrap {
+  max-height:420px;
+  overflow:auto;
+  border:1px solid #dbe3ef;
+  border-radius:12px;
+}
+.dashboard-table {
+  width:100%;
+  min-width:1100px;
+  border-collapse:collapse;
+  font-size:13px;
+}
+.dashboard-table th {
+  position:sticky;
+  top:0;
+  z-index:3;
+  background:#0b3b70;
+  color:#fff;
+}
+.dashboard-table th,
+.dashboard-table td {
+  padding:10px;
+  border-bottom:1px solid #e5e7eb;
+  text-align:left;
+  vertical-align:top;
+}
+@media (max-width:900px){
+  .visit-dashboard{margin:0 10px 12px; padding:12px; border-radius:12px;}
+  .dashboard-head{display:block;}
+  .dashboard-controls{grid-template-columns:1fr; min-width:0; margin-top:10px;}
+  .dashboard-grid{grid-template-columns:1fr 1fr;}
+  .dashboard-card strong{font-size:22px;}
+  .dashboard-table-wrap{max-height:360px;}
+  .dashboard-table{min-width:900px; font-size:12px;}
+}
