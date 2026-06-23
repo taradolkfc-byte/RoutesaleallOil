@@ -424,3 +424,43 @@ tr:nth-child(even) td { background:#f9fafb; }
   .dashboard-left-panel .dashboard-table-wrap{max-height:360px;}
   .dashboard-left-panel .dashboard-table{min-width:680px;}
 }
+
+/* ===== FINAL MOBILE RULE 20260623 =====
+   มือถือ: แสดงทุกส่วนตั้งแต่ด้านบนจนถึงฟอร์มบันทึกข้อมูล
+   ซ่อนเฉพาะ Dashboard การออกตลาดย้อนหลังที่อยู่ด้านล่างฟอร์มเท่านั้น
+   คอมพิวเตอร์: แสดง Dashboard ตามปกติ
+*/
+@media screen and (max-width: 900px) {
+  #visitDashboardSection,
+  .visit-dashboard {
+    display: none !important;
+    visibility: hidden !important;
+    height: 0 !important;
+    min-height: 0 !important;
+    max-height: 0 !important;
+    overflow: hidden !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    box-shadow: none !important;
+  }
+
+  .app-header,
+  .summary-grid,
+  .route-card,
+  #routeSummary,
+  #routeDetail,
+  #routeMap,
+  .form-card,
+  #planForm {
+    display: revert !important;
+  }
+
+  .summary-grid {
+    display: grid !important;
+  }
+
+  #planForm {
+    display: grid !important;
+  }
+}
