@@ -255,14 +255,95 @@ function getMarketStatusFilterValue() {
   return el ? cleanText(el.value).toLowerCase() : "";
 }
 function marketStatusFilterMatch(row, filterValue) {
+  // ใช้เฉพาะ Dropdown "เลือกสถานะ" สำหรับโหมดวันปกติ/ออกตลาดทั่วไป
+  // เขียนให้เทียบได้ทั้งค่าภาษาอังกฤษใน Sheet และกลุ่มภาษาไทยจาก statusGroup()
   if (!filterValue) return true;
   const s = cleanText(row && row.status).toLowerCase();
-  if (filterValue === "lost") return s.includes("lost") && !s.includes("dormant");
-  if (filterValue === "risky") return s.includes("risky");
-  if (filterValue === "active") return s.includes("active");
-  if (filterValue === "winback") return s.includes("winback") || s.includes("new");
-  if (filterValue === "dormant") return s.includes("dormant") || s.includes(">60") || s.includes("60");
+  const g = statusGroup(row && row.status);
+  if (filterValue === "lost") {
+    return g === "ลูกค้าหาย" || (s.includes("lost") && !s.includes("dormant") && !s.includes(">60"));
+  }
+  if (filterValue === "risky") {
+    return g === "ลูกค้าเสี่ยงหาย" || s.includes("risky");
+  }
+  if (filterValue === "active") {
+    return g === "ลูกค้าซื้อขายประจำ" || s === "active" || s.includes("active");
+  }
+  if (filterValue === "winback") {
+    return g === "ลูกค้าใหม่/Winback" || s.includes("winback") || s.includes("new");
+  }
+  if (filterValue === "dormant") {
+    return g === "ลูกค้าหายเกิน 60 วัน" || s.includes("dormant") || s.includes(">60") || s.includes("60");
+  }
   return true;
+}
+
+function hasMarketStatusFilterSelected() {
+  return !!getMarketStatusFilterValue();
+}
+
+function angleFromCenter(center, p) {
+  return Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng);
+}
+
+function statusLoopRoutePenalty(start, route) {
+  if (!route || route.length < 3) return 0;
+  let penalty = 0;
+  const ds = route.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const maxD = Math.max(...ds, 0);
+
+  // ลดเคสวิ่งออกไปไกลแล้ววกกลับมาใกล้ฐานกลางทาง จากนั้นออกไปไกลอีกครั้ง
+  for (let i = 1; i < ds.length - 1; i++) {
+    if (maxD > 0 && ds[i] < maxD * 0.42 && ds[i - 1] > ds[i] + 5 && ds[i + 1] > ds[i] + 5) {
+      penalty += 90;
+    }
+  }
+
+  // ลดการหักกลับรุนแรง
+  penalty += routeTurnPenalty(start, route) * 2.2;
+  return penalty;
+}
+
+function orderStatusFilterRoute(start, points) {
+  // ใช้เฉพาะเมื่อเลือก Dropdown "เลือกสถานะ"
+  // หลักคือเรียงแบบกวาดรอบกลุ่มลูกค้าเป็นวงกลม ไม่ใช้การหาจุดใกล้สุดที่มักทำให้วกกลับไปมา
+  const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
+  const noCoord = (points || []).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+
+  const center = {
+    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
+    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
+  };
+
+  const baseAsc = [...valid].sort((a, b) => angleFromCenter(center, a) - angleFromCenter(center, b));
+  const baseDesc = [...baseAsc].reverse();
+  const candidates = [];
+
+  [baseAsc, baseDesc].forEach(base => {
+    for (let i = 0; i < base.length; i++) {
+      const rotated = [...base.slice(i), ...base.slice(0, i)];
+      candidates.push(rotated);
+      candidates.push(pullPointsThatAreOnTheWay(start, rotated));
+    }
+  });
+
+  const seen = new Set();
+  const unique = candidates.filter(route => {
+    const key = uniqueRouteCandidateKey(route);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  const best = (unique.length ? unique : [baseAsc])
+    .sort((a, b) => {
+      const sa = routeDistanceFromStart(start, a) + statusLoopRoutePenalty(start, a);
+      const sb = routeDistanceFromStart(start, b) + statusLoopRoutePenalty(start, b);
+      return sa - sb;
+    })[0] || baseAsc;
+
+  return [...best, ...noCoord];
 }
 function getUrgencyScore(urgency, dateObj) {
   const u = cleanText(urgency);
@@ -1245,8 +1326,12 @@ function buildNormalPlanRows(marketRows, planDays) {
       const planDate = addDaysTH(today, dayIndex);
       const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
       const start = startForRoute(chunk);
-      const orderedBase = orderNormalMarketRoute(start, chunk);
-      const ordered = applyNormalRouteFieldFeedback(start, orderedBase, chunk);
+      const orderedBase = hasMarketStatusFilterSelected()
+        ? orderStatusFilterRoute(start, chunk)
+        : orderNormalMarketRoute(start, chunk);
+      const ordered = hasMarketStatusFilterSelected()
+        ? orderedBase
+        : applyNormalRouteFieldFeedback(start, orderedBase, chunk);
       ordered.forEach((row, idx) => output.push({
         ...row,
         plan_day: dayIndex + 1,
