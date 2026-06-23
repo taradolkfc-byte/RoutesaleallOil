@@ -71,6 +71,7 @@ let routeMap = null;
 let routeLayer = null;
 let visitedSet = { ids: new Set(), names: new Set() };
 let customerMasterRows = [];
+let savedVisitRowsRaw = [];
 
 function cleanText(v) { return String(v ?? "").trim(); }
 function norm(v) { return cleanText(v).toLowerCase().replace(/\s+/g, " "); }
@@ -1426,7 +1427,9 @@ function buildPlannedRows(pumpRows, repairRows, marketRows) {
 
 async function loadData() {
   const tbody = document.getElementById("resultBody");
-  tbody.innerHTML = `<tr><td colspan="18" class="loading">กำลังโหลดข้อมูล...</td></tr>`;
+  if (tbody) tbody.innerHTML = `<tr><td colspan="18" class="loading">กำลังโหลดข้อมูล...</td></tr>`;
+  const dashBody = document.getElementById("dashboardBody");
+  if (dashBody) dashBody.innerHTML = `<tr><td colspan="9" class="loading">กำลังโหลด Dashboard...</td></tr>`;
   try {
     document.getElementById("currentMonthLabel").textContent = thaiMonthYearLabel();
     const [pumpRowsRaw, repairRowsRaw, marketRowsRaw, salesRows, savedRows] = await Promise.all([
@@ -1436,6 +1439,7 @@ async function loadData() {
       fetchSheetByIndex(SHEET_NAMES.sales),
       fetchSheetByIndex(SHEET_NAMES.saved, true)
     ]);
+    savedVisitRowsRaw = savedRows || [];
     visitedSet = buildVisitedSet(savedRows);
 
     const pumpRows = normalizePump(pumpRowsRaw);
@@ -1451,7 +1455,8 @@ async function loadData() {
     routeCollapsedToSelected = false;
     renderTable();
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="18" class="loading">เกิดข้อผิดพลาด: ${escapeHtml(err.message)}</td></tr>`;
+    if (tbody) tbody.innerHTML = `<tr><td colspan="18" class="loading">เกิดข้อผิดพลาด: ${escapeHtml(err.message)}</td></tr>`;
+    if (dashBody) dashBody.innerHTML = `<tr><td colspan="9" class="loading">เกิดข้อผิดพลาด: ${escapeHtml(err.message)}</td></tr>`;
   }
 }
 function escapeHtml(str) {
@@ -1748,14 +1753,149 @@ async function renderMap(list) {
   L.polyline(latlngs, { weight: 5, dashArray: "8,8" }).addTo(routeLayer);
   if (metricsEl) metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • แสดงเส้นเชื่อมแบบประมาณการ กด Google Maps เพื่อดูเส้นทางจริงและเวลาที่ดีที่สุด`;
 }
-function renderTable() {
-  const search = cleanText(document.getElementById("searchBox").value).toLowerCase();
-  const type = cleanText(document.getElementById("typeFilter").value);
-  const status = cleanText(document.getElementById("statusFilter").value).toLowerCase();
-  const showAll = document.getElementById("showAllToggle").checked;
-  const tbody = document.getElementById("resultBody");
 
+function parseSavedVisitDate(row) {
+  const parseAny = (v) => {
+    const txt = cleanText(v);
+    const iso = txt.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (iso) return new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+    return parseDateTH(txt);
+  };
+  return parseAny(cell(row, 1)) || parseAny(cell(row, 0));
+}
+
+function savedVisitBU(row) {
+  const raw = cleanText(cell(row, 5));
+  const upper = raw.toUpperCase();
+  if (upper === "ST" || raw.includes("สามทอง")) return "ST";
+  if (upper === "KN" || raw.includes("เค.ซี.ปิโตรเลียม2006")) return "KN";
+  if (upper === "MUK" || upper === "KCG" || raw.includes("เค.ซี.จี")) return "MUK";
+  if (upper === "WNN" || raw.includes("กรีน")) return "WNN";
+  return inferBUFromAnyText(raw, cell(row, 3), cell(row, 4));
+}
+
+function findMasterForSavedVisit(row) {
+  const id = norm(cell(row, 3));
+  const name = norm(cell(row, 4));
+  if (id) {
+    const hit = customerMasterRows.find(c => norm(c.customer_id) === id);
+    if (hit) return hit;
+  }
+  if (name) {
+    const exact = customerMasterRows.find(c => norm(c.customer_name) === name);
+    if (exact) return exact;
+    const compact = compactCustomerName(cell(row, 4));
+    const compactHit = customerMasterRows.find(c => compactCustomerName(c.customer_name) === compact && compact.length >= 4);
+    if (compactHit) return compactHit;
+  }
+  return null;
+}
+
+function visitDashboardGroup(row) {
+  const master = findMasterForSavedVisit(row);
+  const status = master ? master.status : cleanText(cell(row, 14) || cell(row, 2));
+  const group = statusGroup(status);
+  if (group === "ลูกค้าซื้อขายประจำ") return "ลูกค้าปัจจุบัน";
+  if (group === "ลูกค้าใหม่/Winback") return "ลูกค้าใหม่";
+  return group;
+}
+
+function normalizeSavedVisitRow(row) {
+  const master = findMasterForSavedVisit(row) || {};
+  const visitDate = parseSavedVisitDate(row);
+  const bu = savedVisitBU(row) || master.bu || "";
+  return {
+    visitDate,
+    visitDateLabel: visitDate ? visitDate.toLocaleDateString("th-TH", { day:"numeric", month:"short", year:"2-digit" }) : "-",
+    jobType: cleanText(cell(row, 2)),
+    customer_id: cleanText(cell(row, 3) || master.customer_id),
+    customer_name: cleanText(cell(row, 4) || master.customer_name),
+    bu,
+    buName: branchNameFromBU(bu) || bu || "-",
+    meter: cleanText(cell(row, 6) || master.meter),
+    area: cleanText(cell(row, 7) || master.area),
+    visit_status: cleanText(cell(row, 14) || "สำเร็จ"),
+    customer_group: visitDashboardGroup(row)
+  };
+}
+
+function isVisitSuccess(v) {
+  return cleanText(v.visit_status) === "สำเร็จ";
+}
+
+function renderVisitDashboard() {
+  const body = document.getElementById("dashboardBody");
+  if (!body) return;
+  const days = Math.max(1, Number(document.getElementById("dashboardDays")?.value || 7));
+  const selectedBU = cleanText(document.getElementById("dashboardBU")?.value || "").toUpperCase();
+  const today = thaiNow();
+  const start = addDaysTH(today, -(days - 1));
+
+  let rows = (savedVisitRowsRaw || [])
+    .slice(1)
+    .map(normalizeSavedVisitRow)
+    .filter(r => r.visitDate && r.visitDate >= start && r.visitDate <= today)
+    .filter(r => !selectedBU || cleanText(r.bu).toUpperCase() === selectedBU)
+    .sort((a, b) => b.visitDate - a.visitDate || cleanText(a.bu).localeCompare(cleanText(b.bu), "th"));
+
+  const total = rows.length;
+  const success = rows.filter(isVisitSuccess).length;
+  const pct = total ? Math.round((success / total) * 100) : 0;
+  const countGroup = (name) => rows.filter(r => r.customer_group === name).length;
+
+  const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
+  setText("dashTotal", total);
+  setText("dashSuccess", `${pct}%`);
+  setText("dashSuccessText", `${success}/${total} จุด`);
+  setText("dashLost", countGroup("ลูกค้าหาย"));
+  setText("dashDormant", countGroup("ลูกค้าหายเกิน 60 วัน"));
+  setText("dashRisky", countGroup("ลูกค้าเสี่ยงหาย"));
+  setText("dashActive", countGroup("ลูกค้าปัจจุบัน"));
+  setText("dashNew", countGroup("ลูกค้าใหม่"));
+
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="9" class="loading">ยังไม่พบข้อมูลการออกตลาดในช่วง ${days} วันย้อนหลัง</td></tr>`;
+    return;
+  }
+  body.innerHTML = rows.map((r, i) => `
+    <tr>
+      <td>${i + 1}</td>
+      <td>${escapeHtml(r.visitDateLabel)}</td>
+      <td>${escapeHtml(r.buName)}</td>
+      <td>${escapeHtml(r.meter) || "-"}</td>
+      <td>${escapeHtml(r.customer_id) || "-"}</td>
+      <td>${escapeHtml(r.customer_name) || "-"}</td>
+      <td><span class="badge ${dashboardGroupClass(r.customer_group)}">${escapeHtml(r.customer_group)}</span></td>
+      <td>${escapeHtml(r.visit_status) || "-"}</td>
+      <td>${escapeHtml(r.area) || "-"}</td>
+    </tr>`).join("");
+}
+
+function dashboardGroupClass(group) {
+  if (group === "ลูกค้าหาย") return "p2";
+  if (group === "ลูกค้าหายเกิน 60 วัน") return "p3";
+  if (group === "ลูกค้าเสี่ยงหาย") return "p3";
+  if (group === "ลูกค้าปัจจุบัน") return "p4";
+  if (group === "ลูกค้าใหม่") return "p4";
+  return "p4";
+}
+
+function renderTable() {
+  const tbody = document.getElementById("resultBody");
   renderRouteSummary(plannedRows);
+  renderVisitDashboard();
+  if (!tbody) {
+    const rows = plannedRows || [];
+    document.getElementById("sumAll").textContent = rows.length;
+    document.getElementById("sumPump").textContent = rows.filter(r => r.type === "ปรับปรุงปั๊ม").length;
+    document.getElementById("sumRepair").textContent = rows.filter(r => r.type === "ซ่อม").length;
+    document.getElementById("sumMarket").textContent = rows.filter(r => r.type === "พื้นที่ออกตลาด").length;
+    return;
+  }
+  const search = cleanText(document.getElementById("searchBox")?.value || "").toLowerCase();
+  const type = cleanText(document.getElementById("typeFilter")?.value || "");
+  const status = cleanText(document.getElementById("statusFilter")?.value || "").toLowerCase();
+  const showAll = !!document.getElementById("showAllToggle")?.checked;
 
   const selectedBU = getSelectedStartBU();
   let rows = showAll ? rawRows : plannedRows;
@@ -2045,10 +2185,12 @@ async function checkInGps() {
 }
 
 document.getElementById("planForm").addEventListener("submit", saveForm);
-document.getElementById("searchBox").addEventListener("input", renderTable);
-document.getElementById("typeFilter").addEventListener("change", renderTable);
-document.getElementById("statusFilter").addEventListener("change", renderTable);
-document.getElementById("showAllToggle").addEventListener("change", renderTable);
+if (document.getElementById("searchBox")) document.getElementById("searchBox").addEventListener("input", renderTable);
+if (document.getElementById("typeFilter")) document.getElementById("typeFilter").addEventListener("change", renderTable);
+if (document.getElementById("statusFilter")) document.getElementById("statusFilter").addEventListener("change", renderTable);
+if (document.getElementById("showAllToggle")) document.getElementById("showAllToggle").addEventListener("change", renderTable);
+if (document.getElementById("dashboardDays")) document.getElementById("dashboardDays").addEventListener("change", renderVisitDashboard);
+if (document.getElementById("dashboardBU")) document.getElementById("dashboardBU").addEventListener("change", renderVisitDashboard);
 if (document.getElementById("startPointInput")) document.getElementById("startPointInput").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
 if (document.getElementById("planMode")) document.getElementById("planMode").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
 if (document.getElementById("planDays")) document.getElementById("planDays").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
