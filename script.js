@@ -1852,23 +1852,78 @@ function renderVisitDashboard() {
   setText("dashRisky", countGroup("ลูกค้าเสี่ยงหาย"));
   setText("dashActive", countGroup("ลูกค้าปัจจุบัน"));
   setText("dashNew", countGroup("ลูกค้าใหม่"));
+  renderVisitDashboardCharts(rows, { total, success, pct, days });
+
+  const note = document.getElementById("dashboardListNote");
+  if (note) note.textContent = `แสดง ${Math.min(rows.length, 50)} รายการล่าสุด จากทั้งหมด ${rows.length} จุด`;
 
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="9" class="loading">ยังไม่พบข้อมูลการออกตลาดในช่วง ${days} วันย้อนหลัง</td></tr>`;
+    body.innerHTML = `<tr><td colspan="5" class="loading">ยังไม่พบข้อมูลการออกตลาดในช่วง ${days} วันย้อนหลัง</td></tr>`;
     return;
   }
-  body.innerHTML = rows.map((r, i) => `
+  body.innerHTML = rows.slice(0, 50).map((r, i) => `
     <tr>
       <td>${i + 1}</td>
       <td>${escapeHtml(r.visitDateLabel)}</td>
-      <td>${escapeHtml(r.buName)}</td>
-      <td>${escapeHtml(r.meter) || "-"}</td>
-      <td>${escapeHtml(r.customer_id) || "-"}</td>
-      <td>${escapeHtml(r.customer_name) || "-"}</td>
+      <td><strong>${escapeHtml(r.customer_name) || "-"}</strong><br><small>${escapeHtml(r.buName)} ${escapeHtml(r.meter) || ""}</small></td>
       <td><span class="badge ${dashboardGroupClass(r.customer_group)}">${escapeHtml(r.customer_group)}</span></td>
-      <td>${escapeHtml(r.visit_status) || "-"}</td>
-      <td>${escapeHtml(r.area) || "-"}</td>
+      <td><span class="visit-status-pill ${isVisitSuccess(r) ? "ok" : "warn"}">${escapeHtml(r.visit_status) || "-"}</span></td>
     </tr>`).join("");
+}
+
+function renderVisitDashboardCharts(rows, summary) {
+  const total = summary.total || 0;
+  const groupDefs = [
+    { key:"ลูกค้าหาย", label:"ลูกค้าหาย", color:"#f97316" },
+    { key:"ลูกค้าหายเกิน 60 วัน", label:"หายเกิน 60 วัน", color:"#ef4444" },
+    { key:"ลูกค้าเสี่ยงหาย", label:"เสี่ยงหาย", color:"#f59e0b" },
+    { key:"ลูกค้าปัจจุบัน", label:"ลูกค้าปัจจุบัน", color:"#16a34a" },
+    { key:"ลูกค้าใหม่", label:"ลูกค้าใหม่", color:"#2563eb" }
+  ];
+  const counts = groupDefs.map(g => ({ ...g, count: rows.filter(r => r.customer_group === g.key).length }));
+
+  const donut = document.getElementById("dashDonut");
+  const donutCenter = document.getElementById("dashDonutCenter");
+  const legend = document.getElementById("dashLegend");
+  if (donut) {
+    if (!total) {
+      donut.style.background = "#e5e7eb";
+    } else {
+      let cursor = 0;
+      const parts = counts.filter(c => c.count > 0).map(c => {
+        const start = cursor;
+        const deg = (c.count / total) * 360;
+        cursor += deg;
+        return `${c.color} ${start}deg ${cursor}deg`;
+      });
+      donut.style.background = `conic-gradient(${parts.join(",") || "#e5e7eb 0deg 360deg"})`;
+    }
+  }
+  if (donutCenter) donutCenter.innerHTML = `${total}<br><small>จุด</small>`;
+  if (legend) {
+    legend.innerHTML = counts.map(c => {
+      const pct = total ? Math.round((c.count / total) * 100) : 0;
+      return `<div class="legend-row"><span class="legend-dot" style="background:${c.color}"></span><span>${escapeHtml(c.label)}</span><strong>${c.count} จุด (${pct}%)</strong></div>`;
+    }).join("");
+  }
+
+  const statusBars = document.getElementById("dashStatusBars");
+  if (statusBars) {
+    const statusMap = new Map();
+    rows.forEach(r => {
+      const st = cleanText(r.visit_status || "ไม่ระบุ") || "ไม่ระบุ";
+      statusMap.set(st, (statusMap.get(st) || 0) + 1);
+    });
+    const statusRows = Array.from(statusMap.entries()).sort((a,b)=>b[1]-a[1]);
+    const max = Math.max(1, ...statusRows.map(x => x[1]));
+    statusBars.innerHTML = (statusRows.length ? statusRows : [["ไม่มีข้อมูล",0]]).map(([label, count]) => {
+      const pct = Math.round((count / max) * 100);
+      return `<div class="bar-row"><div class="bar-label"><span>${escapeHtml(label)}</span><strong>${count} จุด</strong></div><div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div></div>`;
+    }).join("");
+  }
+
+  const strip = document.getElementById("dashboardSummaryStrip");
+  if (strip) strip.textContent = `แผนที่วางไว้ ${total} จุด • เข้าพบสำเร็จ ${summary.success || 0} จุด • อัตราสำเร็จ ${summary.pct || 0}% • เฉลี่ย ${(total / Math.max(1, summary.days || 1)).toFixed(1)} จุด/วัน`;
 }
 
 function dashboardGroupClass(group) {
