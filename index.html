@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ระบบวางแผนออกตลาด KCE</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="style.css?v=20260620-repair-all-01" />
+  <link rel="stylesheet" href="style.css?v=20260623-dashboard-01" />
 </head>
 <body>
   <header class="app-header">
@@ -132,40 +132,64 @@
     <p id="saveStatus" class="save-status"></p>
   </section>
 
-  <section class="toolbar">
-    <input id="searchBox" placeholder="ค้นหา: ชื่อลูกค้า / รหัส / สายมิเตอร์ / พื้นที่" />
-    <select id="typeFilter">
-      <option value="">ทุกประเภท</option>
-      <option value="ปรับปรุงปั๊ม">ปรับปรุงปั๊ม</option>
-      <option value="ซ่อม">ซ่อม</option>
-      <option value="พื้นที่ออกตลาด">พื้นที่ออกตลาด</option>
-    </select>
-    <select id="statusFilter">
-      <option value="">ทุกสถานะ</option>
-      <option value="ยังไม่เริ่ม">ยังไม่เริ่ม</option>
-      <option value="ยังไม่เข้าซ่อม">ยังไม่เข้าซ่อม</option>
-      <option value="risky">risky</option>
-      <option value="dormant">dormant</option>
-      <option value="winback">winback/new</option>
-      <option value="lost">lost</option>
-      <option value="active">active</option>
-    </select>
+  <section class="visit-dashboard" id="visitDashboardSection">
+    <div class="dashboard-head">
+      <div>
+        <h2>Dashboard การออกตลาดย้อนหลัง</h2>
+        <p>สรุปข้อมูลจากชีต “เก็บข้อมูล” ตามช่วงวันที่และ BU/สังกัดที่เลือก</p>
+      </div>
+      <div class="dashboard-controls">
+        <label>ดูย้อนหลัง
+          <select id="dashboardDays">
+            <option value="1">1 วันย้อนหลัง</option>
+            <option value="7" selected>7 วันย้อนหลัง</option>
+            <option value="15">15 วันย้อนหลัง</option>
+            <option value="30">30 วันย้อนหลัง</option>
+          </select>
+        </label>
+        <label>BU / สังกัด
+          <select id="dashboardBU">
+            <option value="">ทุก BU</option>
+            <option value="ST">สามทองบริการ</option>
+            <option value="KN">เค.ซี.ปิโตรเลียม2006</option>
+            <option value="MUK">เค.ซี.จี.ปิโตรเลียม</option>
+            <option value="WNN">เค.ซี. กรีน เอ็นเนอร์จี</option>
+          </select>
+        </label>
+      </div>
+    </div>
+
+    <div class="dashboard-grid">
+      <div class="dashboard-card total"><span>ไปทั้งหมด</span><strong id="dashTotal">0</strong><small>จุด</small></div>
+      <div class="dashboard-card success"><span>เข้าพบสำเร็จ</span><strong id="dashSuccess">0%</strong><small id="dashSuccessText">0/0 จุด</small></div>
+      <div class="dashboard-card"><span>ลูกค้าหาย</span><strong id="dashLost">0</strong><small>จุด</small></div>
+      <div class="dashboard-card"><span>ลูกค้าหายเกิน 60 วัน</span><strong id="dashDormant">0</strong><small>จุด</small></div>
+      <div class="dashboard-card"><span>ลูกค้าเสี่ยงหาย</span><strong id="dashRisky">0</strong><small>จุด</small></div>
+      <div class="dashboard-card"><span>ลูกค้าปัจจุบัน</span><strong id="dashActive">0</strong><small>จุด</small></div>
+      <div class="dashboard-card"><span>ลูกค้าใหม่</span><strong id="dashNew">0</strong><small>จุด</small></div>
+    </div>
+
+    <div class="dashboard-table-wrap">
+      <table class="dashboard-table">
+        <thead>
+          <tr>
+            <th>ลำดับ</th>
+            <th>วันที่ออกตลาด</th>
+            <th>BU</th>
+            <th>สายมิเตอร์</th>
+            <th>รหัสลูกค้า</th>
+            <th>ชื่อลูกค้า/ชื่อปั๊ม</th>
+            <th>กลุ่มลูกค้า</th>
+            <th>สถานะเข้าพบ</th>
+            <th>พื้นที่</th>
+          </tr>
+        </thead>
+        <tbody id="dashboardBody"><tr><td colspan="9" class="loading">กำลังโหลด Dashboard...</td></tr></tbody>
+      </table>
+    </div>
   </section>
 
-  <main class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>ลำดับ</th><th>ลำดับวิ่ง</th><th>จุดเริ่มต้น</th><th>ความสำคัญ</th><th>ประเภท</th><th>วันนัดหมาย</th>
-          <th>รหัสลูกค้า</th><th>ชื่อลูกค้า/ชื่อปั๊ม</th><th>สถานะ</th><th>BU</th><th>สายมิเตอร์</th><th>พื้นที่</th>
-          <th>งาน/วัตถุประสงค์</th><th>ผู้ประสานงาน</th><th>เบอร์โทร</th><th>ยอดขายลิตร</th><th>ละ</th><th>ลอง</th>
-        </tr>
-      </thead>
-      <tbody id="resultBody"><tr><td colspan="18" class="loading">กำลังโหลดข้อมูล...</td></tr></tbody>
-    </table>
-  </main>
-
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="script.js?v=20260620-repair-all-01"></script>
+  <script src="script.js?v=20260623-dashboard-01"></script>
 </body>
 </html>
