@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ระบบวางแผนออกตลาด KCE</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="style.css?v=20260620-repair-all-01" />
+  <link rel="stylesheet" href="style.css?v=20260622-normal-loop-01" />
 </head>
 <body>
   <header class="app-header">
@@ -44,16 +44,6 @@
               <option value="pump">ตามแผนปรับปรุงปั๊ม</option>
               <option value="normal">วันปกติ / ออกตลาดทั่วไป</option>
               <option value="repair">ตารางซ่อม</option>
-            </select>
-          </label>
-          <label>เลือกสถานะ
-            <select id="marketStatusFilter">
-              <option value="">อัตโนมัติ</option>
-              <option value="lost">ลูกค้าหาย</option>
-              <option value="risky">ลูกค้าเสี่ยงหาย</option>
-              <option value="active">ลูกค้าปัจจุบัน</option>
-              <option value="winback">ลูกค้าใหม่</option>
-              <option value="dormant">ลูกค้าหายเกิน60วัน</option>
             </select>
           </label>
           <label>วางแผนล่วงหน้า
@@ -113,7 +103,15 @@
         </datalist>
       </label>
       <label>พื้นที่<input name="area" placeholder="ต./อ./จ." /></label>
-      <label>วัตถุประสงค์<input name="purpose" placeholder="รายละเอียดงาน" /></label>
+      <label>วัตถุประสงค์
+        <select name="purpose">
+          <option value="">เลือกวัตถุประสงค์</option>
+          <option value="ปิดการขาย">ปิดการขาย</option>
+          <option value="แก้ไข/เปลี่ยนอุปกรณ์">แก้ไข/เปลี่ยนอุปกรณ์</option>
+          <option value="เยี่ยมลูกค้า">เยี่ยมลูกค้า</option>
+          <option value="ปรับปรุงปั๊ม">ปรับปรุงปั๊ม</option>
+        </select>
+      </label>
       <label>ผู้ประสานงาน<input name="coordinator" placeholder="ชื่อผู้ประสานงาน" /></label>
       <label>เบอร์โทร<input name="phone" placeholder="เบอร์โทร" /></label>
       <label>ละติจูด<input name="lat" placeholder="ละ" /></label>
@@ -167,6 +165,6 @@
   </main>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="script.js?v=20260620-repair-all-01"></script>
+  <script src="script.js?v=20260623-status-filter-01"></script>
 </body>
 </html>
