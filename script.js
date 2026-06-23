@@ -1,7 +1,7 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
 // URL Apps Script ของคุณ
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxLDIGniwUc2lNzG0ten-T4f7UMJ_RyA9dMYg1rphu9ZuVWicfiFOPpfdO_HyRNCTJ5/exec";
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbz_jybKjIdUFAt44LtRnea7IIQ8RbzATZTQgRqIRdFot6TbuxKcOVbqm3qjrsO4Fcxg/exec";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
@@ -240,6 +240,24 @@ function statusGroup(status) {
   if (s.includes("winback") || s.includes("new")) return "ลูกค้าใหม่/Winback";
   return "อื่นๆ";
 }
+function getMarketStatusFilter() {
+  const el = document.getElementById("marketStatusFilter");
+  return cleanText(el ? el.value : "");
+}
+
+function isMarketStatusMatch(row) {
+  const filter = getMarketStatusFilter();
+  if (!filter) return true;
+  const s = cleanText(row && row.status).toLowerCase();
+  const g = statusGroup(row && row.status);
+  if (filter === "lost") return g === "ลูกค้าหาย" || (s.includes("lost") && !s.includes("risky") && !s.includes("dormant"));
+  if (filter === "risky") return g === "ลูกค้าเสี่ยงหาย" || s.includes("risky");
+  if (filter === "active") return g === "ลูกค้าซื้อขายประจำ" || s.includes("active");
+  if (filter === "new") return g === "ลูกค้าใหม่/Winback" || s.includes("winback") || s.includes("new");
+  if (filter === "dormant") return g === "ลูกค้าหายเกิน 60 วัน" || s.includes("dormant");
+  return true;
+}
+
 function marketScore(status) {
   const g = statusGroup(status);
   if (g === "ลูกค้าหาย") return 1;
@@ -790,37 +808,10 @@ function orderCircularRoute(start, points) {
   best = pullPointsThatAreOnTheWay(start, best);
   return [...best, ...noCoord];
 }
-
-
-function rowUniqueKey(row) {
-  return `${norm(row.customer_id)}|${norm(row.customer_name)}|${cleanText(row.lat)}|${cleanText(row.lng)}|${cleanText(row.type)}`;
-}
-
-function isPumpRow(row) {
-  return cleanText(row && row.type) === "ปรับปรุงปั๊ม";
-}
-
-function removeSameStop(rows, target) {
-  const key = rowUniqueKey(target);
-  return rows.filter(r => rowUniqueKey(r) !== key);
-}
-
-function orderPumpFirstRoute(start, pumpRow, otherRows) {
-  // เงื่อนไขสำหรับ “ตามแผนปรับปรุงปั๊ม”:
-  // จุดที่ 1 ต้องเป็นจุดปรับปรุงปั๊มเสมอ แล้วค่อยจัดจุดออกตลาดที่เหลือแบบวงกลม
-  if (!pumpRow) return orderCircularRoute(start, otherRows || []);
-
-  const pivot = validCoord(pumpRow)
-    ? { lat: toNumber(pumpRow.lat), lng: toNumber(pumpRow.lng) }
-    : start;
-
-  const rest = removeSameStop(otherRows || [], pumpRow);
-  const orderedRest = orderCircularRoute(pivot, rest);
-  return [pumpRow, ...orderedRest];
-}
 function takeByStatusForMeter(marketRows, pump) {
   const selectedBU = getSelectedStartBU();
   const sameMeter = marketRows
+    .filter(isMarketStatusMatch)
     .filter(m => m.meterKey === pump.meterKey)
     .filter(m => !selectedBU || cleanText(m.bu).toUpperCase() === selectedBU.toUpperCase())
     /* แสดงจุดที่เช็คอินสำเร็จไว้ในแผน เพื่อให้ขึ้นเครื่องหมายถูก */
@@ -848,7 +839,7 @@ function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
     const routeId = `${pump.bu || "BU-?"} สาย ${pump.meterKey} วันที่ ${routeDate}`;
     const routePoints = [pump, ...relatedMarkets];
     const start = startForRoute(routePoints);
-    const ordered = orderPumpFirstRoute(start, pump, relatedMarkets);
+    const ordered = orderCircularRoute(start, routePoints);
     ordered.forEach((row, idx) => output.push({
       ...row,
       plan_day: 1,
@@ -867,343 +858,11 @@ function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
   return [...output, ...repairs];
 }
 
-
-function stopNoValue(row, fallbackIndex = 0) {
-  const raw = cleanText(row && row.stop_no);
-  const m = raw.match(/^(\d+)/);
-  return m ? Number(m[1]) : fallbackIndex + 1;
-}
-
-function sortRowsByPlannedStopNo(list) {
-  return [...list].sort((a, b) => stopNoValue(a) - stopNoValue(b));
-}
-
-function routeTurnPenalty(start, order) {
-  // ลงโทษการหักมุม/วกกลับแบบรุนแรง เพื่อให้เส้นทางเป็นวงไหลไปทางเดียวมากขึ้น
-  const pts = [{ lat: start.lat, lng: start.lng }, ...order.map(p => ({ lat: toNumber(p.lat), lng: toNumber(p.lng) })), { lat: start.lat, lng: start.lng }];
-  let penalty = 0;
-  for (let i = 1; i < pts.length - 1; i++) {
-    const a = pts[i - 1], b = pts[i], c = pts[i + 1];
-    const v1 = { x: b.lng - a.lng, y: b.lat - a.lat };
-    const v2 = { x: c.lng - b.lng, y: c.lat - b.lat };
-    const l1 = Math.hypot(v1.x, v1.y);
-    const l2 = Math.hypot(v2.x, v2.y);
-    if (!l1 || !l2) continue;
-    const cos = Math.max(-1, Math.min(1, (v1.x * v2.x + v1.y * v2.y) / (l1 * l2)));
-    // cos ต่ำมาก = วกกลับ/หักกลับ เพิ่ม penalty
-    if (cos < -0.35) penalty += (Math.abs(cos) * 18);
-  }
-  return penalty;
-}
-
-function angleFromStart(start, p) {
-  return Math.atan2(toNumber(p.lat) - Number(start.lat), toNumber(p.lng) - Number(start.lng));
-}
-
-function angularDiff(a, b) {
-  let d = Math.abs(a - b);
-  while (d > Math.PI) d = Math.abs(d - Math.PI * 2);
-  return d;
-}
-
-function normalMarketRouteScore(start, order) {
-  if (!order.length) return 0;
-  const baseDistance = routeDistanceFromStart(start, order);
-  const turnPenalty = routeTurnPenalty(start, order) * 1.6;
-
-  // ลงโทษการวิ่งย้อนกลับเข้าหาฐานเร็วเกินไปในช่วงกลางทาง
-  // เพื่อให้เส้นทางเป็น “ออกไปก่อน แล้วค่อยวนกลับ” มากกว่า 1→2→วกกลับ→ออกไปใหม่
-  const ds = order.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
-  const maxD = Math.max(...ds, 0);
-  let earlyReturnPenalty = 0;
-  for (let i = 1; i < ds.length - 2; i++) {
-    if (ds[i] < maxD * 0.55 && ds[i + 1] > ds[i] + 8) earlyReturnPenalty += 35;
-  }
-
-  // ลงโทษการกระโดดข้ามโซนมุม แล้วค่อยย้อนกลับมาเก็บมุมเดิม
-  const angles = order.map(p => angleFromStart(start, p));
-  let angleZigzagPenalty = 0;
-  for (let i = 1; i < angles.length - 1; i++) {
-    const d1 = angles[i] - angles[i - 1];
-    const d2 = angles[i + 1] - angles[i];
-    if (d1 * d2 < 0 && Math.abs(d1) > 0.25 && Math.abs(d2) > 0.25) angleZigzagPenalty += 25;
-  }
-
-  return baseDistance + turnPenalty + earlyReturnPenalty + angleZigzagPenalty;
-}
-
-function chooseFirstTwoForNormalRoute(start, valid) {
-  // โหมดวันปกติ: อนุญาตให้เริ่มจากจุดใกล้ทางออก 1-2 จุดก่อน
-  // จากนั้นค่อยวนออกโซนนอก เพื่อลดการ “วิ่งฟรี” กลับมาเก็บจุดใกล้ฐานในภายหลัง
-  const sortedByStart = [...valid].sort((a, b) =>
-    haversine(start, { lat: toNumber(a.lat), lng: toNumber(a.lng) }) -
-    haversine(start, { lat: toNumber(b.lat), lng: toNumber(b.lng) })
-  );
-  const first = sortedByStart[0];
-  if (!first || valid.length === 1) return { fixed: first ? [first] : [], remaining: first ? removeSameStop(valid, first) : valid };
-
-  const firstD = haversine(start, { lat: toNumber(first.lat), lng: toNumber(first.lng) });
-  const firstAngle = angleFromStart(start, first);
-  const candidates = removeSameStop(valid, first)
-    .map(p => {
-      const dStart = haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
-      const dFirst = haversine(first, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
-      const a = angleFromStart(start, p);
-      // เลือกจุดที่ต่อเนื่องจากจุดแรก ไม่ใช่ย้อนกลับเข้าฐาน และไม่กระโดดข้ามคนละโซนมากเกินไป
-      const score = dFirst + angularDiff(a, firstAngle) * 18 + Math.max(0, firstD - dStart) * 3;
-      return { p, score, dStart };
-    })
-    .sort((a, b) => a.score - b.score);
-
-  const second = candidates[0] && candidates[0].p;
-  return second
-    ? { fixed: [first, second], remaining: removeSameStop(removeSameStop(valid, first), second) }
-    : { fixed: [first], remaining: removeSameStop(valid, first) };
-}
-
-function makeNormalSweepCandidates(start, fixed, remaining) {
-  if (!remaining.length) return [fixed];
-  const candidates = [];
-  const anchor = fixed.length ? fixed[fixed.length - 1] : start;
-  const anchorAngle = angleFromStart(start, anchor);
-
-  const byAngleAsc = [...remaining].sort((a, b) => angleFromStart(start, a) - angleFromStart(start, b));
-  const byAngleDesc = [...byAngleAsc].reverse();
-  const bases = [byAngleAsc, byAngleDesc];
-
-  bases.forEach(base => {
-    // หมุนลำดับให้จุดแรกของกลุ่มที่เหลือ อยู่ใกล้มุมของจุดก่อนหน้า
-    for (let i = 0; i < base.length; i++) {
-      const rotated = [...base.slice(i), ...base.slice(0, i)];
-      const firstAngle = angleFromStart(start, rotated[0]);
-      const connectPenalty = angularDiff(anchorAngle, firstAngle);
-      if (connectPenalty <= Math.PI * 0.85) {
-        candidates.push([...fixed, ...rotated]);
-        candidates.push(pullPointsThatAreOnTheWay(start, [...fixed, ...rotated]));
-      }
-    }
-    candidates.push([...fixed, ...base]);
-    candidates.push(pullPointsThatAreOnTheWay(start, [...fixed, ...base]));
-  });
-
-  // candidate แบบ “ออกโซนไกลก่อนแล้ววนกลับ” แต่ยังล็อก fixed 1-2 จุดแรกไว้
-  const maxD = Math.max(...remaining.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) })), 0);
-  const farFirst = [...remaining].sort((a, b) => {
-    const da = haversine(start, { lat: toNumber(a.lat), lng: toNumber(a.lng) });
-    const db = haversine(start, { lat: toNumber(b.lat), lng: toNumber(b.lng) });
-    return db - da;
-  });
-  if (maxD > 0) candidates.push([...fixed, ...pullPointsThatAreOnTheWay(start, farFirst)]);
-
-  return candidates;
-}
-
-function orderNormalMarketRoute(start, points) {
-  // โหมดวันปกติ/ออกตลาดทั่วไป:
-  // 1) เก็บจุดออกจากฐานที่ต่อเนื่อง 1-2 จุดแรกได้
-  // 2) หลังจากนั้นเรียงแบบกวาดเป็นวงตามมุมจากจุดเริ่ม ไม่กระโดดกลับไปมา
-  // 3) เลือก candidate ที่ระยะรวม + การวกกลับต่ำที่สุด
-  const valid = points.filter(validCoord).map(p => ({ ...p }));
-  const noCoord = points.filter(p => !validCoord(p));
-  if (valid.length <= 2) return [...valid, ...noCoord];
-
-  const { fixed, remaining } = chooseFirstTwoForNormalRoute(start, valid);
-  const candidates = makeNormalSweepCandidates(start, fixed, remaining);
-
-  // สำหรับกรณีที่จุดแรกที่ใกล้ฐานทำให้ภาพรวมแย่ ให้ลองไม่ล็อก fixed ด้วย แต่ให้ penalty นิดหน่อย
-  candidates.push(...makeNormalSweepCandidates(start, [], valid));
-
-  const unique = [];
-  const seen = new Set();
-  candidates.forEach(c => {
-    const key = c.map(x => `${norm(x.customer_id)}:${norm(x.customer_name)}:${cleanText(x.lat)}:${cleanText(x.lng)}`).join('|');
-    if (!seen.has(key)) { seen.add(key); unique.push(c); }
-  });
-
-  let best = unique.sort((a, b) => normalMarketRouteScore(start, a) - normalMarketRouteScore(start, b))[0] || valid;
-
-  // ถ้าจุดแรก/สองที่ระบบเลือกไว้ไม่ได้ทำให้ระยะพัง ให้คงไว้ตามที่ผู้ใช้ต้องการในเคส ST สาย 57
-  if (fixed.length >= 2) {
-    const bestWithFixed = unique
-      .filter(c => rowUniqueKey(c[0]) === rowUniqueKey(fixed[0]) && rowUniqueKey(c[1]) === rowUniqueKey(fixed[1]))
-      .sort((a, b) => normalMarketRouteScore(start, a) - normalMarketRouteScore(start, b))[0];
-    if (bestWithFixed && normalMarketRouteScore(start, bestWithFixed) <= normalMarketRouteScore(start, best) * 1.12) {
-      best = bestWithFixed;
-    }
-  }
-
-  best = pullPointsThatAreOnTheWay(start, best);
-  return [...best, ...noCoord];
-}
-
-
-function isNormalST55Route(points) {
-  const valid = (points || []).filter(Boolean);
-  if (!valid.length) return false;
-  return valid.some(p => cleanText(p.bu).toUpperCase() === "ST") &&
-         valid.some(p => normalizeMeter(p.meter || p.meterKey) === "55");
-}
-
-
-function isNormalST57Route(points) {
-  const valid = (points || []).filter(Boolean);
-  if (!valid.length) return false;
-  return valid.some(p => cleanText(p.bu).toUpperCase() === "ST") &&
-         valid.some(p => normalizeMeter(p.meter || p.meterKey) === "57");
-}
-
-function reorderByIndexPattern(order, pattern) {
-  if (!order || order.length < pattern.length) return order;
-  const out = [];
-  const used = new Set();
-  pattern.forEach(idx => {
-    if (idx >= 0 && idx < order.length && !used.has(idx)) {
-      out.push(order[idx]);
-      used.add(idx);
-    }
-  });
-  order.forEach((p, idx) => {
-    if (!used.has(idx)) out.push(p);
-  });
-  return out;
-}
-
-
-function routeMeterKeyFromPoints(points) {
-  const found = (points || []).find(p => normalizeMeter(p.meter || p.meterKey));
-  return found ? normalizeMeter(found.meter || found.meterKey) : "";
-}
-
-function isTargetNormalLoopMeter(points) {
-  // แก้เฉพาะสายที่แจ้งว่ายังควรปรับปรุงในโหมดวันปกติ/ออกตลาดทั่วไป
-  return ["61", "72", "65", "71", "67"].includes(routeMeterKeyFromPoints(points));
-}
-
-function uniqueRouteCandidateKey(route) {
-  return (route || []).map(x => `${norm(x.customer_id)}:${norm(x.customer_name)}:${cleanText(x.lat)}:${cleanText(x.lng)}`).join("|");
-}
-
-function loopBacktrackPenalty(start, route) {
-  if (!route || route.length < 4) return 0;
-
-  const pts = route.map(p => ({ lat: toNumber(p.lat), lng: toNumber(p.lng) }));
-  const ds = pts.map(p => haversine(start, p));
-  const maxD = Math.max(...ds, 0);
-  let penalty = 0;
-
-  // ลงโทษรูปแบบที่ออกจากฐานแล้ววกกลับเข้าใกล้ฐานกลางทาง แล้วค่อยออกไปไกลอีกครั้ง
-  for (let i = 1; i < ds.length - 2; i++) {
-    const returnedNearBase = ds[i] < maxD * 0.52;
-    const goFarAgain = ds[i + 1] > ds[i] + Math.max(6, maxD * 0.18);
-    if (returnedNearBase && goFarAgain) penalty += 90;
-  }
-
-  // ลงโทษการเปลี่ยนทิศซ้าย-ขวาสลับแรง ๆ หลายครั้ง เพราะมักเกิดจากการเก็บจุดย้อนหลัง
-  const angles = pts.map(p => angleFromStart(start, p));
-  for (let i = 1; i < angles.length - 1; i++) {
-    const d1 = angles[i] - angles[i - 1];
-    const d2 = angles[i + 1] - angles[i];
-    if (d1 * d2 < 0 && Math.abs(d1) > 0.35 && Math.abs(d2) > 0.35) penalty += 45;
-  }
-
-  // ถ้าจุดแรกใกล้ฐานมากเกินไปในสายที่ควรวิ่งเป็นวง ให้ปรับคะแนนแย่ลง
-  // เพื่อให้ระบบกล้าออกไปหัววงก่อน แล้วค่อยวนกลับมาจุดใกล้ฐานช่วงท้าย
-  if (maxD > 0 && ds[0] < maxD * 0.40 && route.length >= 7) penalty += 70;
-
-  return penalty;
-}
-
-function scoreTargetLoopRoute(start, route) {
-  return routeDistanceFromStart(start, route) + (routeTurnPenalty(start, route) * 1.8) + loopBacktrackPenalty(start, route);
-}
-
-function rotateRoute(route, index) {
-  return [...route.slice(index), ...route.slice(0, index)];
-}
-
-function buildTargetLoopCandidates(start, order) {
-  const valid = (order || []).filter(validCoord).map(p => ({ ...p }));
-  const candidates = [];
-  const add = (route) => {
-    if (!route || route.length !== valid.length) return;
-    candidates.push(route);
-    candidates.push(pullPointsThatAreOnTheWay(start, route));
-  };
-
-  add(valid);
-  add([...valid].reverse());
-
-  // ใช้ลำดับกวาดมุมรอบกลุ่มลูกค้า เพื่อทำให้เป็นวง ไม่เป็นเส้นตรงไป-กลับ
-  const sweep = circularSweepClosedOrder(start, valid);
-  add(sweep);
-  add([...sweep].reverse());
-
-  // หมุนวงทุกตำแหน่ง เพื่อหาหัววงที่เหมาะที่สุด ไม่บังคับว่าจุดใกล้ฐานต้องเป็นจุดแรก
-  [valid, [...valid].reverse(), sweep, [...sweep].reverse()].forEach(base => {
-    for (let i = 0; i < base.length; i++) add(rotateRoute(base, i));
-  });
-
-  // candidate แบบเรียงตามระยะไกลออกไปก่อน แล้ววนกลับฐาน
-  const farFirst = [...valid].sort((a, b) =>
-    haversine(start, { lat: toNumber(b.lat), lng: toNumber(b.lng) }) -
-    haversine(start, { lat: toNumber(a.lat), lng: toNumber(a.lng) })
-  );
-  add(farFirst);
-  add([...farFirst].reverse());
-
-  // ตัด candidate ซ้ำ
-  const seen = new Set();
-  return candidates.filter(route => {
-    const key = uniqueRouteCandidateKey(route);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function improveTargetNormalLoopRoute(start, order, sourcePoints) {
-  // ใช้เฉพาะสาย 61,72,65,71,67 ตามที่ระบุ
-  // ไม่แตะ ST55/ST57 ที่เป็นตัวอย่างดี และไม่แตะโหมดปรับปรุงปั๊ม/ตารางซ่อม
-  if (!isTargetNormalLoopMeter(sourcePoints) || !order || order.length < 5) return order;
-
-  const candidates = buildTargetLoopCandidates(start, order);
-  if (!candidates.length) return order;
-
-  const best = candidates.sort((a, b) => scoreTargetLoopRoute(start, a) - scoreTargetLoopRoute(start, b))[0] || order;
-
-  // ถ้าเส้นใหม่ไม่ได้ดีขึ้นชัดเจน ให้คงเส้นเดิมไว้เพื่อลดความเสี่ยงข้อมูลสลับผิด
-  const oldScore = scoreTargetLoopRoute(start, order);
-  const newScore = scoreTargetLoopRoute(start, best);
-  return newScore <= oldScore * 1.03 ? best : order;
-}
-
-
-function applyNormalRouteFieldFeedback(start, order, sourcePoints) {
-  // กติกาหน้างานเฉพาะโหมด "วันปกติ / ออกตลาดทั่วไป"
-  // ไม่กระทบสายอื่น เช่น ST สาย 65 ที่ผู้ใช้ยืนยันว่าเส้นทางเดิมดีอยู่แล้ว
-
-  // เคสสามทองบริการ ST สาย 55:
-  // ลำดับ 1,2,3 ดีแล้ว จากนั้นให้วิ่งต่อไปชุด 6,7,8,9 ก่อน แล้วค่อยกลับ 5,4
-  if (isNormalST55Route(sourcePoints) && order.length >= 9) {
-    return reorderByIndexPattern(order, [0, 1, 2, 5, 6, 7, 8, 4, 3]);
-  }
-
-  // เคสสามทองบริการ ST สาย 57:
-  // ลำดับที่ต้องการจากภาพปัจจุบัน: 1 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 2
-  // เพื่อไม่ต้องวกจากจุด 1 กลับมาจุด 2 แล้วค่อยออกไปไกลอีกครั้ง
-  if (isNormalST57Route(sourcePoints) && order.length >= 9) {
-    return reorderByIndexPattern(order, [0, 2, 3, 4, 5, 6, 7, 8, 1]);
-  }
-
-  // แก้เฉพาะ "วันปกติ / ออกตลาดทั่วไป" สำหรับสาย 61,72,65,71,67
-  // ให้ระบบเลือกหัววงและทิศทางที่ลดการวกกลับ/เก็บย้อนหลัง โดยไม่แก้ข้อมูลหรือเมนูอื่น
-  return improveTargetNormalLoopRoute(start, order, sourcePoints);
-}
-
 function buildNormalPlanRows(marketRows, planDays) {
   const today = thaiNow();
   const selectedBU = getSelectedStartBU();
   const candidates = marketRows
+    .filter(isMarketStatusMatch)
     .filter(r => !selectedBU || cleanText(r.bu).toUpperCase() === selectedBU.toUpperCase())
     /* แสดงจุดที่เช็คอินสำเร็จไว้ในแผน เพื่อให้ขึ้นเครื่องหมายถูก */
     .filter(validCoord)
@@ -1227,8 +886,7 @@ function buildNormalPlanRows(marketRows, planDays) {
       const planDate = addDaysTH(today, dayIndex);
       const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
       const start = startForRoute(chunk);
-      const orderedBase = orderNormalMarketRoute(start, chunk);
-      const ordered = applyNormalRouteFieldFeedback(start, orderedBase, chunk);
+      const ordered = orderCircularRoute(start, chunk);
       ordered.forEach((row, idx) => output.push({
         ...row,
         plan_day: dayIndex + 1,
@@ -1392,21 +1050,7 @@ function optimizeStopsForDisplay(list) {
   return orderCircularRoute(start, valid);
 }
 function routeDisplayStops(list) {
-  // สำคัญ: ใช้ลำดับที่คำนวณไว้ตอนสร้างแผนแล้ว ไม่คำนวณซ้ำในหน้า Map
-  // เพื่อให้การ์ดแผน / ตาราง / Map / Google Maps ตรงกัน และไม่เพิ่มจุดเกิน 9 จุด
-  const sorted = sortRowsByPlannedStopNo(list).filter(validCoord);
-
-  // โหมดปรับปรุงปั๊ม: บังคับให้จุดปรับปรุงปั๊มเป็นจุดที่ 1 ใน Map/Google Maps เสมอ
-  // และจุดอื่น ๆ ยังคงไม่เกิน 8 จุด รวมทั้งหมดไม่เกิน 9 จุด
-  if (getPlanSettings().mode === "pump") {
-    const pump = sorted.find(isPumpRow);
-    if (pump) {
-      const rest = removeSameStop(sorted, pump);
-      return [pump, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
-    }
-  }
-
-  return sorted.slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  return optimizeStopsForDisplay(list);
 }
 function routeNavPoints(list) {
   const valid = routeDisplayStops(list);
