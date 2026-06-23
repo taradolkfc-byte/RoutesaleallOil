@@ -174,23 +174,6 @@ function getPlanSettings() {
   return { mode, days };
 }
 
-function getSelectedMarketStatus() {
-  const el = document.getElementById("marketStatusFilter");
-  return cleanText(el ? el.value : "");
-}
-
-function marketStatusFilterMatch(row) {
-  const selected = getSelectedMarketStatus();
-  if (!selected) return true;
-  const s = cleanText(row && row.status).toLowerCase();
-  if (selected === "lost") return s.includes("lost customer") || s === "lost" || (s.includes("lost") && !s.includes("risky"));
-  if (selected === "risky") return s.includes("risky");
-  if (selected === "active") return s.includes("active");
-  if (selected === "winback") return s.includes("winback") || s.includes("new");
-  if (selected === "dormant") return s.includes("dormant") || s.includes("60");
-  return true;
-}
-
 function getSelectedStartPointName() {
   const el = document.getElementById("startPointInput");
   const value = cleanText(el ? el.value : "");
@@ -845,7 +828,6 @@ function takeByStatusForMeter(marketRows, pump) {
       if (!pump.bu || pump.bu === "KCG") return true;
       return !m.bu || cleanText(m.bu).toUpperCase() === cleanText(pump.bu).toUpperCase();
     })
-    .filter(marketStatusFilterMatch)
     .sort((a,b) => marketScore(a.status) - marketScore(b.status));
 
   const lost = sameMeter.filter(x => ["ลูกค้าหาย", "ลูกค้าหายเกิน 60 วัน"].includes(statusGroup(x.status))).slice(0, 5);
@@ -1223,7 +1205,6 @@ function buildNormalPlanRows(marketRows, planDays) {
   const selectedBU = getSelectedStartBU();
   const candidates = marketRows
     .filter(r => !selectedBU || cleanText(r.bu).toUpperCase() === selectedBU.toUpperCase())
-    .filter(marketStatusFilterMatch)
     /* แสดงจุดที่เช็คอินสำเร็จไว้ในแผน เพื่อให้ขึ้นเครื่องหมายถูก */
     .filter(validCoord)
     .sort((a,b) => (marketScore(a.status) - marketScore(b.status)) || cleanText(a.bu).localeCompare(cleanText(b.bu), "th") || cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), "th"));
@@ -1967,7 +1948,6 @@ document.getElementById("statusFilter").addEventListener("change", renderTable);
 document.getElementById("showAllToggle").addEventListener("change", renderTable);
 if (document.getElementById("startPointInput")) document.getElementById("startPointInput").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
 if (document.getElementById("planMode")) document.getElementById("planMode").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
-if (document.getElementById("marketStatusFilter")) document.getElementById("marketStatusFilter").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
 if (document.getElementById("planDays")) document.getElementById("planDays").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
 document.getElementById("reloadBtn").addEventListener("click", loadData);
 document.getElementById("checkinBtn").addEventListener("click", checkInGps);
