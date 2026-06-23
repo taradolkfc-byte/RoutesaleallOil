@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ระบบวางแผนออกตลาด KCE</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="style.css?v=20260623-dashboard-jobtype" />
+  <link rel="stylesheet" href="style.css?v=20260623-dashboard-2status-preserve" />
 </head>
 <body>
   <header class="app-header">
@@ -191,7 +191,7 @@
 
         <div class="dashboard-chart-grid">
           <div class="chart-card">
-            <h3>สรุปตามประเภทงาน</h3>
+            <h3>Dashboard 1 : สรุปตามประเภทงาน</h3>
             <div class="donut-wrap">
               <div id="dashDonut" class="dashboard-donut"><span id="dashDonutCenter">0<br>จุด</span></div>
               <div id="dashLegend" class="dashboard-legend"></div>
@@ -203,6 +203,33 @@
           </div>
         </div>
 
+        <div class="dashboard-second-block">
+          <div class="dashboard-second-head">
+            <h3>Dashboard 2 : สรุปตามสถานะลูกค้า</h3>
+            <p>อ้างอิงสถานะจากข้อมูลลูกค้าที่มีอยู่เดิม แล้วจับคู่จากรหัสลูกค้า/ชื่อลูกค้าที่บันทึกลงชีต “เก็บข้อมูล”</p>
+          </div>
+          <div class="dashboard-grid customer-status-grid">
+            <div class="dashboard-card lost"><span>ลูกค้าหาย</span><strong id="dashCustomerLost">0</strong><small>จุด</small></div>
+            <div class="dashboard-card risk"><span>ลูกค้าเสี่ยงหาย</span><strong id="dashCustomerRisk">0</strong><small>จุด</small></div>
+            <div class="dashboard-card current"><span>ลูกค้าปัจจุบัน</span><strong id="dashCustomerCurrent">0</strong><small>จุด</small></div>
+            <div class="dashboard-card newcust"><span>ลูกค้าใหม่</span><strong id="dashCustomerNew">0</strong><small>จุด</small></div>
+            <div class="dashboard-card lost60"><span>ลูกค้าหายเกิน60วัน</span><strong id="dashCustomerLost60">0</strong><small>จุด</small></div>
+          </div>
+          <div class="dashboard-chart-grid customer-status-chart-grid">
+            <div class="chart-card">
+              <h3>สัดส่วนตามสถานะลูกค้า</h3>
+              <div class="donut-wrap">
+                <div id="dashCustomerDonut" class="dashboard-donut"><span id="dashCustomerDonutCenter">0<br>จุด</span></div>
+                <div id="dashCustomerLegend" class="dashboard-legend"></div>
+              </div>
+            </div>
+            <div class="chart-card">
+              <h3>จำนวนตามสถานะลูกค้า</h3>
+              <div id="dashCustomerBars" class="status-bars"></div>
+            </div>
+          </div>
+        </div>
+
         <div class="dashboard-summary-strip" id="dashboardSummaryStrip">
           แผนที่วางไว้ 0 จุด • เข้าพบสำเร็จ 0 จุด • อัตราสำเร็จ 0%
         </div>
@@ -211,6 +238,6 @@
   </section>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="script.js?v=20260623-dashboard-jobtype"></script>
+  <script src="script.js?v=20260623-dashboard-2status-preserve"></script>
 </body>
 </html>
