@@ -90,7 +90,7 @@ tr:nth-child(even) td { background:#f9fafb; }
 
 
 /* ===== Daily planning + check-in 100m update ===== */
-.plan-controls { display:grid; grid-template-columns:220px 260px 220px 220px; gap:10px; margin-top:10px; align-items:end; }
+.plan-controls { display:grid; grid-template-columns:220px 260px 220px; gap:10px; margin-top:10px; align-items:end; }
 .plan-controls label { color:#0f172a; font-weight:700; font-size:13px; }
 .plan-controls select, .plan-controls input { margin-top:5px; width:100%; }
 @media (max-width:900px){ .plan-controls{grid-template-columns:1fr;} }
