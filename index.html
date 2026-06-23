@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ระบบวางแผนออกตลาด KCE</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="style.css?v=20260623-mobile-hide-dashboard-final" />
+  <link rel="stylesheet" href="style.css?v=20260623-dashboard-jobtype" />
 </head>
 <body>
   <header class="app-header">
@@ -170,7 +170,7 @@
                 <th>ลำดับ</th>
                 <th>วันที่ออกตลาด</th>
                 <th>ชื่อลูกค้า/ชื่อปั๊ม</th>
-                <th>กลุ่มลูกค้า</th>
+                <th>ประเภทงาน</th>
                 <th>สถานะเข้าพบ</th>
               </tr>
             </thead>
@@ -183,16 +183,15 @@
         <div class="dashboard-grid">
           <div class="dashboard-card total"><span>ไปทั้งหมด</span><strong id="dashTotal">0</strong><small>จุด</small></div>
           <div class="dashboard-card success"><span>อัตราเข้าพบสำเร็จ</span><strong id="dashSuccess">0%</strong><small id="dashSuccessText">0/0 จุด</small></div>
-          <div class="dashboard-card"><span>ลูกค้าหาย</span><strong id="dashLost">0</strong><small>จุด</small></div>
-          <div class="dashboard-card"><span>ลูกค้าหายเกิน 60 วัน</span><strong id="dashDormant">0</strong><small>จุด</small></div>
-          <div class="dashboard-card"><span>ลูกค้าเสี่ยงหาย</span><strong id="dashRisky">0</strong><small>จุด</small></div>
-          <div class="dashboard-card"><span>ลูกค้าปัจจุบัน</span><strong id="dashActive">0</strong><small>จุด</small></div>
-          <div class="dashboard-card"><span>ลูกค้าใหม่</span><strong id="dashNew">0</strong><small>จุด</small></div>
+          <div class="dashboard-card visit"><span>ออกเยี่ยมลูกค้า</span><strong id="dashVisit">0</strong><small>จุด</small></div>
+          <div class="dashboard-card prospect"><span>ลูกค้าใหม่/มุ่งหวัง</span><strong id="dashProspect">0</strong><small>จุด</small></div>
+          <div class="dashboard-card pump"><span>ปรับปรุงปั๊ม</span><strong id="dashPumpJob">0</strong><small>จุด</small></div>
+          <div class="dashboard-card repair"><span>ซ่อม</span><strong id="dashRepairJob">0</strong><small>จุด</small></div>
         </div>
 
         <div class="dashboard-chart-grid">
           <div class="chart-card">
-            <h3>สรุปตามกลุ่มลูกค้า</h3>
+            <h3>สรุปตามประเภทงาน</h3>
             <div class="donut-wrap">
               <div id="dashDonut" class="dashboard-donut"><span id="dashDonutCenter">0<br>จุด</span></div>
               <div id="dashLegend" class="dashboard-legend"></div>
@@ -212,6 +211,6 @@
   </section>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="script.js?v=20260623-mobile-hide-dashboard-final"></script>
+  <script src="script.js?v=20260623-dashboard-jobtype"></script>
 </body>
 </html>
