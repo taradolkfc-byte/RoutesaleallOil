@@ -133,21 +133,49 @@ tr:nth-child(even) td { background:#f9fafb; }
 @media (max-width:900px){ .route-show-all{width:100%;} }
 
 
-/* ===== Mobile view: show only visit form ===== */
+/* ===== Mobile view: show all content until visit form, hide bottom master table only ===== */
 @media (max-width:900px){
   body { background:#f3f6fb; }
+
+  /* มือถือ: แสดงหัวเว็บ / สรุป / แผนเส้นทาง / แผนที่ / ฟอร์มบันทึก ตามลำดับเดิม */
   .app-header,
   .summary-grid,
   .route-card,
+  .form-card {
+    display:block !important;
+  }
+
+  /* มือถือ: ซ่อนเฉพาะส่วนตารางข้อมูลสีน้ำเงินด้านล่างสุดและแถบค้นหาของตารางนั้น */
   .toolbar,
   .table-wrap {
     display:none !important;
   }
+
+  .app-header {
+    padding:16px;
+  }
+  .summary-grid {
+    display:grid !important;
+    grid-template-columns:1fr 1fr;
+    padding:12px;
+    gap:10px;
+  }
+  .route-card,
   .form-card {
-    display:block !important;
-    margin:10px;
-    padding:14px;
+    margin:0 10px 12px;
+    padding:12px;
     border-radius:14px;
+  }
+  .route-summary {
+    grid-template-columns:1fr !important;
+  }
+  .route-map {
+    height:360px;
+    min-height:360px;
+  }
+  .detail-table-wrap {
+    max-height:360px;
+    overflow:auto;
   }
   .form-card h2 {
     font-size:22px;
