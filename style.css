@@ -464,3 +464,16 @@ tr:nth-child(even) td { background:#f9fafb; }
     display: grid !important;
   }
 }
+
+/* ===== Dashboard Job Type Summary 20260623 ===== */
+.dashboard-card.visit { border-left:5px solid #2563eb; }
+.dashboard-card.prospect { border-left:5px solid #16a34a; }
+.dashboard-card.pump { border-left:5px solid #f97316; }
+.dashboard-card.repair { border-left:5px solid #ef4444; }
+.job-visit { background:#dbeafe; color:#1e40af; }
+.job-prospect { background:#dcfce7; color:#166534; }
+.job-pump { background:#ffedd5; color:#9a3412; }
+.job-repair { background:#fee2e2; color:#991b1b; }
+@media (min-width:1201px){
+  .dashboard-right-panel .dashboard-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
+}
