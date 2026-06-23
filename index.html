@@ -159,33 +159,55 @@
       </div>
     </div>
 
-    <div class="dashboard-grid">
-      <div class="dashboard-card total"><span>ไปทั้งหมด</span><strong id="dashTotal">0</strong><small>จุด</small></div>
-      <div class="dashboard-card success"><span>เข้าพบสำเร็จ</span><strong id="dashSuccess">0%</strong><small id="dashSuccessText">0/0 จุด</small></div>
-      <div class="dashboard-card"><span>ลูกค้าหาย</span><strong id="dashLost">0</strong><small>จุด</small></div>
-      <div class="dashboard-card"><span>ลูกค้าหายเกิน 60 วัน</span><strong id="dashDormant">0</strong><small>จุด</small></div>
-      <div class="dashboard-card"><span>ลูกค้าเสี่ยงหาย</span><strong id="dashRisky">0</strong><small>จุด</small></div>
-      <div class="dashboard-card"><span>ลูกค้าปัจจุบัน</span><strong id="dashActive">0</strong><small>จุด</small></div>
-      <div class="dashboard-card"><span>ลูกค้าใหม่</span><strong id="dashNew">0</strong><small>จุด</small></div>
-    </div>
+    <div class="dashboard-main-layout">
+      <div class="dashboard-left-panel">
+        <h3>รายชื่อลูกค้าที่ออกตลาด</h3>
+        <p id="dashboardListNote">แสดงรายชื่อล่าสุดตามเงื่อนไขที่เลือก</p>
+        <div class="dashboard-table-wrap">
+          <table class="dashboard-table">
+            <thead>
+              <tr>
+                <th>ลำดับ</th>
+                <th>วันที่ออกตลาด</th>
+                <th>ชื่อลูกค้า/ชื่อปั๊ม</th>
+                <th>กลุ่มลูกค้า</th>
+                <th>สถานะเข้าพบ</th>
+              </tr>
+            </thead>
+            <tbody id="dashboardBody"><tr><td colspan="5" class="loading">กำลังโหลด Dashboard...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
 
-    <div class="dashboard-table-wrap">
-      <table class="dashboard-table">
-        <thead>
-          <tr>
-            <th>ลำดับ</th>
-            <th>วันที่ออกตลาด</th>
-            <th>BU</th>
-            <th>สายมิเตอร์</th>
-            <th>รหัสลูกค้า</th>
-            <th>ชื่อลูกค้า/ชื่อปั๊ม</th>
-            <th>กลุ่มลูกค้า</th>
-            <th>สถานะเข้าพบ</th>
-            <th>พื้นที่</th>
-          </tr>
-        </thead>
-        <tbody id="dashboardBody"><tr><td colspan="9" class="loading">กำลังโหลด Dashboard...</td></tr></tbody>
-      </table>
+      <div class="dashboard-right-panel">
+        <div class="dashboard-grid">
+          <div class="dashboard-card total"><span>ไปทั้งหมด</span><strong id="dashTotal">0</strong><small>จุด</small></div>
+          <div class="dashboard-card success"><span>อัตราเข้าพบสำเร็จ</span><strong id="dashSuccess">0%</strong><small id="dashSuccessText">0/0 จุด</small></div>
+          <div class="dashboard-card"><span>ลูกค้าหาย</span><strong id="dashLost">0</strong><small>จุด</small></div>
+          <div class="dashboard-card"><span>ลูกค้าหายเกิน 60 วัน</span><strong id="dashDormant">0</strong><small>จุด</small></div>
+          <div class="dashboard-card"><span>ลูกค้าเสี่ยงหาย</span><strong id="dashRisky">0</strong><small>จุด</small></div>
+          <div class="dashboard-card"><span>ลูกค้าปัจจุบัน</span><strong id="dashActive">0</strong><small>จุด</small></div>
+          <div class="dashboard-card"><span>ลูกค้าใหม่</span><strong id="dashNew">0</strong><small>จุด</small></div>
+        </div>
+
+        <div class="dashboard-chart-grid">
+          <div class="chart-card">
+            <h3>สรุปตามกลุ่มลูกค้า</h3>
+            <div class="donut-wrap">
+              <div id="dashDonut" class="dashboard-donut"><span id="dashDonutCenter">0<br>จุด</span></div>
+              <div id="dashLegend" class="dashboard-legend"></div>
+            </div>
+          </div>
+          <div class="chart-card">
+            <h3>สรุปสถานะเข้าพบ</h3>
+            <div id="dashStatusBars" class="status-bars"></div>
+          </div>
+        </div>
+
+        <div class="dashboard-summary-strip" id="dashboardSummaryStrip">
+          แผนที่วางไว้ 0 จุด • เข้าพบสำเร็จ 0 จุด • อัตราสำเร็จ 0%
+        </div>
+      </div>
     </div>
   </section>
 
