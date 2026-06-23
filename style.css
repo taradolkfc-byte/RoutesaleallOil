@@ -131,3 +131,36 @@ tr:nth-child(even) td { background:#f9fafb; }
 .route-show-all { grid-column:1/-1; background:#0b3b70; color:#fff; width:max-content; margin-bottom:4px; }
 .geo-area { color:#0f172a; }
 @media (max-width:900px){ .route-show-all{width:100%;} }
+
+
+/* ===== Mobile view: show only visit form ===== */
+@media (max-width:900px){
+  body { background:#f3f6fb; }
+  .app-header,
+  .summary-grid,
+  .route-card,
+  .toolbar,
+  .table-wrap {
+    display:none !important;
+  }
+  .form-card {
+    display:block !important;
+    margin:10px;
+    padding:14px;
+    border-radius:14px;
+  }
+  .form-card h2 {
+    font-size:22px;
+    margin-bottom:12px;
+  }
+  #planForm {
+    grid-template-columns:1fr !important;
+  }
+  #planForm label,
+  #planForm input,
+  #planForm select,
+  #planForm textarea,
+  #planForm button {
+    width:100%;
+  }
+}
