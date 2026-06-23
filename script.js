@@ -249,6 +249,21 @@ function marketScore(status) {
   if (g === "ลูกค้าซื้อขายประจำ") return 5;
   return 9;
 }
+
+function getMarketStatusFilterValue() {
+  const el = document.getElementById("marketStatusFilter");
+  return el ? cleanText(el.value).toLowerCase() : "";
+}
+function marketStatusFilterMatch(row, filterValue) {
+  if (!filterValue) return true;
+  const s = cleanText(row && row.status).toLowerCase();
+  if (filterValue === "lost") return s.includes("lost") && !s.includes("dormant");
+  if (filterValue === "risky") return s.includes("risky");
+  if (filterValue === "active") return s.includes("active");
+  if (filterValue === "winback") return s.includes("winback") || s.includes("new");
+  if (filterValue === "dormant") return s.includes("dormant") || s.includes(">60") || s.includes("60");
+  return true;
+}
 function getUrgencyScore(urgency, dateObj) {
   const u = cleanText(urgency);
   const d = dateObj ? Math.ceil((dateObj - thaiNow()) / 86400000) : 99999;
@@ -1203,8 +1218,11 @@ function applyNormalRouteFieldFeedback(start, order, sourcePoints) {
 function buildNormalPlanRows(marketRows, planDays) {
   const today = thaiNow();
   const selectedBU = getSelectedStartBU();
+  const selectedMarketStatus = getMarketStatusFilterValue();
   const candidates = marketRows
     .filter(r => !selectedBU || cleanText(r.bu).toUpperCase() === selectedBU.toUpperCase())
+    /* ใช้เฉพาะ Dropdown "เลือกสถานะ" เท่านั้น ไม่กระทบโหมดวางแผนอื่น */
+    .filter(r => marketStatusFilterMatch(r, selectedMarketStatus))
     /* แสดงจุดที่เช็คอินสำเร็จไว้ในแผน เพื่อให้ขึ้นเครื่องหมายถูก */
     .filter(validCoord)
     .sort((a,b) => (marketScore(a.status) - marketScore(b.status)) || cleanText(a.bu).localeCompare(cleanText(b.bu), "th") || cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), "th"));
@@ -1949,6 +1967,7 @@ document.getElementById("showAllToggle").addEventListener("change", renderTable)
 if (document.getElementById("startPointInput")) document.getElementById("startPointInput").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
 if (document.getElementById("planMode")) document.getElementById("planMode").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
 if (document.getElementById("planDays")) document.getElementById("planDays").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
+if (document.getElementById("marketStatusFilter")) document.getElementById("marketStatusFilter").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
 document.getElementById("reloadBtn").addEventListener("click", loadData);
 document.getElementById("checkinBtn").addEventListener("click", checkInGps);
 ["customer_id", "customer_name"].forEach(name => {
