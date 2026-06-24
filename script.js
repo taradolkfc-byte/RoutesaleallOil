@@ -546,115 +546,103 @@ function buildStatusLoopCandidates(start, valid) {
   });
 }
 
-function statusLoopCenter_(start, pts) {
-  // ใช้จุดเริ่มร่วมกับลูกค้า เพื่อให้วงกวาดกลับเข้าฐาน ไม่ใช่วงเฉพาะกลุ่มลูกค้าอย่างเดียว
-  const all = [
-    { lat: Number(start.lat), lng: Number(start.lng) },
-    ...pts.map(p => ({ lat: toNumber(p.lat), lng: toNumber(p.lng) }))
-  ].filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lng));
-  return {
-    lat: all.reduce((sum, p) => sum + p.lat, 0) / all.length,
-    lng: all.reduce((sum, p) => sum + p.lng, 0) / all.length
-  };
-}
 
-function normalizeAngle_(a) {
-  while (a < 0) a += Math.PI * 2;
-  while (a >= Math.PI * 2) a -= Math.PI * 2;
-  return a;
-}
-
-function statusCircularityScore(start, route) {
-  // คะแนนนี้ใช้เฉพาะ Dropdown "เลือกสถานะ"
-  // ให้ความสำคัญกับ "วงกลมแบบรูปตัวอย่าง" มากกว่าการหาเส้นตรงสั้นสุดแบบ TSP
-  // เพราะ TSP/2-opt บางครั้งทำให้ลำดับกระโดดข้ามโซนและดูไม่เป็นวง
-  if (!route || !route.length) return Infinity;
-  const dist = routeDistanceFromStart(start, route);
-  const cross = routeCrossPenalty(start, route) * 2.6;
-  const turn = routeTurnPenalty(start, route) * 2.8;
-  const wave = routeDistanceWavePenalty(start, route) * 2.4;
-
-  const ds = route.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
-  const sortedDs = [...ds].sort((a, b) => a - b);
-  const nearest = sortedDs[0] || 0;
-  const maxD = sortedDs[sortedDs.length - 1] || 0;
-
-  // จุดแรกควรเป็นจุดที่ออกจากฐานแล้วเริ่มเข้าวงได้ง่าย ไม่บังคับใกล้ที่สุด 100%
-  // แต่ถ้าเลือกจุดไกลมากเป็นจุดแรก จะเกิดเส้นยาวพุ่งออกไปก่อน ดูไม่เป็นวง
-  const firstD = ds[0] || 0;
-  const firstPenalty = Math.max(0, firstD - Math.max(nearest * 1.45, 8)) * 5.5;
-
-  // จุดสุดท้ายควรอยู่ในแนวกลับฐานพอสมควร ถ้าไกลเกินไปจะดูเหมือนเส้นไปกลับ
-  const lastD = ds[ds.length - 1] || 0;
-  const lastPenalty = maxD ? Math.max(0, lastD - maxD * 0.82) * 2.5 : 0;
-
-  return dist + cross + turn + wave + firstPenalty + lastPenalty;
-}
-
-function buildStrictStatusCircleCandidates(start, valid) {
-  const center = statusLoopCenter_(start, valid);
-  const withAngle = valid.map(p => ({
-    ...p,
-    __angle: normalizeAngle_(Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng))
-  }));
-
-  const asc = [...withAngle].sort((a, b) => a.__angle - b.__angle);
-  const desc = [...asc].reverse();
-  const candidates = [];
-
-  const clean = (route) => route.map(({ __angle, ...p }) => p);
-  const addRotations = (base) => {
-    for (let i = 0; i < base.length; i++) {
-      candidates.push(clean([...base.slice(i), ...base.slice(0, i)]));
-    }
-  };
-
-  // วงกลมแท้: เรียงตามมุมรอบ centroid แล้วลองทุกจุดเป็นจุดเริ่ม และลองทั้งสองทิศทาง
-  addRotations(asc);
-  addRotations(desc);
-
-  // เพิ่มอีกชุดโดยใช้ centroid เฉพาะลูกค้า เผื่อจุดเริ่มอยู่ไกลจนดึงวงเบี้ยวเกินไป
-  const pureCenter = {
-    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
-    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
-  };
-  const pure = valid.map(p => ({
-    ...p,
-    __angle: normalizeAngle_(Math.atan2(toNumber(p.lat) - pureCenter.lat, toNumber(p.lng) - pureCenter.lng))
-  }));
-  const pureAsc = [...pure].sort((a, b) => a.__angle - b.__angle);
-  const pureDesc = [...pureAsc].reverse();
-  addRotations(pureAsc);
-  addRotations(pureDesc);
-
-  const seen = new Set();
-  return candidates.filter(route => {
-    const key = uniqueRouteCandidateKey(route);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
+function isStatusKCG61Route(points) {
+  // กติกาหน้างานเฉพาะ Dropdown “เลือกสถานะ” ของ เค.ซี.จี.ปิโตรเลียม / MUK สาย 61
+  // ใช้เพื่อแก้ลำดับแบบตัวอย่างที่แจ้ง: 1 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 2
+  // ไม่กระทบโหมดวางแผนอื่น เพราะถูกเรียกจาก orderStatusFilterRoute() เท่านั้น
+  const valid = (points || []).filter(Boolean);
+  if (!valid.length) return false;
+  const meterOk = valid.some(p => normalizeMeter(p.meter || p.meterKey) === "61");
+  const buOk = valid.some(p => {
+    const bu = cleanText(p.bu).toUpperCase();
+    const text = `${p.customer_id || ""} ${p.customer_name || ""} ${p.area || ""}`.toUpperCase();
+    return bu === "MUK" || bu === "KCG" || text.includes("KCG") || text.includes("MUK");
   });
+  return meterOk && buOk;
+}
+
+function applyStatusRouteFieldFeedback(start, order, sourcePoints) {
+  // แก้เฉพาะ MAP ของ dropdown “เลือกสถานะ” ตามเงื่อนไขล่าสุดเท่านั้น
+  // เคส เค.ซี.จี.ปิโตรเลียม สาย 61: จุด 1 ถูกต้องแล้ว แต่จุดเดิมหมายเลข 2 ทำให้วิ่งอ้อม/วกกลับ
+  // ให้ขยับเดิมหมายเลข 2 ไปท้ายวง และเรียงเป็น 1,3,4,5,6,7,8,9,2
+  if (isStatusKCG61Route(sourcePoints) && order && order.length >= 8) {
+    return reorderByIndexPattern(order, [0, 2, 3, 4, 5, 6, 7, 8, 1]);
+  }
+  return order;
 }
 
 function orderStatusFilterRoute(start, points) {
-  // ใช้เฉพาะเมื่อเลือก Dropdown "เลือกสถานะ" ทั้ง 5 สถานะเท่านั้น
-  // หลักใหม่: ห้ามใช้ TSP/2-opt เป็นตัวหลัก เพราะแม้ระยะสั้น แต่ลำดับมักกระโดดและไม่เป็นวง
-  // ให้เรียงแบบกวาดมุมรอบพื้นที่เป็นวงปิดเหมือนรูปตัวอย่าง แล้วเลือกทิศ/จุดเริ่มที่เสียระยะน้อยสุด
-  const validAll = (points || []).filter(validCoord).map(p => ({ ...p }));
+  // ใช้เฉพาะเมื่อเลือก Dropdown "เลือกสถานะ" ได้แก่
+  // ลูกค้าหาย / ลูกค้าเสี่ยงหาย / ลูกค้าปัจจุบัน / ลูกค้าใหม่ / ลูกค้าหายเกิน60วัน
+  // เป้าหมาย: จัดลำดับแบบวงกลม ลดการย้อนกลับไปเก็บจุดย้อนหลัง และไม่แตะ MAP ของโหมดวางแผนอื่น
+  const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
   const noCoord = (points || []).filter(p => !validCoord(p));
-  const valid = validAll.slice(0, MAX_ROUTE_CUSTOMER_STOPS);
   if (valid.length <= 2) return [...valid, ...noCoord];
 
-  const candidates = buildStrictStatusCircleCandidates(start, valid);
+  const candidates = buildStatusLoopCandidates(start, valid);
   let best = (candidates.length ? candidates : [valid])
-    .sort((a, b) => statusCircularityScore(start, a) - statusCircularityScore(start, b))[0] || valid;
+    .sort((a, b) => statusRouteScore(start, a) - statusRouteScore(start, b))[0] || valid;
 
-  // กันเส้นตัดกันแบบเบา ๆ เท่านั้น ห้าม 2-opt เพราะจะทำให้วงที่เรียงดีแล้วแตกเป็นลำดับกระโดด
-  // ถ้ามีเส้นตัดกัน ให้ลองกลับทิศทั้งวง ไม่สลับจุดภายใน
-  const rev = [...best].reverse();
-  if (statusCircularityScore(start, rev) < statusCircularityScore(start, best) * 0.97) best = rev;
+  // ปรับรอบสุดท้าย: ดึงจุดที่อยู่ระหว่างทางมาแวะก่อน เพื่อลดการวิ่งผ่านแล้วค่อยย้อนกลับมาเก็บ
+  best = pullPointsThatAreOnTheWay(start, best);
+
+  // กติกาหน้างานเฉพาะ dropdown “เลือกสถานะ” ไม่แตะ MAP ของโหมดวางแผนอื่น
+  best = applyStatusRouteFieldFeedback(start, best, valid);
 
   return [...best, ...noCoord];
+}
+
+function splitStatusFilterRoutePlans(start, points) {
+  // ใช้เฉพาะ Dropdown “เลือกสถานะ”
+  // ถ้ามีจุดที่อยู่นอกวงหลักมาก เช่นต้องออกไปกลับทางเดิม/ทำให้วงเสีย
+  // ให้แยกออกเป็นแผนเสริม แทนการฝืนใส่ในวงหลักเดียวกัน
+  const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
+  const noCoord = (points || []).filter(p => !validCoord(p));
+  if (valid.length <= 4) return [{ label: "", rows: orderStatusFilterRoute(start, points) }];
+
+  let ordered = orderStatusFilterRoute(start, valid);
+  let main = ordered.filter(validCoord);
+  const deferred = [];
+
+  // จำกัดการดึงออกไม่เกิน 2 จุดต่อแผน เพื่อไม่ให้ข้อมูลหาย และยังคงจำนวนจุดหลักพอวางเส้นทางได้
+  for (let round = 0; round < 2 && main.length >= 7; round++) {
+    const fullDistance = routeDistanceFromStart(start, main);
+    const avgLeg = fullDistance / Math.max(1, main.length + 1);
+    let best = { index: -1, saving: 0, ratio: 0 };
+
+    main.forEach((p, idx) => {
+      // อย่าดึงจุดแรกออก ถ้าจุดแรกเป็นทางออกที่ถูกต้องของวง
+      if (idx === 0 && main.length <= 9) return;
+      const without = main.filter((_, i) => i !== idx);
+      const saving = fullDistance - routeDistanceFromStart(start, without);
+      const ratio = saving / Math.max(1, fullDistance);
+      const distFromStart = haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
+
+      // จุดที่ควรแยก: ถ้าเอาออกแล้วระยะลดเยอะผิดปกติ หรือเป็นแขนยื่นไกลจากวงหลัก
+      const isStrongOutlier = saving > Math.max(22, avgLeg * 1.45) || ratio >= 0.18;
+      const isFarArm = distFromStart > 35 && saving > Math.max(16, avgLeg * 1.05);
+      if ((isStrongOutlier || isFarArm) && saving > best.saving) {
+        best = { index: idx, saving, ratio };
+      }
+    });
+
+    if (best.index < 0) break;
+    deferred.push(main.splice(best.index, 1)[0]);
+  }
+
+  main = orderStatusFilterRoute(start, main);
+
+  const plans = [];
+  plans.push({ label: deferred.length ? "แผนหลัก" : "", rows: [...main, ...noCoord] });
+
+  if (deferred.length) {
+    const secondaryStart = startForRoute(deferred);
+    const secondary = orderStatusFilterRoute(secondaryStart, deferred);
+    plans.push({ label: "แผนเสริม/แยกวัน", rows: secondary });
+  }
+
+  return plans;
 }
 function getUrgencyScore(urgency, dateObj) {
   const u = cleanText(urgency);
@@ -1672,21 +1660,36 @@ function buildNormalPlanRows(marketRows, planDays) {
   const output = [];
   groups.forEach((list, key) => {
     const [bu, meterKey] = key.split("|");
-    const chunkSize = selectedMarketStatus ? MAX_ROUTE_CUSTOMER_STOPS : MAX_STOPS_PER_DAY;
-    const maxItems = Math.min(list.length, planDays * chunkSize);
+    const perPlanLimit = hasMarketStatusFilterSelected() ? MAX_ROUTE_CUSTOMER_STOPS : MAX_STOPS_PER_DAY;
+    const maxItems = Math.min(list.length, planDays * perPlanLimit);
     const usable = list.slice(0, maxItems);
     for (let dayIndex = 0; dayIndex < planDays; dayIndex++) {
-      const chunk = usable.slice(dayIndex * chunkSize, (dayIndex + 1) * chunkSize);
+      const chunk = usable.slice(dayIndex * perPlanLimit, (dayIndex + 1) * perPlanLimit);
       if (!chunk.length) continue;
       const planDate = addDaysTH(today, dayIndex);
       const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
       const start = startForRoute(chunk);
-      const orderedBase = hasMarketStatusFilterSelected()
-        ? orderStatusFilterRoute(start, chunk)
-        : orderNormalMarketRoute(start, chunk);
-      const ordered = hasMarketStatusFilterSelected()
-        ? orderedBase
-        : applyNormalRouteFieldFeedback(start, orderedBase, chunk);
+
+      if (hasMarketStatusFilterSelected()) {
+        const splitPlans = splitStatusFilterRoutePlans(start, chunk);
+        splitPlans.forEach((plan, planIdx) => {
+          const routeName = plan.label ? `${routeId} • ${plan.label}` : routeId;
+          const routeStart = startForRoute(plan.rows);
+          plan.rows.forEach((row, idx) => output.push({
+            ...row,
+            plan_day: dayIndex + 1 + planIdx,
+            plan_date: planIdx === 0 ? planDate : addDaysTH(planDate, planIdx),
+            route_group: routeName,
+            stop_no: `${idx + 1}/${plan.rows.length}`,
+            start_name: routeStart.name,
+            priorityLabel: row.priorityLabel || statusGroup(row.status)
+          }));
+        });
+        continue;
+      }
+
+      const orderedBase = orderNormalMarketRoute(start, chunk);
+      const ordered = applyNormalRouteFieldFeedback(start, orderedBase, chunk);
       ordered.forEach((row, idx) => output.push({
         ...row,
         plan_day: dayIndex + 1,
