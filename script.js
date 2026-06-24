@@ -61,6 +61,10 @@ const MAX_PLAN_DAYS = 7;
 const MAX_STOPS_PER_DAY = 16;
 // จำกัดจำนวนจุดที่ส่งเข้า Map และ Google Maps ให้ตรงกัน ไม่เกิน 9 จุด ตามเงื่อนไขใช้งานจริง
 const MAX_ROUTE_CUSTOMER_STOPS = 9;
+// จำกัดระยะทางออกตลาดต่อวัน ไม่ให้แผนเดียวไกลเกินไป
+const MAX_DAILY_ROUTE_KM = 350;
+// ใช้คูณระยะเส้นตรงให้ใกล้เคียงถนนจริง เพื่อกัน OSRM/Google Maps เกิน 350 กม.
+const ROUTE_DISTANCE_SAFETY_FACTOR = 1.35;
 
 let rawRows = [];
 let plannedRows = [];
@@ -807,6 +811,52 @@ function routeDistanceFromStart(start, order) {
   });
   total += haversine(current, { lat: start.lat, lng: start.lng });
   return total;
+}
+
+function estimateDailyRouteKm(start, order) {
+  // ประมาณระยะทางแบบเผื่อถนนจริง เพื่อใช้ตัดแผนรายวันไม่ให้เกิน 350 กม./วัน
+  return routeDistanceFromStart(start, order) * ROUTE_DISTANCE_SAFETY_FACTOR;
+}
+
+function orderForNormalChunk(start, chunk, selectedMarketStatus) {
+  if (selectedMarketStatus) return orderStatusFilterRoute(start, chunk);
+  const orderedBase = orderNormalMarketRoute(start, chunk);
+  return applyNormalRouteFieldFeedback(start, orderedBase, chunk);
+}
+
+function splitNormalRowsIntoDailyChunks(list, planDays, routeStopLimit, selectedMarketStatus) {
+  // แบ่งแผนเป็นรายวัน โดย 1 วันต้องไม่เกิน 9 จุด และระยะทางประมาณไม่เกิน 350 กม.
+  // ใช้เฉพาะการวางแผนออกตลาด/เลือกสถานะ เพื่อไม่กระทบโหมดปรับปรุงปั๊มและตารางซ่อม
+  const valid = (list || []).filter(validCoord);
+  if (!valid.length) return [];
+
+  const firstStart = startForRoute(valid.slice(0, Math.min(routeStopLimit, valid.length)));
+  const orderedAll = orderForNormalChunk(firstStart, valid, selectedMarketStatus);
+  const chunks = [];
+  let current = [];
+
+  for (const point of orderedAll) {
+    const trialRaw = [...current, point];
+    const trialStart = startForRoute(trialRaw);
+    const trialOrdered = orderForNormalChunk(trialStart, trialRaw, selectedMarketStatus);
+    const trialKm = estimateDailyRouteKm(trialStart, trialOrdered);
+
+    if (current.length && (trialRaw.length > routeStopLimit || trialKm > MAX_DAILY_ROUTE_KM)) {
+      chunks.push(current);
+      if (chunks.length >= planDays) break;
+      current = [point];
+      continue;
+    }
+    current = trialRaw;
+  }
+
+  if (current.length && chunks.length < planDays) chunks.push(current);
+
+  return chunks.slice(0, planDays).map(chunk => {
+    const start = startForRoute(chunk);
+    const ordered = orderForNormalChunk(start, chunk, selectedMarketStatus);
+    return { start, ordered, estimatedKm: estimateDailyRouteKm(start, ordered) };
+  });
 }
 
 function nearestNeighborOrder(start, points) {
@@ -1613,23 +1663,15 @@ function buildNormalPlanRows(marketRows, planDays) {
   const output = [];
   groups.forEach((list, key) => {
     const [bu, meterKey] = key.split("|");
-    // เฉพาะกรณีเลือกสถานะ: จำกัด 9 จุดตั้งแต่ตอนสร้างแผน ไม่ใช่สร้าง 16 แล้วค่อยตัดหน้า Map
-    // เพื่อให้การ์ด / ตาราง / Map / Google Maps ใช้ชุดจุดเดียวกันและเส้นทางไม่เพี้ยน
+    // จำกัด 9 จุด/วันในโหมดเลือกสถานะ และจำกัดระยะทางไม่เกิน 350 กม./วัน
+    // ถ้าเส้นทางรวมเกิน 350 กม. ระบบจะแบ่งจุดที่เหลือไปวันถัดไปตามจำนวนวันล่วงหน้าที่เลือก
     const routeStopLimit = selectedMarketStatus ? MAX_ROUTE_CUSTOMER_STOPS : MAX_STOPS_PER_DAY;
-    const maxItems = Math.min(list.length, planDays * routeStopLimit);
-    const usable = list.slice(0, maxItems);
-    for (let dayIndex = 0; dayIndex < planDays; dayIndex++) {
-      const chunk = usable.slice(dayIndex * routeStopLimit, (dayIndex + 1) * routeStopLimit);
-      if (!chunk.length) continue;
+    const dayChunks = splitNormalRowsIntoDailyChunks(list, planDays, routeStopLimit, selectedMarketStatus);
+
+    dayChunks.forEach((chunkInfo, dayIndex) => {
       const planDate = addDaysTH(today, dayIndex);
       const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
-      const start = startForRoute(chunk);
-      const orderedBase = hasMarketStatusFilterSelected()
-        ? orderStatusFilterRoute(start, chunk)
-        : orderNormalMarketRoute(start, chunk);
-      const ordered = hasMarketStatusFilterSelected()
-        ? orderedBase
-        : applyNormalRouteFieldFeedback(start, orderedBase, chunk);
+      const { start, ordered, estimatedKm } = chunkInfo;
       ordered.forEach((row, idx) => output.push({
         ...row,
         plan_day: dayIndex + 1,
@@ -1637,9 +1679,10 @@ function buildNormalPlanRows(marketRows, planDays) {
         route_group: routeId,
         stop_no: `${idx + 1}/${ordered.length}`,
         start_name: start.name,
-        priorityLabel: row.priorityLabel || statusGroup(row.status)
+        priorityLabel: row.priorityLabel || statusGroup(row.status),
+        estimated_route_km: estimatedKm
       }));
-    }
+    });
   });
   return output;
 }
@@ -2045,7 +2088,7 @@ async function renderMap(list) {
       if (metricsEl) {
         const done = validStops.filter(isCompleted).length;
         const remain = Math.max(0, validStops.length - done);
-        metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (จำกัด Map/Google Maps ไม่เกิน ${MAX_ROUTE_CUSTOMER_STOPS} จุด)`;
+        metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} • จำกัดไม่เกิน ${MAX_DAILY_ROUTE_KM} กม./วัน (Map/Google Maps ไม่เกิน ${MAX_ROUTE_CUSTOMER_STOPS} จุด)`;
       }
       return;
     }
@@ -2053,7 +2096,7 @@ async function renderMap(list) {
     // ไม่ต้องหยุดระบบ ถ้า OSRM ไม่ตอบกลับ
   }
   L.polyline(latlngs, { weight: 5, dashArray: "8,8" }).addTo(routeLayer);
-  if (metricsEl) metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • แสดงเส้นเชื่อมแบบประมาณการ กด Google Maps เพื่อดูเส้นทางจริงและเวลาที่ดีที่สุด`;
+  if (metricsEl) metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • แสดงเส้นเชื่อมแบบประมาณการ กด Google Maps เพื่อดูเส้นทางจริงและเวลาที่ดีที่สุด • ระบบจำกัดแผนไม่เกิน ${MAX_DAILY_ROUTE_KM} กม./วัน`;
 }
 
 function parseSavedVisitDate(row) {
