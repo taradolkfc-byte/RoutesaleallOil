@@ -141,84 +141,133 @@
   </main>
 
   <main id="page2" class="app-page dashboard-page" hidden>
-  <section class="visit-dashboard" id="visitDashboardSection">
-    <div class="dashboard-head">
-      <div>
-        <h2>Dashboard การออกตลาดย้อนหลัง</h2>
-        <p>สรุปข้อมูลจากชีต “เก็บข้อมูล” ตามช่วงวันที่และ BU/สังกัดที่เลือก</p>
-      </div>
-      <div class="dashboard-controls">
-        <label>ดูย้อนหลัง
-          <select id="dashboardDays">
-            <option value="1">1 วันย้อนหลัง</option>
-            <option value="7" selected>7 วันย้อนหลัง</option>
-            <option value="15">15 วันย้อนหลัง</option>
-            <option value="30">30 วันย้อนหลัง</option>
-          </select>
-        </label>
-        <label>BU / สังกัด
-          <select id="dashboardBU">
-            <option value="">ทุก BU</option>
-            <option value="ST">สามทองบริการ</option>
-            <option value="KN">เค.ซี.ปิโตรเลียม2006</option>
-            <option value="MUK">เค.ซี.จี.ปิโตรเลียม</option>
-            <option value="WNN">เค.ซี. กรีน เอ็นเนอร์จี</option>
-          </select>
-        </label>
-      </div>
-    </div>
-
-    <div class="dashboard-main-layout">
-      <div class="dashboard-left-panel">
-        <h3>รายชื่อลูกค้าที่ออกตลาด</h3>
-        <p id="dashboardListNote">แสดงรายชื่อล่าสุดตามเงื่อนไขที่เลือก</p>
-        <div class="dashboard-table-wrap">
-          <table class="dashboard-table">
-            <thead>
-              <tr>
-                <th>ลำดับ</th>
-                <th>วันที่ออกตลาด</th>
-                <th>ชื่อลูกค้า/ชื่อปั๊ม</th>
-                <th>กลุ่มลูกค้า</th>
-                <th>สถานะเข้าพบ</th>
-              </tr>
-            </thead>
-            <tbody id="dashboardBody"><tr><td colspan="5" class="loading">กำลังโหลด Dashboard...</td></tr></tbody>
-          </table>
+    <section class="visit-dashboard dashboard-page-redesign" id="visitDashboardSection">
+      <div class="dashboard-head dashboard-head-wide">
+        <div>
+          <h2>Dashboard การออกตลาดย้อนหลัง</h2>
+          <p>สรุปข้อมูลจากชีต “เก็บข้อมูล” ตามช่วงวันที่และ BU/สังกัดที่เลือก</p>
+        </div>
+        <div class="dashboard-controls">
+          <label>ดูย้อนหลัง
+            <select id="dashboardDays">
+              <option value="1">1 วันย้อนหลัง</option>
+              <option value="7" selected>7 วันย้อนหลัง</option>
+              <option value="15">15 วันย้อนหลัง</option>
+              <option value="30">30 วันย้อนหลัง</option>
+            </select>
+          </label>
+          <label>BU / สังกัด
+            <select id="dashboardBU">
+              <option value="">ทุก BU</option>
+              <option value="ST">สามทองบริการ</option>
+              <option value="KN">เค.ซี.ปิโตรเลียม2006</option>
+              <option value="MUK">เค.ซี.จี.ปิโตรเลียม</option>
+              <option value="WNN">เค.ซี. กรีน เอ็นเนอร์จี</option>
+            </select>
+          </label>
         </div>
       </div>
 
-      <div class="dashboard-right-panel">
-        <div class="dashboard-grid">
-          <div class="dashboard-card total"><span>ไปทั้งหมด</span><strong id="dashTotal">0</strong><small>จุด</small></div>
-          <div class="dashboard-card success"><span>อัตราเข้าพบสำเร็จ</span><strong id="dashSuccess">0%</strong><small id="dashSuccessText">0/0 จุด</small></div>
-          <div class="dashboard-card"><span>ลูกค้าหาย</span><strong id="dashLost">0</strong><small>จุด</small></div>
-          <div class="dashboard-card"><span>ลูกค้าหายเกิน 60 วัน</span><strong id="dashDormant">0</strong><small>จุด</small></div>
-          <div class="dashboard-card"><span>ลูกค้าเสี่ยงหาย</span><strong id="dashRisky">0</strong><small>จุด</small></div>
-          <div class="dashboard-card"><span>ลูกค้าปัจจุบัน</span><strong id="dashActive">0</strong><small>จุด</small></div>
-          <div class="dashboard-card"><span>ลูกค้าใหม่</span><strong id="dashNew">0</strong><small>จุด</small></div>
-        </div>
+      <div class="dashboard-kpi-grid">
+        <div class="dashboard-card total"><span>ไปทั้งหมด</span><strong id="dashTotal">0</strong><small>จุด</small></div>
+        <div class="dashboard-card success"><span>อัตราเข้าพบสำเร็จ</span><strong id="dashSuccess">0%</strong><small id="dashSuccessText">0/0 จุด</small></div>
+        <div class="dashboard-card"><span>ออกเยี่ยมลูกค้า</span><strong id="dashJobVisit">0</strong><small>จุด</small></div>
+        <div class="dashboard-card"><span>ลูกค้าใหม่/มุ่งหวัง</span><strong id="dashJobLead">0</strong><small>จุด</small></div>
+        <div class="dashboard-card"><span>ปรับปรุงปั๊ม</span><strong id="dashJobPump">0</strong><small>จุด</small></div>
+        <div class="dashboard-card"><span>ซ่อม</span><strong id="dashJobRepair">0</strong><small>จุด</small></div>
+      </div>
 
-        <div class="dashboard-chart-grid">
-          <div class="chart-card">
-            <h3>สรุปตามกลุ่มลูกค้า</h3>
-            <div class="donut-wrap">
-              <div id="dashDonut" class="dashboard-donut"><span id="dashDonutCenter">0<br>จุด</span></div>
-              <div id="dashLegend" class="dashboard-legend"></div>
+      <div class="dashboard-board-grid">
+        <div class="chart-card dashboard-board-card">
+          <div class="board-title-row">
+            <div>
+              <h3>Dashboard 1 : สรุปตามประเภทงาน</h3>
+              <p>อ้างอิงประเภทงานจากการเช็คอิน / บันทึกลงชีต “เก็บข้อมูล”</p>
             </div>
           </div>
-          <div class="chart-card">
-            <h3>สรุปสถานะเข้าพบ</h3>
-            <div id="dashStatusBars" class="status-bars"></div>
+          <div class="dashboard-mini-cards job-mini-cards">
+            <div class="mini-card blue"><span>ออกเยี่ยมลูกค้า</span><strong id="dashJobVisitMini">0</strong><small>จุด</small></div>
+            <div class="mini-card green"><span>ลูกค้าใหม่/มุ่งหวัง</span><strong id="dashJobLeadMini">0</strong><small>จุด</small></div>
+            <div class="mini-card orange"><span>ปรับปรุงปั๊ม</span><strong id="dashJobPumpMini">0</strong><small>จุด</small></div>
+            <div class="mini-card red"><span>ซ่อม</span><strong id="dashJobRepairMini">0</strong><small>จุด</small></div>
+          </div>
+          <div class="dashboard-chart-grid two-charts">
+            <div class="chart-inner">
+              <h4>สัดส่วนประเภทงาน</h4>
+              <div class="donut-wrap compact">
+                <div id="dashJobDonut" class="dashboard-donut"><span id="dashJobDonutCenter">0<br>จุด</span></div>
+                <div id="dashJobLegend" class="dashboard-legend"></div>
+              </div>
+            </div>
+            <div class="chart-inner">
+              <h4>จำนวนตามประเภทงาน</h4>
+              <div id="dashJobBars" class="status-bars"></div>
+            </div>
           </div>
         </div>
 
-        <div class="dashboard-summary-strip" id="dashboardSummaryStrip">
-          แผนที่วางไว้ 0 จุด • เข้าพบสำเร็จ 0 จุด • อัตราสำเร็จ 0%
+        <div class="chart-card dashboard-board-card">
+          <div class="board-title-row">
+            <div>
+              <h3>Dashboard 2 : สรุปสถานะลูกค้า</h3>
+              <p>อ้างอิงสถานะจากข้อมูลลูกค้าที่ตรงกับรหัสลูกค้า / ชื่อลูกค้าที่บันทึก</p>
+            </div>
+          </div>
+          <div class="dashboard-mini-cards customer-mini-cards">
+            <div class="mini-card orange"><span>ลูกค้าหาย</span><strong id="dashLost">0</strong><small>จุด</small></div>
+            <div class="mini-card red"><span>ลูกค้าเสี่ยงหาย</span><strong id="dashRisky">0</strong><small>จุด</small></div>
+            <div class="mini-card green"><span>ลูกค้าปัจจุบัน</span><strong id="dashActive">0</strong><small>จุด</small></div>
+            <div class="mini-card blue"><span>ลูกค้าใหม่</span><strong id="dashNew">0</strong><small>จุด</small></div>
+            <div class="mini-card purple"><span>ลูกค้าหายเกิน60วัน</span><strong id="dashDormant">0</strong><small>จุด</small></div>
+          </div>
+          <div class="dashboard-chart-grid two-charts">
+            <div class="chart-inner">
+              <h4>สัดส่วนสถานะลูกค้า</h4>
+              <div class="donut-wrap compact">
+                <div id="dashDonut" class="dashboard-donut"><span id="dashDonutCenter">0<br>จุด</span></div>
+                <div id="dashLegend" class="dashboard-legend"></div>
+              </div>
+            </div>
+            <div class="chart-inner">
+              <h4>จำนวนตามสถานะลูกค้า</h4>
+              <div id="dashCustomerBars" class="status-bars"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="chart-card dashboard-board-card visit-status-card">
+          <h3>สรุปสถานะเข้าพบ</h3>
+          <p>ใช้ตรวจว่าเข้าพบสำเร็จ / ไม่พบลูกค้า / ปิดร้าน / เลิกกิจการ</p>
+          <div id="dashStatusBars" class="status-bars"></div>
         </div>
       </div>
-    </div>
-  </section>
+
+      <div class="dashboard-summary-strip" id="dashboardSummaryStrip">
+        แผนที่วางไว้ 0 จุด • เข้าพบสำเร็จ 0 จุด • อัตราสำเร็จ 0%
+      </div>
+
+      <div class="dashboard-list-bottom">
+        <div class="dashboard-left-panel dashboard-list-full">
+          <h3>รายชื่อลูกค้าที่ออกตลาด</h3>
+          <p id="dashboardListNote">แสดงรายชื่อล่าสุดตามเงื่อนไขที่เลือก</p>
+          <div class="dashboard-table-wrap">
+            <table class="dashboard-table">
+              <thead>
+                <tr>
+                  <th>ลำดับ</th>
+                  <th>วันที่ออกตลาด</th>
+                  <th>ชื่อลูกค้า/ชื่อปั๊ม</th>
+                  <th>ประเภทงาน</th>
+                  <th>สถานะลูกค้า</th>
+                  <th>สถานะเข้าพบ</th>
+                </tr>
+              </thead>
+              <tbody id="dashboardBody"><tr><td colspan="6" class="loading">กำลังโหลด Dashboard...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
 
   </main>
 
