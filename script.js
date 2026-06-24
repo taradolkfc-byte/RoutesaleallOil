@@ -546,21 +546,66 @@ function buildStatusLoopCandidates(start, valid) {
   });
 }
 
+
+function nearestEndpointRotation(start, route) {
+  if (!route || route.length <= 2) return route || [];
+  const variants = [];
+  [route, [...route].reverse()].forEach(base => {
+    for (let i = 0; i < base.length; i++) variants.push([...base.slice(i), ...base.slice(0, i)]);
+  });
+  return variants.sort((a, b) => {
+    const da = haversine(start, { lat: toNumber(a[0].lat), lng: toNumber(a[0].lng) }) +
+               haversine(start, { lat: toNumber(a[a.length - 1].lat), lng: toNumber(a[a.length - 1].lng) });
+    const db = haversine(start, { lat: toNumber(b[0].lat), lng: toNumber(b[0].lng) }) +
+               haversine(start, { lat: toNumber(b[b.length - 1].lat), lng: toNumber(b[b.length - 1].lng) });
+    return da - db;
+  })[0] || route;
+}
+
+function statusClosedLoopImprove(start, route) {
+  // ปรับวงปิดแบบ 2-opt แล้วหมุนหัวทางให้เชื่อมจากจุดเริ่มดีที่สุด
+  // ใช้เฉพาะ Dropdown เลือกสถานะ ไม่กระทบโหมดอื่น
+  if (!route || route.length < 4) return route || [];
+  let best = twoOptClosedRoute(start, route);
+  best = nearestEndpointRotation(start, best);
+  best = pullPointsThatAreOnTheWay(start, best);
+  best = twoOptClosedRoute(start, best);
+  best = nearestEndpointRotation(start, best);
+  return best;
+}
+
 function orderStatusFilterRoute(start, points) {
   // ใช้เฉพาะเมื่อเลือก Dropdown "เลือกสถานะ" ได้แก่
   // ลูกค้าหาย / ลูกค้าเสี่ยงหาย / ลูกค้าปัจจุบัน / ลูกค้าใหม่ / ลูกค้าหายเกิน60วัน
-  // เป้าหมาย: จัดลำดับแบบวงกลม ลดการย้อนกลับไปเก็บจุดย้อนหลัง และไม่แตะ MAP ของโหมดวางแผนอื่น
+  // เป้าหมาย: วางแผนเป็นวงกลมจริงขึ้น ลดเส้นตัดกัน ลดการวกกลับ และให้เลข 1,2,3,4 ไล่ไปตามทิศทางเดียว
   const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
   const noCoord = (points || []).filter(p => !validCoord(p));
   if (valid.length <= 2) return [...valid, ...noCoord];
 
   const candidates = buildStatusLoopCandidates(start, valid);
-  let best = (candidates.length ? candidates : [valid])
+
+  // เพิ่ม candidate จากวงปิดที่ปรับด้วย 2-opt หลายแบบ เพื่อกันเส้นวก/ตัดกัน
+  const extra = [];
+  for (const c of candidates) {
+    extra.push(statusClosedLoopImprove(start, c));
+  }
+  extra.push(statusClosedLoopImprove(start, nearestNeighborOrder(start, valid)));
+  extra.push(statusClosedLoopImprove(start, farthestInsertionOrder(start, valid)));
+  extra.push(statusClosedLoopImprove(start, circularSweepClosedOrder(start, valid)));
+
+  const allCandidates = [...candidates, ...extra].filter(r => r && r.length === valid.length);
+  const seen = new Set();
+  const unique = allCandidates.filter(route => {
+    const key = uniqueRouteCandidateKey(route);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  let best = (unique.length ? unique : [valid])
     .sort((a, b) => statusRouteScore(start, a) - statusRouteScore(start, b))[0] || valid;
 
-  // ปรับรอบสุดท้าย: ดึงจุดที่อยู่ระหว่างทางมาแวะก่อน เพื่อลดการวิ่งผ่านแล้วค่อยย้อนกลับมาเก็บ
-  best = pullPointsThatAreOnTheWay(start, best);
-
+  best = statusClosedLoopImprove(start, best);
   return [...best, ...noCoord];
 }
 function getUrgencyScore(urgency, dateObj) {
@@ -1579,10 +1624,13 @@ function buildNormalPlanRows(marketRows, planDays) {
   const output = [];
   groups.forEach((list, key) => {
     const [bu, meterKey] = key.split("|");
-    const maxItems = Math.min(list.length, planDays * MAX_STOPS_PER_DAY);
+    // ถ้าเลือก Dropdown "เลือกสถานะ" ให้ใช้ไม่เกิน 9 จุด/วัน ตั้งแต่ต้น
+    // เพื่อให้แผนที่, ตาราง, Google Maps เป็นชุดเดียวกันจริง ไม่ใช่คำนวณ 16 จุดแล้วตัดมาแสดงแค่ 9 จุดจนวงเสีย
+    const perDayLimit = hasMarketStatusFilterSelected() ? MAX_ROUTE_CUSTOMER_STOPS : MAX_STOPS_PER_DAY;
+    const maxItems = Math.min(list.length, planDays * perDayLimit);
     const usable = list.slice(0, maxItems);
     for (let dayIndex = 0; dayIndex < planDays; dayIndex++) {
-      const chunk = usable.slice(dayIndex * MAX_STOPS_PER_DAY, (dayIndex + 1) * MAX_STOPS_PER_DAY);
+      const chunk = usable.slice(dayIndex * perDayLimit, (dayIndex + 1) * perDayLimit);
       if (!chunk.length) continue;
       const planDate = addDaysTH(today, dayIndex);
       const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
