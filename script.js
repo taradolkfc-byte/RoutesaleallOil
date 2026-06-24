@@ -1,7 +1,7 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
 // URL Apps Script ของคุณ
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxu0zeUAfHU1YBI0KJRTFC97xRTsPvXPx8cbw-8iXKqzHomAy0T48reAcQouaS0Ob1A/exec";
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxLDIGniwUc2lNzG0ten-T4f7UMJ_RyA9dMYg1rphu9ZuVWicfiFOPpfdO_HyRNCTJ5/exec";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
@@ -2260,3 +2260,43 @@ document.getElementById("checkinBtn").addEventListener("click", checkInGps);
   }
 });
 loadData();
+
+/* ===== Page 1 / Page 2 Dashboard Navigation 20260624 ===== */
+function showAppPage(pageNumber) {
+  const page1 = document.getElementById("page1");
+  const page2 = document.getElementById("page2");
+  const btn1 = document.getElementById("btnPage1");
+  const btn2 = document.getElementById("btnPage2");
+
+  if (!page1 || !page2) return;
+
+  const showDashboard = Number(pageNumber) === 2;
+
+  page1.hidden = showDashboard;
+  page2.hidden = !showDashboard;
+
+  if (btn1) btn1.classList.toggle("active", !showDashboard);
+  if (btn2) btn2.classList.toggle("active", showDashboard);
+
+  if (showDashboard && typeof renderVisitDashboard === "function") {
+    renderVisitDashboard();
+  }
+
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function setupPageNavigation() {
+  const btn1 = document.getElementById("btnPage1");
+  const btn2 = document.getElementById("btnPage2");
+
+  if (btn1) btn1.addEventListener("click", () => showAppPage(1));
+  if (btn2) btn2.addEventListener("click", () => showAppPage(2));
+
+  // มือถือให้ใช้เฉพาะหน้า 1 เท่านั้น ไม่แสดงหน้า Dashboard
+  if (window.innerWidth <= 900) showAppPage(1);
+}
+
+setupPageNavigation();
+window.addEventListener("resize", () => {
+  if (window.innerWidth <= 900) showAppPage(1);
+});
