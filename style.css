@@ -464,3 +464,42 @@ tr:nth-child(even) td { background:#f9fafb; }
     display: grid !important;
   }
 }
+
+/* ===== Page 1 / Page 2 Dashboard Navigation 20260624 ===== */
+.page-tabs {
+  display:flex;
+  gap:10px;
+  margin:18px 18px 0;
+  padding:0;
+  align-items:center;
+}
+.page-tab {
+  background:#e5e7eb;
+  color:#0f172a;
+  border:1px solid #cbd5e1;
+  border-radius:12px;
+  padding:12px 18px;
+  font-weight:800;
+  box-shadow:0 2px 8px rgba(15,23,42,.06);
+}
+.page-tab.active {
+  background:#0b3b70;
+  color:#fff;
+  border-color:#0b3b70;
+}
+.app-page[hidden] {
+  display:none !important;
+}
+.dashboard-page .visit-dashboard {
+  margin-top:18px;
+}
+@media screen and (max-width:900px){
+  .desktop-only,
+  .page-tabs,
+  #page2 {
+    display:none !important;
+  }
+  #page1 {
+    display:block !important;
+  }
+}
