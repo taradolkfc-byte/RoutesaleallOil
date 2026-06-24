@@ -1823,6 +1823,16 @@ function isVisitSuccess(v) {
   return cleanText(v.visit_status) === "สำเร็จ";
 }
 
+function normalizeDashboardJobType(v) {
+  const s = cleanText(v);
+  if (!s) return "ไม่ระบุ";
+  if (s.includes("ใหม่") || s.includes("มุ่งหวัง")) return "ลูกค้าใหม่/มุ่งหวัง";
+  if (s.includes("ปรับปรุง")) return "ปรับปรุงปั๊ม";
+  if (s.includes("ซ่อม")) return "ซ่อม";
+  if (s.includes("เยี่ยม") || s.includes("ติดตาม")) return "ออกเยี่ยมลูกค้า";
+  return s;
+}
+
 function renderVisitDashboard() {
   const body = document.getElementById("dashboardBody");
   if (!body) return;
@@ -1836,94 +1846,140 @@ function renderVisitDashboard() {
     .map(normalizeSavedVisitRow)
     .filter(r => r.visitDate && r.visitDate >= start && r.visitDate <= today)
     .filter(r => !selectedBU || cleanText(r.bu).toUpperCase() === selectedBU)
+    .map(r => ({ ...r, jobTypeGroup: normalizeDashboardJobType(r.jobType) }))
     .sort((a, b) => b.visitDate - a.visitDate || cleanText(a.bu).localeCompare(cleanText(b.bu), "th"));
 
   const total = rows.length;
   const success = rows.filter(isVisitSuccess).length;
   const pct = total ? Math.round((success / total) * 100) : 0;
   const countGroup = (name) => rows.filter(r => r.customer_group === name).length;
+  const countJob = (name) => rows.filter(r => r.jobTypeGroup === name).length;
 
   const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
   setText("dashTotal", total);
   setText("dashSuccess", `${pct}%`);
   setText("dashSuccessText", `${success}/${total} จุด`);
+
+  // Dashboard 1: ประเภทงานจากชีตเก็บข้อมูล
+  const jobVisit = countJob("ออกเยี่ยมลูกค้า");
+  const jobLead = countJob("ลูกค้าใหม่/มุ่งหวัง");
+  const jobPump = countJob("ปรับปรุงปั๊ม");
+  const jobRepair = countJob("ซ่อม");
+  setText("dashJobVisit", jobVisit);
+  setText("dashJobLead", jobLead);
+  setText("dashJobPump", jobPump);
+  setText("dashJobRepair", jobRepair);
+  setText("dashJobVisitMini", jobVisit);
+  setText("dashJobLeadMini", jobLead);
+  setText("dashJobPumpMini", jobPump);
+  setText("dashJobRepairMini", jobRepair);
+
+  // Dashboard 2: สถานะลูกค้าจาก Master/พื้นที่เซลล์ที่ match กับชื่อลูกค้า/รหัสลูกค้า
   setText("dashLost", countGroup("ลูกค้าหาย"));
   setText("dashDormant", countGroup("ลูกค้าหายเกิน 60 วัน"));
   setText("dashRisky", countGroup("ลูกค้าเสี่ยงหาย"));
   setText("dashActive", countGroup("ลูกค้าปัจจุบัน"));
   setText("dashNew", countGroup("ลูกค้าใหม่"));
+
   renderVisitDashboardCharts(rows, { total, success, pct, days });
 
   const note = document.getElementById("dashboardListNote");
-  if (note) note.textContent = `แสดง ${Math.min(rows.length, 50)} รายการล่าสุด จากทั้งหมด ${rows.length} จุด`;
+  if (note) note.textContent = `แสดง ${Math.min(rows.length, 80)} รายการล่าสุด จากทั้งหมด ${rows.length} จุด`;
 
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="5" class="loading">ยังไม่พบข้อมูลการออกตลาดในช่วง ${days} วันย้อนหลัง</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="loading">ยังไม่พบข้อมูลการออกตลาดในช่วง ${days} วันย้อนหลัง</td></tr>`;
     return;
   }
-  body.innerHTML = rows.slice(0, 50).map((r, i) => `
+  body.innerHTML = rows.slice(0, 80).map((r, i) => `
     <tr>
       <td>${i + 1}</td>
       <td>${escapeHtml(r.visitDateLabel)}</td>
       <td><strong>${escapeHtml(r.customer_name) || "-"}</strong><br><small>${escapeHtml(r.buName)} ${escapeHtml(r.meter) || ""}</small></td>
+      <td><span class="badge ${dashboardJobClass(r.jobTypeGroup)}">${escapeHtml(r.jobTypeGroup || "-")}</span></td>
       <td><span class="badge ${dashboardGroupClass(r.customer_group)}">${escapeHtml(r.customer_group)}</span></td>
       <td><span class="visit-status-pill ${isVisitSuccess(r) ? "ok" : "warn"}">${escapeHtml(r.visit_status) || "-"}</span></td>
     </tr>`).join("");
 }
 
-function renderVisitDashboardCharts(rows, summary) {
-  const total = summary.total || 0;
-  const groupDefs = [
-    { key:"ลูกค้าหาย", label:"ลูกค้าหาย", color:"#f97316" },
-    { key:"ลูกค้าหายเกิน 60 วัน", label:"หายเกิน 60 วัน", color:"#ef4444" },
-    { key:"ลูกค้าเสี่ยงหาย", label:"เสี่ยงหาย", color:"#f59e0b" },
-    { key:"ลูกค้าปัจจุบัน", label:"ลูกค้าปัจจุบัน", color:"#16a34a" },
-    { key:"ลูกค้าใหม่", label:"ลูกค้าใหม่", color:"#2563eb" }
-  ];
-  const counts = groupDefs.map(g => ({ ...g, count: rows.filter(r => r.customer_group === g.key).length }));
-
-  const donut = document.getElementById("dashDonut");
-  const donutCenter = document.getElementById("dashDonutCenter");
-  const legend = document.getElementById("dashLegend");
+function setDashboardDonut(donutId, centerId, legendId, defs, total) {
+  const donut = document.getElementById(donutId);
+  const donutCenter = document.getElementById(centerId);
+  const legend = document.getElementById(legendId);
   if (donut) {
     if (!total) {
       donut.style.background = "#e5e7eb";
     } else {
       let cursor = 0;
-      const parts = counts.filter(c => c.count > 0).map(c => {
-        const start = cursor;
+      const parts = defs.filter(c => c.count > 0).map(c => {
+        const startDeg = cursor;
         const deg = (c.count / total) * 360;
         cursor += deg;
-        return `${c.color} ${start}deg ${cursor}deg`;
+        return `${c.color} ${startDeg}deg ${cursor}deg`;
       });
       donut.style.background = `conic-gradient(${parts.join(",") || "#e5e7eb 0deg 360deg"})`;
     }
   }
   if (donutCenter) donutCenter.innerHTML = `${total}<br><small>จุด</small>`;
   if (legend) {
-    legend.innerHTML = counts.map(c => {
+    legend.innerHTML = defs.map(c => {
       const pct = total ? Math.round((c.count / total) * 100) : 0;
       return `<div class="legend-row"><span class="legend-dot" style="background:${c.color}"></span><span>${escapeHtml(c.label)}</span><strong>${c.count} จุด (${pct}%)</strong></div>`;
     }).join("");
   }
+}
 
-  const statusBars = document.getElementById("dashStatusBars");
-  if (statusBars) {
-    const statusMap = new Map();
-    rows.forEach(r => {
-      const st = cleanText(r.visit_status || "ไม่ระบุ") || "ไม่ระบุ";
-      statusMap.set(st, (statusMap.get(st) || 0) + 1);
-    });
-    const statusRows = Array.from(statusMap.entries()).sort((a,b)=>b[1]-a[1]);
-    const max = Math.max(1, ...statusRows.map(x => x[1]));
-    statusBars.innerHTML = (statusRows.length ? statusRows : [["ไม่มีข้อมูล",0]]).map(([label, count]) => {
-      const pct = Math.round((count / max) * 100);
-      return `<div class="bar-row"><div class="bar-label"><span>${escapeHtml(label)}</span><strong>${count} จุด</strong></div><div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div></div>`;
-    }).join("");
-  }
+function setDashboardBars(containerId, rows, totalForPct = null) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  const max = Math.max(1, ...rows.map(x => x.count));
+  el.innerHTML = (rows.length ? rows : [{ label:"ไม่มีข้อมูล", count:0, color:"#94a3b8" }]).map(item => {
+    const width = Math.round((item.count / max) * 100);
+    const pct = totalForPct ? ` (${Math.round((item.count / totalForPct) * 100)}%)` : "";
+    return `<div class="bar-row"><div class="bar-label"><span>${escapeHtml(item.label)}</span><strong>${item.count} จุด${pct}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${width}%;background:${item.color || ""}"></div></div></div>`;
+  }).join("");
+}
+
+function renderVisitDashboardCharts(rows, summary) {
+  const total = summary.total || 0;
+  const jobDefs = [
+    { key:"ออกเยี่ยมลูกค้า", label:"ออกเยี่ยมลูกค้า", color:"#2563eb" },
+    { key:"ลูกค้าใหม่/มุ่งหวัง", label:"ลูกค้าใหม่/มุ่งหวัง", color:"#16a34a" },
+    { key:"ปรับปรุงปั๊ม", label:"ปรับปรุงปั๊ม", color:"#f97316" },
+    { key:"ซ่อม", label:"ซ่อม", color:"#ef4444" }
+  ].map(g => ({ ...g, count: rows.filter(r => r.jobTypeGroup === g.key).length }));
+
+  const customerDefs = [
+    { key:"ลูกค้าหาย", label:"ลูกค้าหาย", color:"#f97316" },
+    { key:"ลูกค้าหายเกิน 60 วัน", label:"หายเกิน 60 วัน", color:"#7c3aed" },
+    { key:"ลูกค้าเสี่ยงหาย", label:"เสี่ยงหาย", color:"#ef4444" },
+    { key:"ลูกค้าปัจจุบัน", label:"ลูกค้าปัจจุบัน", color:"#16a34a" },
+    { key:"ลูกค้าใหม่", label:"ลูกค้าใหม่", color:"#2563eb" }
+  ].map(g => ({ ...g, count: rows.filter(r => r.customer_group === g.key).length }));
+
+  setDashboardDonut("dashJobDonut", "dashJobDonutCenter", "dashJobLegend", jobDefs, total);
+  setDashboardBars("dashJobBars", jobDefs, total);
+
+  setDashboardDonut("dashDonut", "dashDonutCenter", "dashLegend", customerDefs, total);
+  setDashboardBars("dashCustomerBars", customerDefs, total);
+
+  const statusMap = new Map();
+  rows.forEach(r => {
+    const st = cleanText(r.visit_status || "ไม่ระบุ") || "ไม่ระบุ";
+    statusMap.set(st, (statusMap.get(st) || 0) + 1);
+  });
+  const statusRows = Array.from(statusMap.entries()).sort((a,b)=>b[1]-a[1]).map(([label, count]) => ({ label, count, color: label === "สำเร็จ" ? "#16a34a" : "#f97316" }));
+  setDashboardBars("dashStatusBars", statusRows, total);
 
   const strip = document.getElementById("dashboardSummaryStrip");
   if (strip) strip.textContent = `แผนที่วางไว้ ${total} จุด • เข้าพบสำเร็จ ${summary.success || 0} จุด • อัตราสำเร็จ ${summary.pct || 0}% • เฉลี่ย ${(total / Math.max(1, summary.days || 1)).toFixed(1)} จุด/วัน`;
+}
+
+function dashboardJobClass(job) {
+  if (job === "ซ่อม") return "p2";
+  if (job === "ปรับปรุงปั๊ม") return "p3";
+  if (job === "ลูกค้าใหม่/มุ่งหวัง") return "p4";
+  if (job === "ออกเยี่ยมลูกค้า") return "p4";
+  return "p4";
 }
 
 function dashboardGroupClass(group) {
@@ -2261,42 +2317,22 @@ document.getElementById("checkinBtn").addEventListener("click", checkInGps);
 });
 loadData();
 
-/* ===== Page 1 / Page 2 Dashboard Navigation 20260624 ===== */
-function showAppPage(pageNumber) {
+/* ===== Page switch: Page 1 planning / Page 2 dashboard ===== */
+function showAppPage(pageNo) {
   const page1 = document.getElementById("page1");
   const page2 = document.getElementById("page2");
   const btn1 = document.getElementById("btnPage1");
   const btn2 = document.getElementById("btnPage2");
+  const isPage2 = Number(pageNo) === 2;
 
-  if (!page1 || !page2) return;
+  if (page1) page1.hidden = isPage2;
+  if (page2) page2.hidden = !isPage2;
+  if (btn1) btn1.classList.toggle("active", !isPage2);
+  if (btn2) btn2.classList.toggle("active", isPage2);
 
-  const showDashboard = Number(pageNumber) === 2;
-
-  page1.hidden = showDashboard;
-  page2.hidden = !showDashboard;
-
-  if (btn1) btn1.classList.toggle("active", !showDashboard);
-  if (btn2) btn2.classList.toggle("active", showDashboard);
-
-  if (showDashboard && typeof renderVisitDashboard === "function") {
-    renderVisitDashboard();
-  }
-
-  window.scrollTo({ top: 0, behavior: "smooth" });
+  if (isPage2) renderVisitDashboard();
+  if (!isPage2 && routeMap) setTimeout(() => routeMap.invalidateSize(), 150);
 }
 
-function setupPageNavigation() {
-  const btn1 = document.getElementById("btnPage1");
-  const btn2 = document.getElementById("btnPage2");
-
-  if (btn1) btn1.addEventListener("click", () => showAppPage(1));
-  if (btn2) btn2.addEventListener("click", () => showAppPage(2));
-
-  // มือถือให้ใช้เฉพาะหน้า 1 เท่านั้น ไม่แสดงหน้า Dashboard
-  if (window.innerWidth <= 900) showAppPage(1);
-}
-
-setupPageNavigation();
-window.addEventListener("resize", () => {
-  if (window.innerWidth <= 900) showAppPage(1);
-});
+if (document.getElementById("btnPage1")) document.getElementById("btnPage1").addEventListener("click", () => showAppPage(1));
+if (document.getElementById("btnPage2")) document.getElementById("btnPage2").addEventListener("click", () => showAppPage(2));
