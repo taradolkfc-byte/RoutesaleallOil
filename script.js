@@ -100,32 +100,83 @@ async function fetchSheetByIndex(sheetName, optional = false) {
 
 // ===== Robust dashboard saved-sheet reader =====
 // ใช้สำหรับ Dashboard ย้อนหลังโดยเฉพาะ เพื่ออ่านชีต "เก็บข้อมูล" ให้ตรงคอลัมน์จริง
-// รองรับทั้งการอ่านด้วยชื่อชีต และ fallback ด้วย gid ของชีตเก็บข้อมูล
+// สาเหตุที่ Dashboard ไม่ขึ้น: Google Visualization API มักส่ง "หัวตาราง" อยู่ใน json.table.cols
+// ไม่ได้ส่งหัวตารางเป็นแถวแรก ถ้าใช้ rows.slice(1) จะตัดข้อมูลแถวแรกทิ้ง ทำให้มีข้อมูลในชีตแต่ Dashboard เป็น 0
+const SAVED_EXPECTED_HEADERS = [
+  "วันที่บันทึกระบบ",
+  "วันที่ออกตลาด",
+  "ประเภทงาน",
+  "รหัสลูกค้า",
+  "ชื่อลูกค้า/ชื่อปั๊ม",
+  "BU/สังกัด",
+  "สายมิเตอร์",
+  "พื้นที่",
+  "ผู้ประสานงาน",
+  "เบอร์โทร",
+  "ละติจูด",
+  "ลองจิจูด",
+  "หมายเหตุ",
+  "สถานะเข้าพบ"
+];
+
+function gvizCellValue(c) {
+  if (!c) return "";
+  if (c.f !== undefined && c.f !== null && cleanText(c.f) !== "") return c.f;
+  if (c.v !== undefined && c.v !== null) return c.v;
+  return "";
+}
+
+function isLikelySavedHeaderRow(row) {
+  const text = (row || []).map(normalizeHeaderNameForSaved).join("|");
+  return text.includes(normalizeHeaderNameForSaved("วันที่บันทึกระบบ")) ||
+         text.includes(normalizeHeaderNameForSaved("วันที่ออกตลาด")) ||
+         text.includes(normalizeHeaderNameForSaved("ประเภทงาน"));
+}
+
+function parseSavedGvizTable(json) {
+  const cols = ((json && json.table && json.table.cols) || []);
+  const gvizHeaders = cols.map(c => cleanText(c.label || c.id || ""));
+  const hasRealHeaders = gvizHeaders.some(h => normalizeHeaderNameForSaved(h) === normalizeHeaderNameForSaved("วันที่บันทึกระบบ")) ||
+                         gvizHeaders.some(h => normalizeHeaderNameForSaved(h) === normalizeHeaderNameForSaved("ประเภทงาน"));
+  const headers = hasRealHeaders ? gvizHeaders : SAVED_EXPECTED_HEADERS;
+
+  let rows = (((json && json.table && json.table.rows) || [])).map(r => {
+    const values = (r.c || []).map(gvizCellValue);
+    while (values.length < headers.length) values.push("");
+    return values;
+  }).filter(r => r.some(v => cleanText(v) !== ""));
+
+  // กันกรณี Google ส่งหัวตารางติดมาใน rows ด้วย
+  if (rows.length && isLikelySavedHeaderRow(rows[0])) rows = rows.slice(1);
+
+  return [headers, ...rows];
+}
+
+async function fetchSavedGvizByQuery(queryPart) {
+  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&${queryPart}&headers=1&cachebust=${Date.now()}`;
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error(`โหลดชีตเก็บข้อมูลไม่ได้ (${res.status})`);
+  const text = await res.text();
+  const jsonText = text.substring(text.indexOf("{"), text.lastIndexOf("}") + 1);
+  const json = JSON.parse(jsonText);
+  return parseSavedGvizTable(json);
+}
+
 async function fetchSavedSheetRowsRobust() {
-  // อ่านชีต “เก็บข้อมูล” สำหรับ Dashboard ย้อนหลัง
-  // สำคัญ: ห้ามเรียกฟังก์ชันตัวเอง ไม่เช่นนั้นจะวนซ้ำและ Dashboard จะไม่แสดงข้อมูล
-  let rows = [];
-
-  // วิธีหลัก: อ่านด้วยชื่อชีต
+  // วิธีหลัก: อ่านด้วยชื่อชีต "เก็บข้อมูล"
   try {
-    rows = await fetchSheetByIndex(SHEET_NAMES.saved, true);
-  } catch (err) {
-    rows = [];
-  }
-  if (rows && rows.length > 1) return rows;
+    const rows = await fetchSavedGvizByQuery(`sheet=${encodeURIComponent(SHEET_NAMES.saved)}`);
+    if (rows && rows.length > 1) return rows;
+  } catch (err) {}
 
-  // วิธีสำรอง: อ่านด้วย gid ของชีต “เก็บข้อมูล”
+  // วิธีสำรอง: อ่านด้วย gid ของชีต “เก็บข้อมูล” ตาม URL ที่ใช้งานจริง
   try {
-    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&gid=352387367&cachebust=${Date.now()}`;
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) return rows || [];
-    const text = await res.text();
-    const jsonText = text.substring(text.indexOf("{"), text.lastIndexOf("}") + 1);
-    const json = JSON.parse(jsonText);
-    return json.table.rows.map(r => (r.c || []).map(c => c ? (c.f || c.v || "") : ""));
-  } catch (err) {
-    return rows || [];
-  }
+    const rows = await fetchSavedGvizByQuery(`gid=352387367`);
+    if (rows && rows.length > 1) return rows;
+  } catch (err) {}
+
+  // คืนหัวตารางไว้ก่อน เพื่อให้ Dashboard ไม่ error แม้ยังไม่มีข้อมูล
+  return [SAVED_EXPECTED_HEADERS];
 }
 
 function normalizeHeaderNameForSaved(v) {
