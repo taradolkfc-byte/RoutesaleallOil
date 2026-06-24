@@ -1,7 +1,7 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
 // URL Apps Script ของคุณ
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxu0zeUAfHU1YBI0KJRTFC97xRTsPvXPx8cbw-8iXKqzHomAy0T48reAcQouaS0Ob1A/exec";
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxLDIGniwUc2lNzG0ten-T4f7UMJ_RyA9dMYg1rphu9ZuVWicfiFOPpfdO_HyRNCTJ5/exec";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
@@ -102,15 +102,19 @@ async function fetchSheetByIndex(sheetName, optional = false) {
 // ใช้สำหรับ Dashboard ย้อนหลังโดยเฉพาะ เพื่ออ่านชีต "เก็บข้อมูล" ให้ตรงคอลัมน์จริง
 // รองรับทั้งการอ่านด้วยชื่อชีต และ fallback ด้วย gid ของชีตเก็บข้อมูล
 async function fetchSavedSheetRowsRobust() {
+  // อ่านชีต “เก็บข้อมูล” สำหรับ Dashboard ย้อนหลัง
+  // สำคัญ: ห้ามเรียกฟังก์ชันตัวเอง ไม่เช่นนั้นจะวนซ้ำและ Dashboard จะไม่แสดงข้อมูล
   let rows = [];
+
+  // วิธีหลัก: อ่านด้วยชื่อชีต
   try {
-    rows = await fetchSavedSheetRowsRobust();
+    rows = await fetchSheetByIndex(SHEET_NAMES.saved, true);
   } catch (err) {
     rows = [];
   }
   if (rows && rows.length > 1) return rows;
 
-  // fallback จาก gid ตาม URL ชีตเก็บข้อมูลที่ใช้งานจริง
+  // วิธีสำรอง: อ่านด้วย gid ของชีต “เก็บข้อมูล”
   try {
     const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&gid=352387367&cachebust=${Date.now()}`;
     const res = await fetch(url, { cache: "no-store" });
@@ -124,20 +128,30 @@ async function fetchSavedSheetRowsRobust() {
   }
 }
 
+function normalizeHeaderNameForSaved(v) {
+  return cleanText(v).replace(/[\s\u200B\u00A0]+/g, "").replace(/[“”"']/g, "");
+}
+
 function buildSavedHeaderMap(rows) {
   const header = (rows && rows[0]) ? rows[0] : [];
   const map = {};
   header.forEach((h, i) => {
     const key = cleanText(h);
+    const normalizedKey = normalizeHeaderNameForSaved(h);
     if (key) map[key] = i;
+    if (normalizedKey) map[normalizedKey] = i;
   });
   return map;
 }
 
 function savedCell(row, headerName, fallbackIndex) {
-  const idx = savedHeaderMap && Object.prototype.hasOwnProperty.call(savedHeaderMap, headerName)
-    ? savedHeaderMap[headerName]
-    : fallbackIndex;
+  const direct = headerName;
+  const normalized = normalizeHeaderNameForSaved(headerName);
+  const idx = savedHeaderMap && Object.prototype.hasOwnProperty.call(savedHeaderMap, direct)
+    ? savedHeaderMap[direct]
+    : (savedHeaderMap && Object.prototype.hasOwnProperty.call(savedHeaderMap, normalized)
+      ? savedHeaderMap[normalized]
+      : fallbackIndex);
   return cell(row, idx);
 }
 
@@ -421,7 +435,7 @@ function buildVisitedSet(savedRows) {
 
     // โครงสร้างชีตใหม่: 0 วันที่บันทึก, 1 วันที่ออกตลาด, 2 ประเภท, 3 รหัส, 4 ชื่อ, ... 14 สถานะเข้าพบ
     // ถ้าเป็นข้อมูลเก่าไม่มีคอลัมน์สถานะ ให้ถือว่า “สำเร็จ” เพื่อไม่ให้จุดเก่ากลับมาในแผน
-    const visitStatus = cleanText(cell(r, 14) || cell(r, 15) || "สำเร็จ");
+    const visitStatus = cleanText(savedCell(r, "สถานะเข้าพบ", 13) || "สำเร็จ");
     if (visitStatus && visitStatus !== "สำเร็จ") return;
 
     const idCandidates = [cell(r, 3), cell(r, 2)];
