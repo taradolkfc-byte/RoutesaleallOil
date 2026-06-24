@@ -83,6 +83,28 @@ function toNumber(v) {
 }
 function validCoord(row) { return toNumber(row.lat) !== null && toNumber(row.lng) !== null; }
 
+function headerMap_(rows) {
+  const header = Array.isArray(rows) && rows.length ? rows[0] : [];
+  const map = {};
+  header.forEach((h, i) => {
+    const k = norm(h);
+    if (k) map[k] = i;
+  });
+  return map;
+}
+
+function cellByHeaders_(row, map, names, fallbackIndex) {
+  for (const name of names) {
+    const idx = map[norm(name)];
+    if (idx !== undefined) {
+      const v = cell(row, idx);
+      if (cleanText(v) !== '') return v;
+    }
+  }
+  return fallbackIndex === undefined ? '' : cell(row, fallbackIndex);
+}
+
+
 async function fetchSheetByIndex(sheetName, optional = false) {
   const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}&cachebust=${Date.now()}`;
   const res = await fetch(url, { cache: "no-store" });
@@ -521,33 +543,55 @@ function isRepairOpenStatus(status) {
 }
 
 function normalizeRepair(rows) {
+  const hmap = headerMap_(rows);
+
   return rows.slice(1)
     // กันแถวว่าง แต่ไม่ตัดงานซ่อมที่สถานะว่าง เพราะเงื่อนไขคือ ตัดเฉพาะ "แล้วเสร็จ" เท่านั้น
-    .filter(r => cleanText(cell(r,1)) || cleanText(cell(r,8)) || cleanText(cell(r,11)) || cleanText(cell(r,12)))
-    .filter(r => isRepairOpenStatus(cell(r,10)))
+    // อ่านตามชื่อหัวคอลัมน์ก่อน เพื่อป้องกันคอลัมน์เลื่อน/เพิ่มช่องว่างแล้วข้อมูลบางแถวหาย
+    .filter(r => {
+      const customerName = cellByHeaders_(r, hmap, ["ชื่อปั๊ม", "ชื่อลูกค้า/ชื่อปั๊ม", "ชื่อลูกค้า"], 1);
+      const apptDate = cellByHeaders_(r, hmap, ["วันที่นัดหมาย", "วันที่ต้องเข้า", "วันที่เข้าซ่อม"], 8);
+      const lat = cellByHeaders_(r, hmap, ["ละ", "ละติจูด", "lat", "latitude"], 11);
+      const lng = cellByHeaders_(r, hmap, ["ลอง", "ลองจิจูด", "lng", "long", "longitude"], 12);
+      return cleanText(customerName) || cleanText(apptDate) || cleanText(lat) || cleanText(lng);
+    })
+    .filter(r => {
+      const status = cellByHeaders_(r, hmap, ["สถานะ", "สถานะซ่อม"], 10);
+      return isRepairOpenStatus(status);
+    })
     .map((r, repairRowIndex) => {
-      const dateObj = parseDateTH(cell(r,8));
-      const meterRaw = cell(r,2);
-      const customerName = cell(r,1);
+      const customerName = cellByHeaders_(r, hmap, ["ชื่อปั๊ม", "ชื่อลูกค้า/ชื่อปั๊ม", "ชื่อลูกค้า"], 1);
+      const meterRaw = cellByHeaders_(r, hmap, ["สายมิเตอร์", "มิเตอร์", "สาย"], 2);
+      const area = cellByHeaders_(r, hmap, ["เขตพื้นที่", "พื้นที่", "ตำบล/อำเภอ/จังหวัด"], 3);
+      const repairWork = cellByHeaders_(r, hmap, ["ซ่อมบำรุง", "รายการซ่อม", "งานซ่อม"], 4);
+      const coordinator = cellByHeaders_(r, hmap, ["ผู้ประสานงาน", "ผู้ติดต่อ"], 6);
+      const phone = cellByHeaders_(r, hmap, ["เบอร์โทร", "โทร", "โทรศัพท์"], 7);
+      const apptRaw = cellByHeaders_(r, hmap, ["วันที่นัดหมาย", "วันที่ต้องเข้า", "วันที่เข้าซ่อม"], 8);
+      const urgency = cellByHeaders_(r, hmap, ["ความเร่งด่วน", "เร่งด่วน"], 9);
+      const status = cellByHeaders_(r, hmap, ["สถานะ", "สถานะซ่อม"], 10);
+      const lat = cellByHeaders_(r, hmap, ["ละ", "ละติจูด", "lat", "latitude"], 11);
+      const lng = cellByHeaders_(r, hmap, ["ลอง", "ลองจิจูด", "lng", "long", "longitude"], 12);
+      const dateObj = parseDateTH(apptRaw);
+
       return {
         sourceRank: 2,
-        priority: 200 + getUrgencyScore(cell(r,9), dateObj),
-        priorityLabel: cell(r,9) || "ซ่อม",
+        priority: 200 + getUrgencyScore(urgency, dateObj),
+        priorityLabel: urgency || "ซ่อม",
         type: "ซ่อม",
-        dateRaw: cell(r,8),
+        dateRaw: apptRaw,
         dateObj,
         customer_id: "",
         customer_name: customerName,
-        status: cell(r,10) || "ยังไม่เข้าซ่อม",
-        bu: inferBUFromAnyText(customerName, cell(r,3), cell(r,6), meterRaw),
+        status: status || "ยังไม่เข้าซ่อม",
+        bu: inferBUFromAnyText(customerName, area, coordinator, meterRaw),
         meter: meterRaw,
         meterKey: normalizeMeter(meterRaw),
-        area: cell(r,3),
-        purpose: cell(r,4),
-        coordinator: cell(r,6),
-        phone: cell(r,7),
-        lat: cell(r,11),
-        lng: cell(r,12),
+        area,
+        purpose: repairWork,
+        coordinator,
+        phone,
+        lat,
+        lng,
         sales_litre: "",
         route_group: "",
         stop_no: "",
@@ -1505,7 +1549,8 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
   // ถ้าเลือกจุดเริ่ม จะกรองเฉพาะ BU ของจุดเริ่มนั้น เช่น สามทองบริการ = ST
   // 1 งานซ่อม = 1 แผน เพื่อให้ไม่ถูกตัดเหลือแค่รายการเดียว แม้อยู่ BU/สายเดียวกัน
   let candidates = repairRows
-    .filter(validCoord)
+    // ห้ามกรองด้วยพิกัดในขั้นนี้: งานซ่อมบางแถวมีวันที่/สถานะถูกต้องแต่พิกัดยังไม่ครบ
+    // ต้องแสดงในการ์ดและตารางก่อน ส่วนแผนที่/Google Maps จะใช้เฉพาะจุดที่มีพิกัด
     .filter(r => inCurrentThaiMonth(r.dateObj))
     .map(r => {
       const nearest = nearestStartPointForRow(r);
