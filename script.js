@@ -1,7 +1,7 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
 // URL Apps Script ของคุณ
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxu0zeUAfHU1YBI0KJRTFC97xRTsPvXPx8cbw-8iXKqzHomAy0T48reAcQouaS0Ob1A/exec";
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxLDIGniwUc2lNzG0ten-T4f7UMJ_RyA9dMYg1rphu9ZuVWicfiFOPpfdO_HyRNCTJ5/exec";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
@@ -72,6 +72,7 @@ let routeLayer = null;
 let visitedSet = { ids: new Set(), names: new Set() };
 let customerMasterRows = [];
 let savedVisitRowsRaw = [];
+let savedHeaderMap = {};
 
 function cleanText(v) { return String(v ?? "").trim(); }
 function norm(v) { return cleanText(v).toLowerCase().replace(/\s+/g, " "); }
@@ -93,6 +94,51 @@ async function fetchSheetByIndex(sheetName, optional = false) {
   const jsonText = text.substring(text.indexOf("{"), text.lastIndexOf("}") + 1);
   const json = JSON.parse(jsonText);
   return json.table.rows.map(r => (r.c || []).map(c => c ? (c.f || c.v || "") : ""));
+}
+
+
+
+// ===== Robust dashboard saved-sheet reader =====
+// ใช้สำหรับ Dashboard ย้อนหลังโดยเฉพาะ เพื่ออ่านชีต "เก็บข้อมูล" ให้ตรงคอลัมน์จริง
+// รองรับทั้งการอ่านด้วยชื่อชีต และ fallback ด้วย gid ของชีตเก็บข้อมูล
+async function fetchSavedSheetRowsRobust() {
+  let rows = [];
+  try {
+    rows = await fetchSavedSheetRowsRobust();
+  } catch (err) {
+    rows = [];
+  }
+  if (rows && rows.length > 1) return rows;
+
+  // fallback จาก gid ตาม URL ชีตเก็บข้อมูลที่ใช้งานจริง
+  try {
+    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&gid=352387367&cachebust=${Date.now()}`;
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) return rows || [];
+    const text = await res.text();
+    const jsonText = text.substring(text.indexOf("{"), text.lastIndexOf("}") + 1);
+    const json = JSON.parse(jsonText);
+    return json.table.rows.map(r => (r.c || []).map(c => c ? (c.f || c.v || "") : ""));
+  } catch (err) {
+    return rows || [];
+  }
+}
+
+function buildSavedHeaderMap(rows) {
+  const header = (rows && rows[0]) ? rows[0] : [];
+  const map = {};
+  header.forEach((h, i) => {
+    const key = cleanText(h);
+    if (key) map[key] = i;
+  });
+  return map;
+}
+
+function savedCell(row, headerName, fallbackIndex) {
+  const idx = savedHeaderMap && Object.prototype.hasOwnProperty.call(savedHeaderMap, headerName)
+    ? savedHeaderMap[headerName]
+    : fallbackIndex;
+  return cell(row, idx);
 }
 
 function parseDateTH(value) {
@@ -1437,9 +1483,10 @@ async function loadData() {
       fetchSheetByIndex(SHEET_NAMES.repair),
       fetchSheetByIndex(SHEET_NAMES.market),
       fetchSheetByIndex(SHEET_NAMES.sales),
-      fetchSheetByIndex(SHEET_NAMES.saved, true)
+      fetchSavedSheetRowsRobust()
     ]);
     savedVisitRowsRaw = savedRows || [];
+    savedHeaderMap = buildSavedHeaderMap(savedVisitRowsRaw);
     visitedSet = buildVisitedSet(savedRows);
 
     const pumpRows = normalizePump(pumpRowsRaw);
@@ -1757,26 +1804,53 @@ async function renderMap(list) {
 function parseSavedVisitDate(row) {
   const parseAny = (v) => {
     const txt = cleanText(v);
-    const iso = txt.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (!txt) return null;
+
+    // Google Visualization บางครั้งส่ง Date(yyyy,m,d,...)
+    const gviz = txt.match(/Date\((\d+),(\d+),(\d+)(?:,(\d+),(\d+),(\d+))?/);
+    if (gviz) {
+      return new Date(
+        Number(gviz[1]),
+        Number(gviz[2]),
+        Number(gviz[3]),
+        Number(gviz[4] || 0),
+        Number(gviz[5] || 0),
+        Number(gviz[6] || 0)
+      );
+    }
+
+    // รูปแบบ 2026-06-24 หรือ 2026/06/24
+    const iso = txt.match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);
     if (iso) return new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+
+    // รูปแบบ 24/6/2026, 9:44:45 หรือ 24/6/2569
+    const dmy = txt.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})/);
+    if (dmy) {
+      let y = Number(dmy[3]);
+      if (y < 100) y += 2500;
+      if (y > 2400) y -= 543;
+      return new Date(y, Number(dmy[2]) - 1, Number(dmy[1]));
+    }
+
     return parseDateTH(txt);
   };
-  return parseAny(cell(row, 1)) || parseAny(cell(row, 0));
+
+  return parseAny(savedCell(row, "วันที่ออกตลาด", 1)) || parseAny(savedCell(row, "วันที่บันทึกระบบ", 0));
 }
 
 function savedVisitBU(row) {
-  const raw = cleanText(cell(row, 5));
+  const raw = cleanText(savedCell(row, "BU/สังกัด", 5));
   const upper = raw.toUpperCase();
   if (upper === "ST" || raw.includes("สามทอง")) return "ST";
   if (upper === "KN" || raw.includes("เค.ซี.ปิโตรเลียม2006")) return "KN";
   if (upper === "MUK" || upper === "KCG" || raw.includes("เค.ซี.จี")) return "MUK";
   if (upper === "WNN" || raw.includes("กรีน")) return "WNN";
-  return inferBUFromAnyText(raw, cell(row, 3), cell(row, 4));
+  return inferBUFromAnyText(raw, savedCell(row, "รหัสลูกค้า", 3), savedCell(row, "ชื่อลูกค้า/ชื่อปั๊ม", 4));
 }
 
 function findMasterForSavedVisit(row) {
-  const id = norm(cell(row, 3));
-  const name = norm(cell(row, 4));
+  const id = norm(savedCell(row, "รหัสลูกค้า", 3));
+  const name = norm(savedCell(row, "ชื่อลูกค้า/ชื่อปั๊ม", 4));
   if (id) {
     const hit = customerMasterRows.find(c => norm(c.customer_id) === id);
     if (hit) return hit;
@@ -1784,7 +1858,7 @@ function findMasterForSavedVisit(row) {
   if (name) {
     const exact = customerMasterRows.find(c => norm(c.customer_name) === name);
     if (exact) return exact;
-    const compact = compactCustomerName(cell(row, 4));
+    const compact = compactCustomerName(savedCell(row, "ชื่อลูกค้า/ชื่อปั๊ม", 4));
     const compactHit = customerMasterRows.find(c => compactCustomerName(c.customer_name) === compact && compact.length >= 4);
     if (compactHit) return compactHit;
   }
@@ -1793,11 +1867,17 @@ function findMasterForSavedVisit(row) {
 
 function visitDashboardGroup(row) {
   const master = findMasterForSavedVisit(row);
-  const status = master ? master.status : cleanText(cell(row, 14) || cell(row, 2));
+
+  // สถานะลูกค้า ต้องอ้างอิงจากรายชื่อลูกค้าใน Master/พื้นที่เซลล์ออกตลาดก่อน
+  // ถ้าเป็นลูกค้าที่กรอกเองและไม่มีใน Master ให้ fallback จากข้อมูลที่บันทึกไว้เท่านั้น
+  const status = master ? master.status : cleanText(savedCell(row, "สถานะลูกค้า", 14) || savedCell(row, "กลุ่มลูกค้า", 14));
   const group = statusGroup(status);
+
   if (group === "ลูกค้าซื้อขายประจำ") return "ลูกค้าปัจจุบัน";
   if (group === "ลูกค้าใหม่/Winback") return "ลูกค้าใหม่";
-  return group;
+  if (group && group !== "ไม่ระบุ") return group;
+
+  return "ไม่ระบุ";
 }
 
 function normalizeSavedVisitRow(row) {
@@ -1807,14 +1887,14 @@ function normalizeSavedVisitRow(row) {
   return {
     visitDate,
     visitDateLabel: visitDate ? visitDate.toLocaleDateString("th-TH", { day:"numeric", month:"short", year:"2-digit" }) : "-",
-    jobType: cleanText(cell(row, 2)),
-    customer_id: cleanText(cell(row, 3) || master.customer_id),
-    customer_name: cleanText(cell(row, 4) || master.customer_name),
+    jobType: cleanText(savedCell(row, "ประเภทงาน", 2)),
+    customer_id: cleanText(savedCell(row, "รหัสลูกค้า", 3) || master.customer_id),
+    customer_name: cleanText(savedCell(row, "ชื่อลูกค้า/ชื่อปั๊ม", 4) || master.customer_name),
     bu,
     buName: branchNameFromBU(bu) || bu || "-",
-    meter: cleanText(cell(row, 6) || master.meter),
-    area: cleanText(cell(row, 7) || master.area),
-    visit_status: cleanText(cell(row, 14) || "สำเร็จ"),
+    meter: cleanText(savedCell(row, "สายมิเตอร์", 6) || master.meter),
+    area: cleanText(savedCell(row, "พื้นที่", 7) || master.area),
+    visit_status: cleanText(savedCell(row, "สถานะเข้าพบ", 13) || "สำเร็จ"),
     customer_group: visitDashboardGroup(row)
   };
 }
@@ -1839,7 +1919,9 @@ function renderVisitDashboard() {
   const days = Math.max(1, Number(document.getElementById("dashboardDays")?.value || 7));
   const selectedBU = cleanText(document.getElementById("dashboardBU")?.value || "").toUpperCase();
   const today = thaiNow();
+  today.setHours(23, 59, 59, 999);
   const start = addDaysTH(today, -(days - 1));
+  start.setHours(0, 0, 0, 0);
 
   let rows = (savedVisitRowsRaw || [])
     .slice(1)
