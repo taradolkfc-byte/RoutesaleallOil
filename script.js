@@ -515,23 +515,44 @@ function normalizePump(rows) {
 }
 function isRepairOpenStatus(status) {
   const s = cleanText(status).toLowerCase();
-  if (!s) return false;
-  // ตามเงื่อนไขล่าสุด: โหมดตารางซ่อมให้แสดงทุกสถานะของเดือนนั้น
-  // ยกเว้นเฉพาะรายการที่ Column K ระบุว่า "แล้วเสร็จ" เท่านั้น
+  // ตารางซ่อมให้แสดงทุกงานที่มีข้อมูลในเดือนนั้น ยกเว้นเฉพาะ Column K = "แล้วเสร็จ" เท่านั้น
+  // หมายเหตุ: บางครั้ง Google Sheets ส่งค่าดรอปดาวว่าง/อ่านค่าไม่ทัน จึงห้ามตัดทิ้งเพราะสถานะว่าง
   return !s.includes("แล้วเสร็จ");
 }
 
 function normalizeRepair(rows) {
   return rows.slice(1)
+    // กันแถวว่าง แต่ไม่ตัดงานซ่อมที่สถานะว่าง เพราะเงื่อนไขคือ ตัดเฉพาะ "แล้วเสร็จ" เท่านั้น
+    .filter(r => cleanText(cell(r,1)) || cleanText(cell(r,8)) || cleanText(cell(r,11)) || cleanText(cell(r,12)))
     .filter(r => isRepairOpenStatus(cell(r,10)))
-    .map(r => {
+    .map((r, repairRowIndex) => {
       const dateObj = parseDateTH(cell(r,8));
       const meterRaw = cell(r,2);
+      const customerName = cell(r,1);
       return {
-        sourceRank: 2, priority: 200 + getUrgencyScore(cell(r,9), dateObj), priorityLabel: cell(r,9) || "ซ่อม", type: "ซ่อม",
-        dateRaw: cell(r,8), dateObj, customer_id: "", customer_name: cell(r,1), status: cell(r,10), bu: inferBUFromAnyText(cell(r,1), cell(r,3), cell(r,6)),
-        meter: meterRaw, meterKey: normalizeMeter(meterRaw), area: cell(r,3), purpose: cell(r,4), coordinator: cell(r,6), phone: cell(r,7),
-        lat: cell(r,11), lng: cell(r,12), sales_litre: "", route_group: "", stop_no: "", start_name: ""
+        sourceRank: 2,
+        priority: 200 + getUrgencyScore(cell(r,9), dateObj),
+        priorityLabel: cell(r,9) || "ซ่อม",
+        type: "ซ่อม",
+        dateRaw: cell(r,8),
+        dateObj,
+        customer_id: "",
+        customer_name: customerName,
+        status: cell(r,10) || "ยังไม่เข้าซ่อม",
+        bu: inferBUFromAnyText(customerName, cell(r,3), cell(r,6), meterRaw),
+        meter: meterRaw,
+        meterKey: normalizeMeter(meterRaw),
+        area: cell(r,3),
+        purpose: cell(r,4),
+        coordinator: cell(r,6),
+        phone: cell(r,7),
+        lat: cell(r,11),
+        lng: cell(r,12),
+        sales_litre: "",
+        route_group: "",
+        stop_no: "",
+        start_name: "",
+        __repairSourceRow: repairRowIndex + 2
       };
     });
 }
@@ -1512,7 +1533,10 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
     const routeDate = repair.dateObj
       ? repair.dateObj.toLocaleDateString("th-TH", { day:"numeric", month:"long", year:"2-digit" })
       : thaiMonthYearLabel();
-    const routeId = `ตารางซ่อม ${routeDate} ${repair.bu || selectedBU || "ทุก BU"} สาย ${repair.meterKey || "ไม่ระบุ"}`;
+    // ให้ 1 แถวในชีตตารางซ่อม = 1 แผนเสมอ
+    // เพื่อรองรับกรณีลูกค้ารายเดิมซ่อมไม่เสร็จ แล้วนัดเข้าใหม่อีกวัน/อีกแถว โดยไม่ถูกยุบรวมกับงานเดิม
+    const repairUniqueName = cleanText(repair.customer_name || `แถว ${repair.__repairSourceRow || repairIndex + 1}`);
+    const routeId = `ตารางซ่อม ${routeDate} ${repair.bu || selectedBU || "ทุก BU"} สาย ${repair.meterKey || "ไม่ระบุ"} • ${repairUniqueName}`;
 
     ordered.forEach((row, idx) => output.push({
       ...row,
