@@ -438,44 +438,128 @@ function statusLoopRoutePenalty(start, route) {
   return penalty;
 }
 
-function orderStatusFilterRoute(start, points) {
-  // ใช้เฉพาะเมื่อเลือก Dropdown "เลือกสถานะ"
-  // หลักคือเรียงแบบกวาดรอบกลุ่มลูกค้าเป็นวงกลม ไม่ใช้การหาจุดใกล้สุดที่มักทำให้วกกลับไปมา
-  const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
-  const noCoord = (points || []).filter(p => !validCoord(p));
-  if (valid.length <= 2) return [...valid, ...noCoord];
+
+function orientation2D(a, b, c) {
+  const val = (b.lng - a.lng) * (c.lat - a.lat) - (b.lat - a.lat) * (c.lng - a.lng);
+  if (Math.abs(val) < 1e-12) return 0;
+  return val > 0 ? 1 : -1;
+}
+
+function segmentsCross2D(a, b, c, d) {
+  const o1 = orientation2D(a, b, c);
+  const o2 = orientation2D(a, b, d);
+  const o3 = orientation2D(c, d, a);
+  const o4 = orientation2D(c, d, b);
+  return o1 !== 0 && o2 !== 0 && o3 !== 0 && o4 !== 0 && o1 !== o2 && o3 !== o4;
+}
+
+function routeCrossPenalty(start, route) {
+  // ลงโทษเส้นที่ตัดกัน เพราะมักหมายถึงลำดับวิ่งวนกลับไปกลับมา ไม่เป็นวงกลม
+  if (!route || route.length < 4) return 0;
+  const pts = [{ lat: Number(start.lat), lng: Number(start.lng) }, ...route.map(p => ({ lat: toNumber(p.lat), lng: toNumber(p.lng) })), { lat: Number(start.lat), lng: Number(start.lng) }];
+  let crosses = 0;
+  for (let i = 0; i < pts.length - 1; i++) {
+    for (let j = i + 2; j < pts.length - 1; j++) {
+      if (i === 0 && j === pts.length - 2) continue; // เส้นออกจากฐานกับเส้นกลับฐานเป็นเส้นติดกันของวง
+      if (segmentsCross2D(pts[i], pts[i + 1], pts[j], pts[j + 1])) crosses++;
+    }
+  }
+  return crosses * 160;
+}
+
+function routeDistanceWavePenalty(start, route) {
+  // ลดการวิ่งใกล้ฐาน -> ไกล -> ใกล้ -> ไกล หลายรอบ
+  // เส้นทางที่ดีควรไหลเป็นวง มีช่วงออกจากฐานและช่วงวนกลับ ไม่สลับขึ้นลงหลายครั้ง
+  if (!route || route.length < 5) return 0;
+  const ds = route.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const maxD = Math.max(...ds, 0);
+  if (!maxD) return 0;
+  let penalty = 0;
+  let switches = 0;
+  let lastSign = 0;
+  for (let i = 1; i < ds.length; i++) {
+    const diff = ds[i] - ds[i - 1];
+    const sign = Math.abs(diff) < Math.max(1.5, maxD * 0.04) ? 0 : (diff > 0 ? 1 : -1);
+    if (sign && lastSign && sign !== lastSign) switches++;
+    if (sign) lastSign = sign;
+  }
+  if (switches > 2) penalty += (switches - 2) * 55;
+
+  for (let i = 1; i < ds.length - 1; i++) {
+    const isDeepValley = ds[i] < maxD * 0.45 && ds[i - 1] > ds[i] + maxD * 0.14 && ds[i + 1] > ds[i] + maxD * 0.14;
+    if (isDeepValley) penalty += 95;
+  }
+  return penalty;
+}
+
+function statusRouteScore(start, route) {
+  // คะแนนสำหรับ Dropdown “เลือกสถานะ” เท่านั้น
+  // ระยะทางยังสำคัญ แต่เพิ่มน้ำหนักการไม่ตัดกัน/ไม่วกกลับ เพื่อให้เป็นวงกลมขึ้น
+  return routeDistanceFromStart(start, route)
+    + statusLoopRoutePenalty(start, route)
+    + routeTurnPenalty(start, route) * 2.4
+    + routeCrossPenalty(start, route)
+    + routeDistanceWavePenalty(start, route);
+}
+
+function buildStatusLoopCandidates(start, valid) {
+  const candidates = [];
+  const add = (route) => {
+    if (!route || route.length !== valid.length) return;
+    candidates.push(route);
+    candidates.push(pullPointsThatAreOnTheWay(start, route));
+    if (route.length >= 5) candidates.push(twoOptClosedRoute(start, route));
+  };
 
   const center = {
     lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
     lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
   };
 
-  const baseAsc = [...valid].sort((a, b) => angleFromCenter(center, a) - angleFromCenter(center, b));
-  const baseDesc = [...baseAsc].reverse();
-  const candidates = [];
+  const byCenterAsc = [...valid].sort((a, b) => angleFromCenter(center, a) - angleFromCenter(center, b));
+  const byCenterDesc = [...byCenterAsc].reverse();
+  const byStartAsc = [...valid].sort((a, b) => angleFromStart(start, a) - angleFromStart(start, b));
+  const byStartDesc = [...byStartAsc].reverse();
+  const farFirst = [...valid].sort((a, b) =>
+    haversine(start, { lat: toNumber(b.lat), lng: toNumber(b.lng) }) -
+    haversine(start, { lat: toNumber(a.lat), lng: toNumber(a.lng) })
+  );
 
-  [baseAsc, baseDesc].forEach(base => {
+  [byCenterAsc, byCenterDesc, byStartAsc, byStartDesc, farFirst, [...farFirst].reverse()].forEach(base => {
+    add(base);
     for (let i = 0; i < base.length; i++) {
-      const rotated = [...base.slice(i), ...base.slice(0, i)];
-      candidates.push(rotated);
-      candidates.push(pullPointsThatAreOnTheWay(start, rotated));
+      add([...base.slice(i), ...base.slice(0, i)]);
     }
   });
 
+  // เพิ่ม candidate จากอัลกอริทึมเดิม/ทั่วไป เพื่อไม่ให้พลาดเคสที่ระยะสั้นจริง ๆ
+  add(nearestNeighborOrder(start, valid));
+  add(farthestInsertionOrder(start, valid));
+  add(orderCircularRoute(start, valid));
+
   const seen = new Set();
-  const unique = candidates.filter(route => {
+  return candidates.filter(route => {
     const key = uniqueRouteCandidateKey(route);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+}
 
-  const best = (unique.length ? unique : [baseAsc])
-    .sort((a, b) => {
-      const sa = routeDistanceFromStart(start, a) + statusLoopRoutePenalty(start, a);
-      const sb = routeDistanceFromStart(start, b) + statusLoopRoutePenalty(start, b);
-      return sa - sb;
-    })[0] || baseAsc;
+function orderStatusFilterRoute(start, points) {
+  // ใช้เฉพาะเมื่อเลือก Dropdown "เลือกสถานะ" ได้แก่
+  // ลูกค้าหาย / ลูกค้าเสี่ยงหาย / ลูกค้าปัจจุบัน / ลูกค้าใหม่ / ลูกค้าหายเกิน60วัน
+  // เป้าหมาย: จัดลำดับแบบวงกลม ลดการย้อนกลับไปเก็บจุดย้อนหลัง และไม่แตะ MAP ของโหมดวางแผนอื่น
+  const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
+  const noCoord = (points || []).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+
+  const candidates = buildStatusLoopCandidates(start, valid);
+  let best = (candidates.length ? candidates : [valid])
+    .sort((a, b) => statusRouteScore(start, a) - statusRouteScore(start, b))[0] || valid;
+
+  // ปรับรอบสุดท้าย: ดึงจุดที่อยู่ระหว่างทางมาแวะก่อน เพื่อลดการวิ่งผ่านแล้วค่อยย้อนกลับมาเก็บ
+  best = pullPointsThatAreOnTheWay(start, best);
 
   return [...best, ...noCoord];
 }
