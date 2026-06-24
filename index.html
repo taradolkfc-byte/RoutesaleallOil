@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ระบบวางแผนออกตลาด KCE</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="style.css?v=20260623-mobile-hide-dashboard-final" />
+  <link rel="stylesheet" href="style.css?v=20260624-page2-dashboard" />
 </head>
 <body>
   <header class="app-header">
@@ -16,6 +16,12 @@
     <button id="reloadBtn" type="button">รีเฟรชข้อมูล</button>
   </header>
 
+  <nav class="page-tabs desktop-only" aria-label="สลับหน้า">
+    <button id="btnPage1" class="page-tab active" type="button">วางแผนออกตลาด</button>
+    <button id="btnPage2" class="page-tab" type="button">Dashboard ย้อนหลัง</button>
+  </nav>
+
+  <main id="page1" class="app-page page-active">
   <section class="summary-grid">
     <div class="summary-card"><span>ทั้งหมดที่แสดง</span><strong id="sumAll">0</strong></div>
     <div class="summary-card urgent"><span>ปรับปรุงปั๊ม</span><strong id="sumPump">0</strong></div>
@@ -132,6 +138,9 @@
     <p id="saveStatus" class="save-status"></p>
   </section>
 
+  </main>
+
+  <main id="page2" class="app-page dashboard-page" hidden>
   <section class="visit-dashboard" id="visitDashboardSection">
     <div class="dashboard-head">
       <div>
@@ -211,7 +220,9 @@
     </div>
   </section>
 
+  </main>
+
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="script.js?v=20260623-mobile-hide-dashboard-final"></script>
+  <script src="script.js?v=20260624-page2-dashboard"></script>
 </body>
 </html>
