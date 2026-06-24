@@ -570,6 +570,10 @@ function orderStatusFilterRoute(start, points) {
   // ใช้เฉพาะเมื่อเลือก Dropdown "เลือกสถานะ"
   // เป้าหมาย: วางเป็นวงเหมือนตัวอย่าง ไม่ใช่เส้นตรงไป-กลับ และไม่ย้อนกลับไปเก็บจุดย้อนหลัง
   const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
+  if (valid.length > MAX_ROUTE_CUSTOMER_STOPS) {
+    const base = circularSweepClosedOrder(start, valid).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+    return [...base, ...(points || []).filter(p => !validCoord(p))];
+  }
   const noCoord = (points || []).filter(p => !validCoord(p));
   if (valid.length <= 2) return [...valid, ...noCoord];
 
@@ -825,38 +829,35 @@ function orderForNormalChunk(start, chunk, selectedMarketStatus) {
 }
 
 function splitNormalRowsIntoDailyChunks(list, planDays, routeStopLimit, selectedMarketStatus) {
-  // แบ่งแผนเป็นรายวัน โดย 1 วันต้องไม่เกิน 9 จุด และระยะทางประมาณไม่เกิน 350 กม.
-  // ใช้เฉพาะการวางแผนออกตลาด/เลือกสถานะ เพื่อไม่กระทบโหมดปรับปรุงปั๊มและตารางซ่อม
-  const valid = (list || []).filter(validCoord);
-  if (!valid.length) return [];
-
-  const firstStart = startForRoute(valid.slice(0, Math.min(routeStopLimit, valid.length)));
-  const orderedAll = orderForNormalChunk(firstStart, valid, selectedMarketStatus);
+  // เวอร์ชันแก้ค้าง: ห้ามจัด/คำนวณเส้นทางซ้ำทุกครั้งที่เพิ่ม 1 จุด
+  // ใช้วิธีแบ่งทีละวันแบบเบา ๆ: เลือกไม่เกิน 9 จุด -> จัดลำดับ -> ตรวจ 350 กม. -> ถ้าเกินตัดท้ายไปวันถัดไป
+  const queue = (list || []).filter(validCoord).slice(0, Math.max(routeStopLimit, planDays * routeStopLimit));
   const chunks = [];
-  let current = [];
+  let guard = 0;
 
-  for (const point of orderedAll) {
-    const trialRaw = [...current, point];
-    const trialStart = startForRoute(trialRaw);
-    const trialOrdered = orderForNormalChunk(trialStart, trialRaw, selectedMarketStatus);
-    const trialKm = estimateDailyRouteKm(trialStart, trialOrdered);
+  while (queue.length && chunks.length < planDays && guard < 100) {
+    guard++;
+    let rawChunk = queue.splice(0, routeStopLimit);
+    if (!rawChunk.length) break;
 
-    if (current.length && (trialRaw.length > routeStopLimit || trialKm > MAX_DAILY_ROUTE_KM)) {
-      chunks.push(current);
-      if (chunks.length >= planDays) break;
-      current = [point];
-      continue;
+    let start = startForRoute(rawChunk);
+    let ordered = orderForNormalChunk(start, rawChunk, selectedMarketStatus);
+    let estimatedKm = estimateDailyRouteKm(start, ordered);
+
+    // ถ้าเกิน 350 กม./วัน ให้ตัดจุดท้ายออกไปไว้วันถัดไป ไม่ฝืนรวมให้ครบ 9 จุด
+    const removed = [];
+    while (ordered.length > 1 && estimatedKm > MAX_DAILY_ROUTE_KM) {
+      removed.unshift(ordered.pop());
+      start = startForRoute(ordered);
+      ordered = orderForNormalChunk(start, ordered, selectedMarketStatus);
+      estimatedKm = estimateDailyRouteKm(start, ordered);
     }
-    current = trialRaw;
+
+    if (removed.length) queue.unshift(...removed);
+    chunks.push({ start, ordered, estimatedKm });
   }
 
-  if (current.length && chunks.length < planDays) chunks.push(current);
-
-  return chunks.slice(0, planDays).map(chunk => {
-    const start = startForRoute(chunk);
-    const ordered = orderForNormalChunk(start, chunk, selectedMarketStatus);
-    return { start, ordered, estimatedKm: estimateDailyRouteKm(start, ordered) };
-  });
+  return chunks;
 }
 
 function nearestNeighborOrder(start, points) {
@@ -1665,7 +1666,7 @@ function buildNormalPlanRows(marketRows, planDays) {
     const [bu, meterKey] = key.split("|");
     // จำกัด 9 จุด/วันในโหมดเลือกสถานะ และจำกัดระยะทางไม่เกิน 350 กม./วัน
     // ถ้าเส้นทางรวมเกิน 350 กม. ระบบจะแบ่งจุดที่เหลือไปวันถัดไปตามจำนวนวันล่วงหน้าที่เลือก
-    const routeStopLimit = selectedMarketStatus ? MAX_ROUTE_CUSTOMER_STOPS : MAX_STOPS_PER_DAY;
+    const routeStopLimit = MAX_ROUTE_CUSTOMER_STOPS;
     const dayChunks = splitNormalRowsIntoDailyChunks(list, planDays, routeStopLimit, selectedMarketStatus);
 
     dayChunks.forEach((chunkInfo, dayIndex) => {
