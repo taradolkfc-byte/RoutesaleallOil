@@ -2379,61 +2379,130 @@ function todayInputValue() {
 function cleanThaiPlace(v, prefixes = []) {
   let text = cleanText(v);
   prefixes.forEach(prefix => { text = text.replace(new RegExp(`^${prefix}\\s*`, "i"), ""); });
-  return text;
+  return text.trim();
 }
+
+function isBadAreaPart(v) {
+  const text = cleanText(v).toLowerCase();
+  return !text ||
+    text === "ประเทศไทย" ||
+    text === "ประเทศ ไทย" ||
+    text === "thailand" ||
+    text === "kingdom of thailand" ||
+    text === "ไทย";
+}
+
+function pickAreaPart(values = [], prefixes = []) {
+  for (const v of values) {
+    const cleaned = cleanThaiPlace(v, prefixes);
+    if (!isBadAreaPart(cleaned)) return cleaned;
+  }
+  return "";
+}
+
 function buildAreaText(address = {}) {
-  const tambon = address.suburb || address.quarter || address.village || address.hamlet || address.neighbourhood || address.locality || "";
-  const amphoe = address.city_district || address.county || address.city || address.town || address.municipality || address.localityInfo || "";
-  const province = address.state || address.province || address.principalSubdivision || "";
+  const province = pickAreaPart([
+    address.state,
+    address.province,
+    address.principalSubdivision
+  ], ["จังหวัด"]);
+
+  const amphoe = pickAreaPart([
+    address.county,
+    address.city_district,
+    address.district,
+    address.municipality,
+    address.city,
+    address.town
+  ], ["อำเภอ", "เขต"]);
+
+  const tambon = pickAreaPart([
+    address.suburb,
+    address.subdistrict,
+    address.quarter,
+    address.village,
+    address.hamlet,
+    address.neighbourhood,
+    address.locality
+  ], ["ตำบล", "แขวง"]);
+
   const parts = [];
-  if (tambon) parts.push(`ต.${cleanThaiPlace(tambon, ["ตำบล", "แขวง"])}`);
-  if (amphoe) parts.push(`อ.${cleanThaiPlace(amphoe, ["อำเภอ", "เขต"])}`);
-  if (province) parts.push(`จ.${cleanThaiPlace(province, ["จังหวัด"])}`);
+  if (tambon) parts.push(`ต.${tambon}`);
+  if (amphoe) parts.push(`อ.${amphoe}`);
+  if (province) parts.push(`จ.${province}`);
   return parts.join(" ");
 }
+
 function buildAreaTextFromBigDataCloud(data = {}) {
-  let tambon = data.locality || data.city || "";
-  let amphoe = data.city || data.locality || "";
-  let province = data.principalSubdivision || "";
-  const admin = (((data.localityInfo || {}).administrative) || []);
-  const adminNames = admin.map(x => x.name).filter(Boolean);
-  // ใช้ค่าจาก administrative ช่วยเติมกรณี locality ซ้ำ/ว่าง
-  if (!tambon && adminNames.length) tambon = adminNames[0];
-  if ((!amphoe || amphoe === tambon) && adminNames.length > 1) amphoe = adminNames.find(x => x !== tambon && x !== province) || amphoe;
+  const admin = (((data.localityInfo || {}).administrative) || [])
+    .map(x => ({
+      name: cleanThaiPlace(x.name || "", ["ตำบล", "แขวง", "อำเภอ", "เขต", "จังหวัด"]),
+      level: Number(x.adminLevel || x.level || 0),
+      desc: cleanText(x.description || x.isoName || "").toLowerCase()
+    }))
+    .filter(x => !isBadAreaPart(x.name));
+
+  const province = pickAreaPart([
+    data.principalSubdivision,
+    ...admin.filter(x => x.desc.includes("province") || x.level === 4).map(x => x.name),
+    ...admin.map(x => x.name)
+  ], ["จังหวัด"]);
+
+  const amphoe = pickAreaPart([
+    ...admin.filter(x => x.desc.includes("district") || x.level === 6 || x.level === 7).map(x => x.name),
+    data.city,
+    data.locality
+  ].filter(x => cleanThaiPlace(x, []) !== province), ["อำเภอ", "เขต"]);
+
+  const tambon = pickAreaPart([
+    data.locality,
+    ...admin.filter(x => x.desc.includes("subdistrict") || x.level >= 8).map(x => x.name)
+  ].filter(x => cleanThaiPlace(x, []) !== amphoe && cleanThaiPlace(x, []) !== province), ["ตำบล", "แขวง"]);
+
   const parts = [];
-  if (tambon) parts.push(`ต.${cleanThaiPlace(tambon, ["ตำบล", "แขวง"])}`);
-  if (amphoe) parts.push(`อ.${cleanThaiPlace(amphoe, ["อำเภอ", "เขต"])}`);
-  if (province) parts.push(`จ.${cleanThaiPlace(province, ["จังหวัด"])}`);
+  if (tambon) parts.push(`ต.${tambon}`);
+  if (amphoe) parts.push(`อ.${amphoe}`);
+  if (province) parts.push(`จ.${province}`);
   return parts.join(" ");
 }
+
+function isValidAreaText(area) {
+  const text = cleanText(area);
+  if (!text || text === "ไม่พบข้อมูลพื้นที่") return false;
+  if (/อ\.\s*(ประเทศไทย|ไทย|Thailand)/i.test(text)) return false;
+  if (/ต\.\s*(ประเทศไทย|ไทย|Thailand)/i.test(text)) return false;
+  return true;
+}
+
 async function reverseGeocode(lat, lng) {
-  const key = `area:${Number(lat).toFixed(6)},${Number(lng).toFixed(6)}`;
+  const key = `area_v2:${Number(lat).toFixed(6)},${Number(lng).toFixed(6)}`;
   try {
     const cached = localStorage.getItem(key);
-    if (cached) return cached;
+    if (isValidAreaText(cached)) return cached;
   } catch (e) {}
 
-  // Provider 1: BigDataCloud ใช้งานจาก browser ได้ค่อนข้างเสถียร
-  try {
-    const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lng)}&localityLanguage=th`;
-    const res = await fetch(url, { cache: "force-cache" });
-    if (res.ok) {
-      const data = await res.json();
-      const area = buildAreaTextFromBigDataCloud(data);
-      if (area) { try { localStorage.setItem(key, area); } catch (e) {} return area; }
-    }
-  } catch (err) {}
-
-  // Provider 2: Nominatim สำรอง
+  // Provider 1: Nominatim ให้โครงสร้างตำบล/อำเภอ/จังหวัดของไทยแม่นกว่า
   try {
     const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}&zoom=18&addressdetails=1&accept-language=th`;
     const res = await fetch(url, { cache: "force-cache" });
     if (res.ok) {
       const data = await res.json();
       const area = buildAreaText(data.address || {});
-      if (area) { try { localStorage.setItem(key, area); } catch (e) {} return area; }
+      if (isValidAreaText(area)) { try { localStorage.setItem(key, area); } catch (e) {} return area; }
     }
   } catch (err) {}
+
+  // Provider 2: BigDataCloud สำรอง และกรองคำว่า ประเทศไทย ไม่ให้เป็นอำเภอ/ตำบล
+  try {
+    const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lng)}&localityLanguage=th`;
+    const res = await fetch(url, { cache: "force-cache" });
+    if (res.ok) {
+      const data = await res.json();
+      const area = buildAreaTextFromBigDataCloud(data);
+      if (isValidAreaText(area)) { try { localStorage.setItem(key, area); } catch (e) {} return area; }
+    }
+  } catch (err) {}
+
   return "ไม่พบข้อมูลพื้นที่";
 }
 function distanceMeter(lat1, lng1, lat2, lng2) {
