@@ -61,8 +61,6 @@ const MAX_PLAN_DAYS = 7;
 const MAX_STOPS_PER_DAY = 16;
 // จำกัดจำนวนจุดที่ส่งเข้า Map และ Google Maps ให้ตรงกัน ไม่เกิน 9 จุด ตามเงื่อนไขใช้งานจริง
 const MAX_ROUTE_CUSTOMER_STOPS = 9;
-// จำกัดระยะทางเฉพาะแผนจาก Dropdown "เลือกสถานะ" ไม่เกิน 350 กม./วัน
-const MAX_STATUS_ROUTE_KM_PER_DAY = 350;
 
 let rawRows = [];
 let plannedRows = [];
@@ -478,80 +476,62 @@ function statusRouteCrossPenalty(start, route) {
   return penalty;
 }
 
-function statusRouteCenter(points) {
-  const valid = (points || []).filter(validCoord);
-  if (!valid.length) return { lat: 0, lng: 0 };
-  return {
-    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
-    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
-  };
+function statusRouteAnglesFromStart(start, points) {
+  return points.map(p => ({
+    p,
+    angle: Math.atan2(toNumber(p.lat) - Number(start.lat), toNumber(p.lng) - Number(start.lng)),
+    dist: haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) })
+  })).sort((a, b) => a.angle - b.angle);
 }
 
-function statusRouteCircularBaseOrders(points) {
-  // เรียงจุดตามมุมรอบจุดศูนย์กลางของกลุ่มลูกค้า เพื่อให้เป็นวงกลมจริง
-  const center = statusRouteCenter(points);
-  const withMeta = (points || []).filter(validCoord).map(p => ({
-    p,
-    angle: Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng),
-    radius: haversine(center, { lat: toNumber(p.lat), lng: toNumber(p.lng) })
-  })).sort((a, b) => a.angle - b.angle || a.radius - b.radius);
+function statusRouteSectorOrders(start, points) {
+  // สร้างลำดับแบบ “กวาดเป็นวง” จากขอบหนึ่งของพื้นที่ไปอีกขอบหนึ่ง
+  // ใช้ช่องว่างมุมที่ใหญ่ที่สุดเป็นทางเข้า/ออกของวง เพื่อไม่ให้เส้นตัดกลางและไม่ย้อนกลับไปมา
+  const items = statusRouteAnglesFromStart(start, points);
+  if (items.length <= 2) return [items.map(x => x.p), items.map(x => x.p).reverse()];
 
-  const asc = withMeta.map(x => x.p);
+  let maxGap = -1;
+  let gapIndex = 0;
+  for (let i = 0; i < items.length; i++) {
+    const a = items[i].angle;
+    const b = i === items.length - 1 ? items[0].angle + Math.PI * 2 : items[i + 1].angle;
+    const gap = b - a;
+    if (gap > maxGap) {
+      maxGap = gap;
+      gapIndex = i;
+    }
+  }
+
+  const orderedItems = [...items.slice(gapIndex + 1), ...items.slice(0, gapIndex + 1)];
+  const asc = orderedItems.map(x => x.p);
   const desc = [...asc].reverse();
   return [asc, desc];
 }
 
-function statusRouteCycleEdgeDistance(a, b) {
-  return haversine(
-    { lat: toNumber(a.lat), lng: toNumber(a.lng) },
-    { lat: toNumber(b.lat), lng: toNumber(b.lng) }
-  );
-}
-
-function statusRouteOpenCycleCandidates(start, cycle) {
-  // แปลงวงปิดเป็นเส้นทางเปิด: จุด 1 คือจุดแรกหลังออกจากฐาน, จุดสุดท้ายคือจุดก่อนกลับฐาน
-  // วิธีเลือก: ลองตัดวงทุกตำแหน่ง แล้วเลือกตำแหน่งที่แทนขอบวงด้วย start->จุดแรก และ จุดสุดท้าย->start ได้ดีที่สุด
-  const out = [];
-  if (!cycle || !cycle.length) return out;
-  for (let i = 0; i < cycle.length; i++) {
-    const route = [...cycle.slice(i), ...cycle.slice(0, i)];
-    out.push(route);
-  }
-  return out;
-}
-
-function statusRouteDirectionConsistencyPenalty(start, route) {
-  if (!route || route.length < 4) return 0;
-  const center = statusRouteCenter(route);
-  const angles = route.map(p => Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng));
-  let penalty = 0;
-
-  // ลงโทษการเรียงที่มุมกระโดดกลับหลังมาก ๆ ซึ่งทำให้เลขลำดับวนไปวนมา
-  for (let i = 1; i < angles.length; i++) {
-    let diff = angles[i] - angles[i - 1];
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    if (Math.abs(diff) > Math.PI * 0.72) penalty += 70;
-  }
-
-  // จุดที่อยู่ใกล้ฐานมากไม่ควรไปอยู่กลางลำดับ เพราะจะทำให้วนกลับมาใกล้ฐานกลางทาง
+function statusRouteEndpointPenalty(start, route) {
+  if (!route.length) return 0;
   const ds = route.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
   const maxD = Math.max(...ds, 0);
-  if (maxD > 0) {
-    for (let i = 1; i < ds.length - 1; i++) {
-      if (ds[i] < maxD * 0.35) penalty += 55;
-    }
+  if (!maxD) return 0;
+  let penalty = 0;
+
+  // จุดกลางทางไม่ควรกลับเข้าฐานมากเกินไป เพราะจะกลายเป็นวิ่งฟรี/วนกลับไปมา
+  for (let i = 1; i < ds.length - 1; i++) {
+    if (ds[i] < maxD * 0.38) penalty += 120;
+    if (i < ds.length - 2 && ds[i] < maxD * 0.52 && ds[i + 1] > ds[i] + Math.max(8, maxD * 0.18)) penalty += 80;
   }
+
+  // ปลายทางควรมีอย่างน้อยหนึ่งด้านที่กลับฐานได้ ไม่ใช่ให้จุดใกล้ฐานไปอยู่กลางวง
+  if (ds[0] < maxD * 0.25 && route.length >= 6) penalty += 35;
+  if (ds[ds.length - 1] < maxD * 0.25 && route.length >= 6) penalty -= 20;
   return penalty;
 }
 
 function statusRouteScore(start, route) {
-  // Score สำหรับ Dropdown "เลือกสถานะ" เท่านั้น
-  // เน้น: วงกลม, ไม่ตัดเส้น, ไม่ย้อนกลับ, จุดแรกออกจากฐานและจุดสุดท้ายกลับฐานเหมาะสม
   return routeDistanceFromStart(start, route)
     + statusRouteCrossPenalty(start, route)
-    + statusRouteDirectionConsistencyPenalty(start, route)
-    + routeTurnPenalty(start, route) * 2.4;
+    + statusRouteEndpointPenalty(start, route)
+    + routeTurnPenalty(start, route) * 3.2;
 }
 
 function statusRouteRotateCandidates(route) {
@@ -563,12 +543,11 @@ function statusRouteRotateCandidates(route) {
 }
 
 function statusRouteLocalImprove(start, route) {
-  // ไม่ใช้ TSP/2-opt หนัก ๆ เพราะทำให้ลำดับกระโดดมั่ว
-  // ปรับแค่สลับจุดติดกันถ้าดีขึ้นจริง และไม่ทำลายทรงวงกลม
+  // ปรับจุดติดกันเฉพาะเมื่อคะแนนดีขึ้นจริง เพื่อรักษาทรงวงกลม ไม่ใช้ TSP หนัก ๆ ที่ทำให้ลำดับกระโดดมั่ว
   let best = [...route];
   let improved = true;
   let guard = 0;
-  while (improved && guard < 10) {
+  while (improved && guard < 20) {
     improved = false;
     guard++;
     for (let i = 0; i < best.length - 1; i++) {
@@ -583,26 +562,187 @@ function statusRouteLocalImprove(start, route) {
   return best;
 }
 
+
+function statusAngleNormalize_(angle) {
+  const two = Math.PI * 2;
+  let a = angle;
+  while (a < 0) a += two;
+  while (a >= two) a -= two;
+  return a;
+}
+
+function statusAngleBetweenClockwise_(from, to, target) {
+  const two = Math.PI * 2;
+  const f = statusAngleNormalize_(from);
+  const t = statusAngleNormalize_(to);
+  const x = statusAngleNormalize_(target);
+  const span = t >= f ? t - f : (t + two) - f;
+  const dx = x >= f ? x - f : (x + two) - f;
+  return dx >= -1e-9 && dx <= span + 1e-9;
+}
+
+function statusPointDistanceToLoopCenter_(center, p) {
+  return haversine(center, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
+}
+
+function statusBuildCircularItems_(points) {
+  const center = {
+    lat: points.reduce((sum, p) => sum + toNumber(p.lat), 0) / points.length,
+    lng: points.reduce((sum, p) => sum + toNumber(p.lng), 0) / points.length
+  };
+  const items = points.map((p, originalIndex) => ({
+    p,
+    originalIndex,
+    angle: statusAngleNormalize_(Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng)),
+    radius: statusPointDistanceToLoopCenter_(center, p)
+  })).sort((a, b) => {
+    const ad = a.angle - b.angle;
+    if (Math.abs(ad) > 1e-9) return ad;
+    // ถ้ามุมซ้อนกัน ให้จุดที่อยู่ไกลกว่าออกก่อน เพื่อให้เส้นวงไม่วนจุกกัน
+    return b.radius - a.radius;
+  });
+  return { center, items };
+}
+
+function statusRouteFromCut_(items, cutIndex, reverse = false) {
+  // cutIndex = ช่องว่างระหว่าง item[cutIndex] กับ item[cutIndex+1]
+  // เส้นทางต้องวิ่งรอบวงด้านนอก ไม่ข้ามช่องว่างที่เปิดไว้ด้านจุดเริ่ม
+  const n = items.length;
+  if (!n) return [];
+  const next = (cutIndex + 1) % n;
+  if (!reverse) {
+    const out = [];
+    for (let k = 0; k < n; k++) out.push(items[(next + k) % n].p);
+    return out;
+  }
+  const out = [];
+  for (let k = 0; k < n; k++) out.push(items[(cutIndex - k + n) % n].p);
+  return out;
+}
+
+function statusLoopGapCandidates_(start, center, items) {
+  const n = items.length;
+  const startAngle = statusAngleNormalize_(Math.atan2(Number(start.lat) - center.lat, Number(start.lng) - center.lng));
+  const gaps = [];
+
+  for (let i = 0; i < n; i++) {
+    const a = items[i].angle;
+    const b = items[(i + 1) % n].angle;
+    const b2 = i === n - 1 ? b + Math.PI * 2 : b;
+    const span = b2 - a;
+    const containsStart = statusAngleBetweenClockwise_(a, b, startAngle);
+
+    const left = items[i].p;
+    const right = items[(i + 1) % n].p;
+    const endpointsToStart =
+      haversine(start, { lat: toNumber(left.lat), lng: toNumber(left.lng) }) +
+      haversine(start, { lat: toNumber(right.lat), lng: toNumber(right.lng) });
+
+    // ให้ความสำคัญช่องว่างที่หันเข้าหาจุดเริ่ม เพราะจุดแรก/จุดสุดท้ายควรอยู่สองฝั่งของทางเข้าออก
+    const mid = statusAngleNormalize_(a + span / 2);
+    const angleToStart = Math.min(
+      Math.abs(statusAngleNormalize_(mid - startAngle)),
+      Math.abs(statusAngleNormalize_(startAngle - mid))
+    );
+
+    gaps.push({
+      index: i,
+      span,
+      containsStart,
+      endpointsToStart,
+      angleToStart
+    });
+  }
+
+  return gaps.sort((g1, g2) => {
+    if (g1.containsStart !== g2.containsStart) return g1.containsStart ? -1 : 1;
+    // ถ้าไม่ชัด ให้เลือกช่องที่ endpoints ใกล้จุดเริ่มที่สุดก่อน แล้วค่อยดูช่องใหญ่
+    const ds = g1.endpointsToStart - g2.endpointsToStart;
+    if (Math.abs(ds) > 0.001) return ds;
+    const as = g1.angleToStart - g2.angleToStart;
+    if (Math.abs(as) > 0.001) return as;
+    return g2.span - g1.span;
+  });
+}
+
+function statusRouteRadialBacktrackPenalty_(start, route) {
+  if (!route || route.length < 4) return 0;
+  const ds = route.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const maxD = Math.max(...ds, 0);
+  if (!maxD) return 0;
+  let penalty = 0;
+
+  // ลำดับที่ดีควรออกจากจุดเริ่ม → วนรอบ → ค่อยกลับ ไม่ใช่ใกล้-ไกล-ใกล้-ไกลหลายรอบ
+  let directionChanges = 0;
+  let prevSign = 0;
+  for (let i = 1; i < ds.length; i++) {
+    const diff = ds[i] - ds[i - 1];
+    const sign = Math.abs(diff) < Math.max(1.2, maxD * 0.025) ? 0 : (diff > 0 ? 1 : -1);
+    if (sign && prevSign && sign !== prevSign) directionChanges++;
+    if (sign) prevSign = sign;
+  }
+  penalty += Math.max(0, directionChanges - 1) * 55;
+
+  // จุดกลาง ๆ ที่กลับมาใกล้ฐานเกินไปแล้วออกไปไกลอีก จะเป็นการวนกลับไปมา
+  for (let i = 1; i < ds.length - 1; i++) {
+    if (ds[i] < maxD * 0.45 && ds[i - 1] > ds[i] + 5 && ds[i + 1] > ds[i] + 5) penalty += 90;
+  }
+  return penalty;
+}
+
+function statusStrictLoopScore_(start, route) {
+  // คะแนนนี้ใช้เฉพาะ dropdown “เลือกสถานะ” เท่านั้น
+  // เน้นวงกลม/ลำดับไหล ไม่ใช้การ swap แบบ TSP เพราะทำให้เลขกระโดดมั่ว
+  if (!route || !route.length) return Infinity;
+  const startToFirst = haversine(start, { lat: toNumber(route[0].lat), lng: toNumber(route[0].lng) });
+  const lastToStart = haversine(start, { lat: toNumber(route[route.length - 1].lat), lng: toNumber(route[route.length - 1].lng) });
+  return routeDistanceFromStart(start, route)
+    + statusRouteCrossPenalty(start, route) * 1.4
+    + routeTurnPenalty(start, route) * 2.4
+    + statusRouteRadialBacktrackPenalty_(start, route)
+    + Math.abs(startToFirst - lastToStart) * 0.15;
+}
+
+function statusKeepMainLoopWithin350_(start, route, maxKm = 350) {
+  // ถ้าวงเกิน 350 กม. ให้ตัดจุดท้ายวงออกไปแผนถัดไป ไม่ฝืนใส่จนวันนั้นไกลเกิน
+  // จุดที่ถูกตัดยังไม่หายจากข้อมูล เพราะ buildNormalPlanRows จะสร้างวันถัดไปจากชุดข้อมูลที่เหลืออยู่ตาม planDays
+  if (!route || route.length <= 1) return route || [];
+  const kept = [];
+  for (const p of route) {
+    const test = [...kept, p];
+    if (routeDistanceFromStart(start, test) <= maxKm || kept.length < 2) kept.push(p);
+    else break;
+  }
+  return kept.length ? kept : route.slice(0, 1);
+}
+
 function orderStatusFilterRoute(start, points) {
-  // ใช้เฉพาะเมื่อเลือก Dropdown "เลือกสถานะ"
-  // เงื่อนไข: จุด 1 = จุดแรกหลังออกจากจุดเริ่ม, จุดสุดท้าย = จุดก่อนกลับจุดเริ่ม,
-  // เรียง 1-9 แบบวิ่งวนเป็นวงกลมเท่านั้น ไม่ย้อนกลับไปเก็บจุดหลัง
+  // ใช้เฉพาะ Dropdown "เลือกสถานะ" ทั้ง 5 กลุ่ม
+  // กติกาใหม่:
+  // 1) จุด 1 = จุดแรกหลังออกจากจุดเริ่ม
+  // 2) จุดสุดท้าย = จุดก่อนกลับจุดเริ่ม
+  // 3) เรียง 1 → 2 → ... ตามการกวาดรอบพื้นที่เป็นวงกลมเท่านั้น
+  // 4) ไม่ใช้ TSP/local swap ที่ทำให้เลขกระโดดมั่ว
   const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
   const noCoord = (points || []).filter(p => !validCoord(p));
   if (valid.length <= 2) return [...valid, ...noCoord];
 
+  const { center, items } = statusBuildCircularItems_(valid);
+  const gaps = statusLoopGapCandidates_(start, center, items);
   const candidates = [];
-  const baseCycles = statusRouteCircularBaseOrders(valid);
 
-  baseCycles.forEach(cycle => {
-    statusRouteOpenCycleCandidates(start, cycle).forEach(route => candidates.push(route));
+  // ทดลองเฉพาะช่องว่างที่เหมาะสุดไม่กี่ช่อง เพื่อให้เร็วและไม่ค้าง
+  gaps.slice(0, Math.min(5, gaps.length)).forEach(gap => {
+    candidates.push(statusRouteFromCut_(items, gap.index, false));
+    candidates.push(statusRouteFromCut_(items, gap.index, true));
   });
 
-  // เพิ่ม candidate จาก circularSweep เดิมไว้เป็นทางเลือก แต่ยังเปิดวงทุกตำแหน่งเหมือนกัน
-  const centerSweep = circularSweepClosedOrder(start, valid);
-  [centerSweep, [...centerSweep].reverse()].forEach(cycle => {
-    statusRouteOpenCycleCandidates(start, cycle).forEach(route => candidates.push(route));
-  });
+  // เพิ่ม candidate ช่องว่างใหญ่สุด เผื่อรูปทรงจุดกระจายไม่ปกติ
+  const largestGap = [...gaps].sort((a, b) => b.span - a.span)[0];
+  if (largestGap) {
+    candidates.push(statusRouteFromCut_(items, largestGap.index, false));
+    candidates.push(statusRouteFromCut_(items, largestGap.index, true));
+  }
 
   const seen = new Set();
   const unique = candidates.filter(route => {
@@ -612,10 +752,10 @@ function orderStatusFilterRoute(start, points) {
     return true;
   });
 
-  let best = (unique.length ? unique : [valid])
-    .sort((a, b) => statusRouteScore(start, a) - statusRouteScore(start, b))[0] || valid;
+  let best = (unique.length ? unique : [items.map(x => x.p)])
+    .sort((a, b) => statusStrictLoopScore_(start, a) - statusStrictLoopScore_(start, b))[0];
 
-  best = statusRouteLocalImprove(start, best);
+  best = statusKeepMainLoopWithin350_(start, best, 350);
   return [...best, ...noCoord];
 }
 function getUrgencyScore(urgency, dateObj) {
