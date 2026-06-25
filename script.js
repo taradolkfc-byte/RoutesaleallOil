@@ -438,324 +438,45 @@ function statusLoopRoutePenalty(start, route) {
   return penalty;
 }
 
-function statusRoutePointKey(p) {
-  return `${norm(p.customer_id)}:${norm(p.customer_name)}:${cleanText(p.lat)}:${cleanText(p.lng)}`;
-}
-
-function statusRouteStraightPoint(p) {
-  return { x: toNumber(p.lng), y: toNumber(p.lat) };
-}
-
-function statusRouteOrientation(a, b, c) {
-  const v = (b.y - a.y) * (c.x - b.x) - (b.x - a.x) * (c.y - b.y);
-  if (Math.abs(v) < 1e-12) return 0;
-  return v > 0 ? 1 : 2;
-}
-
-function statusRouteSegmentsIntersect(a, b, c, d) {
-  const o1 = statusRouteOrientation(a, b, c);
-  const o2 = statusRouteOrientation(a, b, d);
-  const o3 = statusRouteOrientation(c, d, a);
-  const o4 = statusRouteOrientation(c, d, b);
-  return o1 !== o2 && o3 !== o4;
-}
-
-function statusRouteCrossPenalty(start, route) {
-  const pts = [
-    { x: toNumber(start.lng), y: toNumber(start.lat) },
-    ...route.map(statusRouteStraightPoint),
-    { x: toNumber(start.lng), y: toNumber(start.lat) }
-  ];
-  let penalty = 0;
-  for (let i = 0; i < pts.length - 1; i++) {
-    for (let j = i + 2; j < pts.length - 1; j++) {
-      if (i === 0 && j === pts.length - 2) continue;
-      if (statusRouteSegmentsIntersect(pts[i], pts[i + 1], pts[j], pts[j + 1])) penalty += 280;
-    }
-  }
-  return penalty;
-}
-
-function statusRouteAnglesFromStart(start, points) {
-  return points.map(p => ({
-    p,
-    angle: Math.atan2(toNumber(p.lat) - Number(start.lat), toNumber(p.lng) - Number(start.lng)),
-    dist: haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) })
-  })).sort((a, b) => a.angle - b.angle);
-}
-
-function statusRouteSectorOrders(start, points) {
-  // สร้างลำดับแบบ “กวาดเป็นวง” จากขอบหนึ่งของพื้นที่ไปอีกขอบหนึ่ง
-  // ใช้ช่องว่างมุมที่ใหญ่ที่สุดเป็นทางเข้า/ออกของวง เพื่อไม่ให้เส้นตัดกลางและไม่ย้อนกลับไปมา
-  const items = statusRouteAnglesFromStart(start, points);
-  if (items.length <= 2) return [items.map(x => x.p), items.map(x => x.p).reverse()];
-
-  let maxGap = -1;
-  let gapIndex = 0;
-  for (let i = 0; i < items.length; i++) {
-    const a = items[i].angle;
-    const b = i === items.length - 1 ? items[0].angle + Math.PI * 2 : items[i + 1].angle;
-    const gap = b - a;
-    if (gap > maxGap) {
-      maxGap = gap;
-      gapIndex = i;
-    }
-  }
-
-  const orderedItems = [...items.slice(gapIndex + 1), ...items.slice(0, gapIndex + 1)];
-  const asc = orderedItems.map(x => x.p);
-  const desc = [...asc].reverse();
-  return [asc, desc];
-}
-
-function statusRouteEndpointPenalty(start, route) {
-  if (!route.length) return 0;
-  const ds = route.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
-  const maxD = Math.max(...ds, 0);
-  if (!maxD) return 0;
-  let penalty = 0;
-
-  // จุดกลางทางไม่ควรกลับเข้าฐานมากเกินไป เพราะจะกลายเป็นวิ่งฟรี/วนกลับไปมา
-  for (let i = 1; i < ds.length - 1; i++) {
-    if (ds[i] < maxD * 0.38) penalty += 120;
-    if (i < ds.length - 2 && ds[i] < maxD * 0.52 && ds[i + 1] > ds[i] + Math.max(8, maxD * 0.18)) penalty += 80;
-  }
-
-  // ปลายทางควรมีอย่างน้อยหนึ่งด้านที่กลับฐานได้ ไม่ใช่ให้จุดใกล้ฐานไปอยู่กลางวง
-  if (ds[0] < maxD * 0.25 && route.length >= 6) penalty += 35;
-  if (ds[ds.length - 1] < maxD * 0.25 && route.length >= 6) penalty -= 20;
-  return penalty;
-}
-
-function statusRouteScore(start, route) {
-  return routeDistanceFromStart(start, route)
-    + statusRouteCrossPenalty(start, route)
-    + statusRouteEndpointPenalty(start, route)
-    + routeTurnPenalty(start, route) * 3.2;
-}
-
-function statusRouteRotateCandidates(route) {
-  const out = [];
-  for (let i = 0; i < route.length; i++) {
-    out.push([...route.slice(i), ...route.slice(0, i)]);
-  }
-  return out;
-}
-
-function statusRouteLocalImprove(start, route) {
-  // ปรับจุดติดกันเฉพาะเมื่อคะแนนดีขึ้นจริง เพื่อรักษาทรงวงกลม ไม่ใช้ TSP หนัก ๆ ที่ทำให้ลำดับกระโดดมั่ว
-  let best = [...route];
-  let improved = true;
-  let guard = 0;
-  while (improved && guard < 20) {
-    improved = false;
-    guard++;
-    for (let i = 0; i < best.length - 1; i++) {
-      const cand = [...best];
-      [cand[i], cand[i + 1]] = [cand[i + 1], cand[i]];
-      if (statusRouteScore(start, cand) + 0.001 < statusRouteScore(start, best)) {
-        best = cand;
-        improved = true;
-      }
-    }
-  }
-  return best;
-}
-
-
-function statusAngleNormalize_(angle) {
-  const two = Math.PI * 2;
-  let a = angle;
-  while (a < 0) a += two;
-  while (a >= two) a -= two;
-  return a;
-}
-
-function statusAngleBetweenClockwise_(from, to, target) {
-  const two = Math.PI * 2;
-  const f = statusAngleNormalize_(from);
-  const t = statusAngleNormalize_(to);
-  const x = statusAngleNormalize_(target);
-  const span = t >= f ? t - f : (t + two) - f;
-  const dx = x >= f ? x - f : (x + two) - f;
-  return dx >= -1e-9 && dx <= span + 1e-9;
-}
-
-function statusPointDistanceToLoopCenter_(center, p) {
-  return haversine(center, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
-}
-
-function statusBuildCircularItems_(points) {
-  const center = {
-    lat: points.reduce((sum, p) => sum + toNumber(p.lat), 0) / points.length,
-    lng: points.reduce((sum, p) => sum + toNumber(p.lng), 0) / points.length
-  };
-  const items = points.map((p, originalIndex) => ({
-    p,
-    originalIndex,
-    angle: statusAngleNormalize_(Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng)),
-    radius: statusPointDistanceToLoopCenter_(center, p)
-  })).sort((a, b) => {
-    const ad = a.angle - b.angle;
-    if (Math.abs(ad) > 1e-9) return ad;
-    // ถ้ามุมซ้อนกัน ให้จุดที่อยู่ไกลกว่าออกก่อน เพื่อให้เส้นวงไม่วนจุกกัน
-    return b.radius - a.radius;
-  });
-  return { center, items };
-}
-
-function statusRouteFromCut_(items, cutIndex, reverse = false) {
-  // cutIndex = ช่องว่างระหว่าง item[cutIndex] กับ item[cutIndex+1]
-  // เส้นทางต้องวิ่งรอบวงด้านนอก ไม่ข้ามช่องว่างที่เปิดไว้ด้านจุดเริ่ม
-  const n = items.length;
-  if (!n) return [];
-  const next = (cutIndex + 1) % n;
-  if (!reverse) {
-    const out = [];
-    for (let k = 0; k < n; k++) out.push(items[(next + k) % n].p);
-    return out;
-  }
-  const out = [];
-  for (let k = 0; k < n; k++) out.push(items[(cutIndex - k + n) % n].p);
-  return out;
-}
-
-function statusLoopGapCandidates_(start, center, items) {
-  const n = items.length;
-  const startAngle = statusAngleNormalize_(Math.atan2(Number(start.lat) - center.lat, Number(start.lng) - center.lng));
-  const gaps = [];
-
-  for (let i = 0; i < n; i++) {
-    const a = items[i].angle;
-    const b = items[(i + 1) % n].angle;
-    const b2 = i === n - 1 ? b + Math.PI * 2 : b;
-    const span = b2 - a;
-    const containsStart = statusAngleBetweenClockwise_(a, b, startAngle);
-
-    const left = items[i].p;
-    const right = items[(i + 1) % n].p;
-    const endpointsToStart =
-      haversine(start, { lat: toNumber(left.lat), lng: toNumber(left.lng) }) +
-      haversine(start, { lat: toNumber(right.lat), lng: toNumber(right.lng) });
-
-    // ให้ความสำคัญช่องว่างที่หันเข้าหาจุดเริ่ม เพราะจุดแรก/จุดสุดท้ายควรอยู่สองฝั่งของทางเข้าออก
-    const mid = statusAngleNormalize_(a + span / 2);
-    const angleToStart = Math.min(
-      Math.abs(statusAngleNormalize_(mid - startAngle)),
-      Math.abs(statusAngleNormalize_(startAngle - mid))
-    );
-
-    gaps.push({
-      index: i,
-      span,
-      containsStart,
-      endpointsToStart,
-      angleToStart
-    });
-  }
-
-  return gaps.sort((g1, g2) => {
-    if (g1.containsStart !== g2.containsStart) return g1.containsStart ? -1 : 1;
-    // ถ้าไม่ชัด ให้เลือกช่องที่ endpoints ใกล้จุดเริ่มที่สุดก่อน แล้วค่อยดูช่องใหญ่
-    const ds = g1.endpointsToStart - g2.endpointsToStart;
-    if (Math.abs(ds) > 0.001) return ds;
-    const as = g1.angleToStart - g2.angleToStart;
-    if (Math.abs(as) > 0.001) return as;
-    return g2.span - g1.span;
-  });
-}
-
-function statusRouteRadialBacktrackPenalty_(start, route) {
-  if (!route || route.length < 4) return 0;
-  const ds = route.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
-  const maxD = Math.max(...ds, 0);
-  if (!maxD) return 0;
-  let penalty = 0;
-
-  // ลำดับที่ดีควรออกจากจุดเริ่ม → วนรอบ → ค่อยกลับ ไม่ใช่ใกล้-ไกล-ใกล้-ไกลหลายรอบ
-  let directionChanges = 0;
-  let prevSign = 0;
-  for (let i = 1; i < ds.length; i++) {
-    const diff = ds[i] - ds[i - 1];
-    const sign = Math.abs(diff) < Math.max(1.2, maxD * 0.025) ? 0 : (diff > 0 ? 1 : -1);
-    if (sign && prevSign && sign !== prevSign) directionChanges++;
-    if (sign) prevSign = sign;
-  }
-  penalty += Math.max(0, directionChanges - 1) * 55;
-
-  // จุดกลาง ๆ ที่กลับมาใกล้ฐานเกินไปแล้วออกไปไกลอีก จะเป็นการวนกลับไปมา
-  for (let i = 1; i < ds.length - 1; i++) {
-    if (ds[i] < maxD * 0.45 && ds[i - 1] > ds[i] + 5 && ds[i + 1] > ds[i] + 5) penalty += 90;
-  }
-  return penalty;
-}
-
-function statusStrictLoopScore_(start, route) {
-  // คะแนนนี้ใช้เฉพาะ dropdown “เลือกสถานะ” เท่านั้น
-  // เน้นวงกลม/ลำดับไหล ไม่ใช้การ swap แบบ TSP เพราะทำให้เลขกระโดดมั่ว
-  if (!route || !route.length) return Infinity;
-  const startToFirst = haversine(start, { lat: toNumber(route[0].lat), lng: toNumber(route[0].lng) });
-  const lastToStart = haversine(start, { lat: toNumber(route[route.length - 1].lat), lng: toNumber(route[route.length - 1].lng) });
-  return routeDistanceFromStart(start, route)
-    + statusRouteCrossPenalty(start, route) * 1.4
-    + routeTurnPenalty(start, route) * 2.4
-    + statusRouteRadialBacktrackPenalty_(start, route)
-    + Math.abs(startToFirst - lastToStart) * 0.15;
-}
-
-function statusKeepMainLoopWithin350_(start, route, maxKm = 350) {
-  // ถ้าวงเกิน 350 กม. ให้ตัดจุดท้ายวงออกไปแผนถัดไป ไม่ฝืนใส่จนวันนั้นไกลเกิน
-  // จุดที่ถูกตัดยังไม่หายจากข้อมูล เพราะ buildNormalPlanRows จะสร้างวันถัดไปจากชุดข้อมูลที่เหลืออยู่ตาม planDays
-  if (!route || route.length <= 1) return route || [];
-  const kept = [];
-  for (const p of route) {
-    const test = [...kept, p];
-    if (routeDistanceFromStart(start, test) <= maxKm || kept.length < 2) kept.push(p);
-    else break;
-  }
-  return kept.length ? kept : route.slice(0, 1);
-}
-
 function orderStatusFilterRoute(start, points) {
-  // ใช้เฉพาะ Dropdown "เลือกสถานะ" ทั้ง 5 กลุ่ม
-  // กติกาใหม่:
-  // 1) จุด 1 = จุดแรกหลังออกจากจุดเริ่ม
-  // 2) จุดสุดท้าย = จุดก่อนกลับจุดเริ่ม
-  // 3) เรียง 1 → 2 → ... ตามการกวาดรอบพื้นที่เป็นวงกลมเท่านั้น
-  // 4) ไม่ใช้ TSP/local swap ที่ทำให้เลขกระโดดมั่ว
+  // ใช้เฉพาะเมื่อเลือก Dropdown "เลือกสถานะ"
+  // หลักคือเรียงแบบกวาดรอบกลุ่มลูกค้าเป็นวงกลม ไม่ใช้การหาจุดใกล้สุดที่มักทำให้วกกลับไปมา
   const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
   const noCoord = (points || []).filter(p => !validCoord(p));
   if (valid.length <= 2) return [...valid, ...noCoord];
 
-  const { center, items } = statusBuildCircularItems_(valid);
-  const gaps = statusLoopGapCandidates_(start, center, items);
+  const center = {
+    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
+    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
+  };
+
+  const baseAsc = [...valid].sort((a, b) => angleFromCenter(center, a) - angleFromCenter(center, b));
+  const baseDesc = [...baseAsc].reverse();
   const candidates = [];
 
-  // ทดลองเฉพาะช่องว่างที่เหมาะสุดไม่กี่ช่อง เพื่อให้เร็วและไม่ค้าง
-  gaps.slice(0, Math.min(5, gaps.length)).forEach(gap => {
-    candidates.push(statusRouteFromCut_(items, gap.index, false));
-    candidates.push(statusRouteFromCut_(items, gap.index, true));
+  [baseAsc, baseDesc].forEach(base => {
+    for (let i = 0; i < base.length; i++) {
+      const rotated = [...base.slice(i), ...base.slice(0, i)];
+      candidates.push(rotated);
+      candidates.push(pullPointsThatAreOnTheWay(start, rotated));
+    }
   });
-
-  // เพิ่ม candidate ช่องว่างใหญ่สุด เผื่อรูปทรงจุดกระจายไม่ปกติ
-  const largestGap = [...gaps].sort((a, b) => b.span - a.span)[0];
-  if (largestGap) {
-    candidates.push(statusRouteFromCut_(items, largestGap.index, false));
-    candidates.push(statusRouteFromCut_(items, largestGap.index, true));
-  }
 
   const seen = new Set();
   const unique = candidates.filter(route => {
-    const key = route.map(statusRoutePointKey).join('|');
+    const key = uniqueRouteCandidateKey(route);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 
-  let best = (unique.length ? unique : [items.map(x => x.p)])
-    .sort((a, b) => statusStrictLoopScore_(start, a) - statusStrictLoopScore_(start, b))[0];
+  const best = (unique.length ? unique : [baseAsc])
+    .sort((a, b) => {
+      const sa = routeDistanceFromStart(start, a) + statusLoopRoutePenalty(start, a);
+      const sb = routeDistanceFromStart(start, b) + statusLoopRoutePenalty(start, b);
+      return sa - sb;
+    })[0] || baseAsc;
 
-  best = statusKeepMainLoopWithin350_(start, best, 350);
   return [...best, ...noCoord];
 }
 function getUrgencyScore(urgency, dateObj) {
@@ -1774,13 +1495,10 @@ function buildNormalPlanRows(marketRows, planDays) {
   const output = [];
   groups.forEach((list, key) => {
     const [bu, meterKey] = key.split("|");
-    // เฉพาะกรณีเลือกสถานะ: จำกัด 9 จุดตั้งแต่ตอนสร้างแผน ไม่ใช่สร้าง 16 แล้วค่อยตัดหน้า Map
-    // เพื่อให้การ์ด / ตาราง / Map / Google Maps ใช้ชุดจุดเดียวกันและเส้นทางไม่เพี้ยน
-    const routeStopLimit = selectedMarketStatus ? MAX_ROUTE_CUSTOMER_STOPS : MAX_STOPS_PER_DAY;
-    const maxItems = Math.min(list.length, planDays * routeStopLimit);
+    const maxItems = Math.min(list.length, planDays * MAX_STOPS_PER_DAY);
     const usable = list.slice(0, maxItems);
     for (let dayIndex = 0; dayIndex < planDays; dayIndex++) {
-      const chunk = usable.slice(dayIndex * routeStopLimit, (dayIndex + 1) * routeStopLimit);
+      const chunk = usable.slice(dayIndex * MAX_STOPS_PER_DAY, (dayIndex + 1) * MAX_STOPS_PER_DAY);
       if (!chunk.length) continue;
       const planDate = addDaysTH(today, dayIndex);
       const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
