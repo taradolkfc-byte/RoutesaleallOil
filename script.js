@@ -61,10 +61,8 @@ const MAX_PLAN_DAYS = 7;
 const MAX_STOPS_PER_DAY = 16;
 // จำกัดจำนวนจุดที่ส่งเข้า Map และ Google Maps ให้ตรงกัน ไม่เกิน 9 จุด ตามเงื่อนไขใช้งานจริง
 const MAX_ROUTE_CUSTOMER_STOPS = 9;
-// จำกัดระยะทางออกตลาดต่อวัน ไม่ให้แผนเดียวไกลเกินไป
-const MAX_DAILY_ROUTE_KM = 350;
-// ใช้คูณระยะเส้นตรงให้ใกล้เคียงถนนจริง เพื่อกัน OSRM/Google Maps เกิน 350 กม.
-const ROUTE_DISTANCE_SAFETY_FACTOR = 1.35;
+// จำกัดระยะทางเฉพาะแผนจาก Dropdown "เลือกสถานะ" ไม่เกิน 350 กม./วัน
+const MAX_STATUS_ROUTE_KM_PER_DAY = 350;
 
 let rawRows = [];
 let plannedRows = [];
@@ -480,62 +478,80 @@ function statusRouteCrossPenalty(start, route) {
   return penalty;
 }
 
-function statusRouteAnglesFromStart(start, points) {
-  return points.map(p => ({
-    p,
-    angle: Math.atan2(toNumber(p.lat) - Number(start.lat), toNumber(p.lng) - Number(start.lng)),
-    dist: haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) })
-  })).sort((a, b) => a.angle - b.angle);
+function statusRouteCenter(points) {
+  const valid = (points || []).filter(validCoord);
+  if (!valid.length) return { lat: 0, lng: 0 };
+  return {
+    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
+    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
+  };
 }
 
-function statusRouteSectorOrders(start, points) {
-  // สร้างลำดับแบบ “กวาดเป็นวง” จากขอบหนึ่งของพื้นที่ไปอีกขอบหนึ่ง
-  // ใช้ช่องว่างมุมที่ใหญ่ที่สุดเป็นทางเข้า/ออกของวง เพื่อไม่ให้เส้นตัดกลางและไม่ย้อนกลับไปมา
-  const items = statusRouteAnglesFromStart(start, points);
-  if (items.length <= 2) return [items.map(x => x.p), items.map(x => x.p).reverse()];
+function statusRouteCircularBaseOrders(points) {
+  // เรียงจุดตามมุมรอบจุดศูนย์กลางของกลุ่มลูกค้า เพื่อให้เป็นวงกลมจริง
+  const center = statusRouteCenter(points);
+  const withMeta = (points || []).filter(validCoord).map(p => ({
+    p,
+    angle: Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng),
+    radius: haversine(center, { lat: toNumber(p.lat), lng: toNumber(p.lng) })
+  })).sort((a, b) => a.angle - b.angle || a.radius - b.radius);
 
-  let maxGap = -1;
-  let gapIndex = 0;
-  for (let i = 0; i < items.length; i++) {
-    const a = items[i].angle;
-    const b = i === items.length - 1 ? items[0].angle + Math.PI * 2 : items[i + 1].angle;
-    const gap = b - a;
-    if (gap > maxGap) {
-      maxGap = gap;
-      gapIndex = i;
-    }
-  }
-
-  const orderedItems = [...items.slice(gapIndex + 1), ...items.slice(0, gapIndex + 1)];
-  const asc = orderedItems.map(x => x.p);
+  const asc = withMeta.map(x => x.p);
   const desc = [...asc].reverse();
   return [asc, desc];
 }
 
-function statusRouteEndpointPenalty(start, route) {
-  if (!route.length) return 0;
-  const ds = route.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
-  const maxD = Math.max(...ds, 0);
-  if (!maxD) return 0;
+function statusRouteCycleEdgeDistance(a, b) {
+  return haversine(
+    { lat: toNumber(a.lat), lng: toNumber(a.lng) },
+    { lat: toNumber(b.lat), lng: toNumber(b.lng) }
+  );
+}
+
+function statusRouteOpenCycleCandidates(start, cycle) {
+  // แปลงวงปิดเป็นเส้นทางเปิด: จุด 1 คือจุดแรกหลังออกจากฐาน, จุดสุดท้ายคือจุดก่อนกลับฐาน
+  // วิธีเลือก: ลองตัดวงทุกตำแหน่ง แล้วเลือกตำแหน่งที่แทนขอบวงด้วย start->จุดแรก และ จุดสุดท้าย->start ได้ดีที่สุด
+  const out = [];
+  if (!cycle || !cycle.length) return out;
+  for (let i = 0; i < cycle.length; i++) {
+    const route = [...cycle.slice(i), ...cycle.slice(0, i)];
+    out.push(route);
+  }
+  return out;
+}
+
+function statusRouteDirectionConsistencyPenalty(start, route) {
+  if (!route || route.length < 4) return 0;
+  const center = statusRouteCenter(route);
+  const angles = route.map(p => Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng));
   let penalty = 0;
 
-  // จุดกลางทางไม่ควรกลับเข้าฐานมากเกินไป เพราะจะกลายเป็นวิ่งฟรี/วนกลับไปมา
-  for (let i = 1; i < ds.length - 1; i++) {
-    if (ds[i] < maxD * 0.38) penalty += 120;
-    if (i < ds.length - 2 && ds[i] < maxD * 0.52 && ds[i + 1] > ds[i] + Math.max(8, maxD * 0.18)) penalty += 80;
+  // ลงโทษการเรียงที่มุมกระโดดกลับหลังมาก ๆ ซึ่งทำให้เลขลำดับวนไปวนมา
+  for (let i = 1; i < angles.length; i++) {
+    let diff = angles[i] - angles[i - 1];
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    if (Math.abs(diff) > Math.PI * 0.72) penalty += 70;
   }
 
-  // ปลายทางควรมีอย่างน้อยหนึ่งด้านที่กลับฐานได้ ไม่ใช่ให้จุดใกล้ฐานไปอยู่กลางวง
-  if (ds[0] < maxD * 0.25 && route.length >= 6) penalty += 35;
-  if (ds[ds.length - 1] < maxD * 0.25 && route.length >= 6) penalty -= 20;
+  // จุดที่อยู่ใกล้ฐานมากไม่ควรไปอยู่กลางลำดับ เพราะจะทำให้วนกลับมาใกล้ฐานกลางทาง
+  const ds = route.map(p => haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const maxD = Math.max(...ds, 0);
+  if (maxD > 0) {
+    for (let i = 1; i < ds.length - 1; i++) {
+      if (ds[i] < maxD * 0.35) penalty += 55;
+    }
+  }
   return penalty;
 }
 
 function statusRouteScore(start, route) {
+  // Score สำหรับ Dropdown "เลือกสถานะ" เท่านั้น
+  // เน้น: วงกลม, ไม่ตัดเส้น, ไม่ย้อนกลับ, จุดแรกออกจากฐานและจุดสุดท้ายกลับฐานเหมาะสม
   return routeDistanceFromStart(start, route)
     + statusRouteCrossPenalty(start, route)
-    + statusRouteEndpointPenalty(start, route)
-    + routeTurnPenalty(start, route) * 3.2;
+    + statusRouteDirectionConsistencyPenalty(start, route)
+    + routeTurnPenalty(start, route) * 2.4;
 }
 
 function statusRouteRotateCandidates(route) {
@@ -547,11 +563,12 @@ function statusRouteRotateCandidates(route) {
 }
 
 function statusRouteLocalImprove(start, route) {
-  // ปรับจุดติดกันเฉพาะเมื่อคะแนนดีขึ้นจริง เพื่อรักษาทรงวงกลม ไม่ใช้ TSP หนัก ๆ ที่ทำให้ลำดับกระโดดมั่ว
+  // ไม่ใช้ TSP/2-opt หนัก ๆ เพราะทำให้ลำดับกระโดดมั่ว
+  // ปรับแค่สลับจุดติดกันถ้าดีขึ้นจริง และไม่ทำลายทรงวงกลม
   let best = [...route];
   let improved = true;
   let guard = 0;
-  while (improved && guard < 20) {
+  while (improved && guard < 10) {
     improved = false;
     guard++;
     for (let i = 0; i < best.length - 1; i++) {
@@ -568,27 +585,23 @@ function statusRouteLocalImprove(start, route) {
 
 function orderStatusFilterRoute(start, points) {
   // ใช้เฉพาะเมื่อเลือก Dropdown "เลือกสถานะ"
-  // เป้าหมาย: วางเป็นวงเหมือนตัวอย่าง ไม่ใช่เส้นตรงไป-กลับ และไม่ย้อนกลับไปเก็บจุดย้อนหลัง
+  // เงื่อนไข: จุด 1 = จุดแรกหลังออกจากจุดเริ่ม, จุดสุดท้าย = จุดก่อนกลับจุดเริ่ม,
+  // เรียง 1-9 แบบวิ่งวนเป็นวงกลมเท่านั้น ไม่ย้อนกลับไปเก็บจุดหลัง
   const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
-  if (valid.length > MAX_ROUTE_CUSTOMER_STOPS) {
-    const base = circularSweepClosedOrder(start, valid).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
-    return [...base, ...(points || []).filter(p => !validCoord(p))];
-  }
   const noCoord = (points || []).filter(p => !validCoord(p));
   if (valid.length <= 2) return [...valid, ...noCoord];
 
-  const sectorOrders = statusRouteSectorOrders(start, valid);
-  const centerSweep = circularSweepClosedOrder(start, valid);
-  const rawCandidates = [
-    ...sectorOrders,
-    ...sectorOrders.map(r => [...r].reverse()),
-    centerSweep,
-    [...centerSweep].reverse()
-  ];
-
   const candidates = [];
-  rawCandidates.forEach(route => {
-    statusRouteRotateCandidates(route).forEach(r => candidates.push(r));
+  const baseCycles = statusRouteCircularBaseOrders(valid);
+
+  baseCycles.forEach(cycle => {
+    statusRouteOpenCycleCandidates(start, cycle).forEach(route => candidates.push(route));
+  });
+
+  // เพิ่ม candidate จาก circularSweep เดิมไว้เป็นทางเลือก แต่ยังเปิดวงทุกตำแหน่งเหมือนกัน
+  const centerSweep = circularSweepClosedOrder(start, valid);
+  [centerSweep, [...centerSweep].reverse()].forEach(cycle => {
+    statusRouteOpenCycleCandidates(start, cycle).forEach(route => candidates.push(route));
   });
 
   const seen = new Set();
@@ -599,8 +612,8 @@ function orderStatusFilterRoute(start, points) {
     return true;
   });
 
-  let best = (unique.length ? unique : sectorOrders)
-    .sort((a, b) => statusRouteScore(start, a) - statusRouteScore(start, b))[0] || sectorOrders[0];
+  let best = (unique.length ? unique : [valid])
+    .sort((a, b) => statusRouteScore(start, a) - statusRouteScore(start, b))[0] || valid;
 
   best = statusRouteLocalImprove(start, best);
   return [...best, ...noCoord];
@@ -815,49 +828,6 @@ function routeDistanceFromStart(start, order) {
   });
   total += haversine(current, { lat: start.lat, lng: start.lng });
   return total;
-}
-
-function estimateDailyRouteKm(start, order) {
-  // ประมาณระยะทางแบบเผื่อถนนจริง เพื่อใช้ตัดแผนรายวันไม่ให้เกิน 350 กม./วัน
-  return routeDistanceFromStart(start, order) * ROUTE_DISTANCE_SAFETY_FACTOR;
-}
-
-function orderForNormalChunk(start, chunk, selectedMarketStatus) {
-  if (selectedMarketStatus) return orderStatusFilterRoute(start, chunk);
-  const orderedBase = orderNormalMarketRoute(start, chunk);
-  return applyNormalRouteFieldFeedback(start, orderedBase, chunk);
-}
-
-function splitNormalRowsIntoDailyChunks(list, planDays, routeStopLimit, selectedMarketStatus) {
-  // เวอร์ชันแก้ค้าง: ห้ามจัด/คำนวณเส้นทางซ้ำทุกครั้งที่เพิ่ม 1 จุด
-  // ใช้วิธีแบ่งทีละวันแบบเบา ๆ: เลือกไม่เกิน 9 จุด -> จัดลำดับ -> ตรวจ 350 กม. -> ถ้าเกินตัดท้ายไปวันถัดไป
-  const queue = (list || []).filter(validCoord).slice(0, Math.max(routeStopLimit, planDays * routeStopLimit));
-  const chunks = [];
-  let guard = 0;
-
-  while (queue.length && chunks.length < planDays && guard < 100) {
-    guard++;
-    let rawChunk = queue.splice(0, routeStopLimit);
-    if (!rawChunk.length) break;
-
-    let start = startForRoute(rawChunk);
-    let ordered = orderForNormalChunk(start, rawChunk, selectedMarketStatus);
-    let estimatedKm = estimateDailyRouteKm(start, ordered);
-
-    // ถ้าเกิน 350 กม./วัน ให้ตัดจุดท้ายออกไปไว้วันถัดไป ไม่ฝืนรวมให้ครบ 9 จุด
-    const removed = [];
-    while (ordered.length > 1 && estimatedKm > MAX_DAILY_ROUTE_KM) {
-      removed.unshift(ordered.pop());
-      start = startForRoute(ordered);
-      ordered = orderForNormalChunk(start, ordered, selectedMarketStatus);
-      estimatedKm = estimateDailyRouteKm(start, ordered);
-    }
-
-    if (removed.length) queue.unshift(...removed);
-    chunks.push({ start, ordered, estimatedKm });
-  }
-
-  return chunks;
 }
 
 function nearestNeighborOrder(start, points) {
@@ -1664,15 +1634,23 @@ function buildNormalPlanRows(marketRows, planDays) {
   const output = [];
   groups.forEach((list, key) => {
     const [bu, meterKey] = key.split("|");
-    // จำกัด 9 จุด/วันในโหมดเลือกสถานะ และจำกัดระยะทางไม่เกิน 350 กม./วัน
-    // ถ้าเส้นทางรวมเกิน 350 กม. ระบบจะแบ่งจุดที่เหลือไปวันถัดไปตามจำนวนวันล่วงหน้าที่เลือก
-    const routeStopLimit = MAX_ROUTE_CUSTOMER_STOPS;
-    const dayChunks = splitNormalRowsIntoDailyChunks(list, planDays, routeStopLimit, selectedMarketStatus);
-
-    dayChunks.forEach((chunkInfo, dayIndex) => {
+    // เฉพาะกรณีเลือกสถานะ: จำกัด 9 จุดตั้งแต่ตอนสร้างแผน ไม่ใช่สร้าง 16 แล้วค่อยตัดหน้า Map
+    // เพื่อให้การ์ด / ตาราง / Map / Google Maps ใช้ชุดจุดเดียวกันและเส้นทางไม่เพี้ยน
+    const routeStopLimit = selectedMarketStatus ? MAX_ROUTE_CUSTOMER_STOPS : MAX_STOPS_PER_DAY;
+    const maxItems = Math.min(list.length, planDays * routeStopLimit);
+    const usable = list.slice(0, maxItems);
+    for (let dayIndex = 0; dayIndex < planDays; dayIndex++) {
+      const chunk = usable.slice(dayIndex * routeStopLimit, (dayIndex + 1) * routeStopLimit);
+      if (!chunk.length) continue;
       const planDate = addDaysTH(today, dayIndex);
       const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
-      const { start, ordered, estimatedKm } = chunkInfo;
+      const start = startForRoute(chunk);
+      const orderedBase = hasMarketStatusFilterSelected()
+        ? orderStatusFilterRoute(start, chunk)
+        : orderNormalMarketRoute(start, chunk);
+      const ordered = hasMarketStatusFilterSelected()
+        ? orderedBase
+        : applyNormalRouteFieldFeedback(start, orderedBase, chunk);
       ordered.forEach((row, idx) => output.push({
         ...row,
         plan_day: dayIndex + 1,
@@ -1680,10 +1658,9 @@ function buildNormalPlanRows(marketRows, planDays) {
         route_group: routeId,
         stop_no: `${idx + 1}/${ordered.length}`,
         start_name: start.name,
-        priorityLabel: row.priorityLabel || statusGroup(row.status),
-        estimated_route_km: estimatedKm
+        priorityLabel: row.priorityLabel || statusGroup(row.status)
       }));
-    });
+    }
   });
   return output;
 }
@@ -2089,7 +2066,7 @@ async function renderMap(list) {
       if (metricsEl) {
         const done = validStops.filter(isCompleted).length;
         const remain = Math.max(0, validStops.length - done);
-        metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} • จำกัดไม่เกิน ${MAX_DAILY_ROUTE_KM} กม./วัน (Map/Google Maps ไม่เกิน ${MAX_ROUTE_CUSTOMER_STOPS} จุด)`;
+        metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (จำกัด Map/Google Maps ไม่เกิน ${MAX_ROUTE_CUSTOMER_STOPS} จุด)`;
       }
       return;
     }
@@ -2097,7 +2074,7 @@ async function renderMap(list) {
     // ไม่ต้องหยุดระบบ ถ้า OSRM ไม่ตอบกลับ
   }
   L.polyline(latlngs, { weight: 5, dashArray: "8,8" }).addTo(routeLayer);
-  if (metricsEl) metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • แสดงเส้นเชื่อมแบบประมาณการ กด Google Maps เพื่อดูเส้นทางจริงและเวลาที่ดีที่สุด • ระบบจำกัดแผนไม่เกิน ${MAX_DAILY_ROUTE_KM} กม./วัน`;
+  if (metricsEl) metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • แสดงเส้นเชื่อมแบบประมาณการ กด Google Maps เพื่อดูเส้นทางจริงและเวลาที่ดีที่สุด`;
 }
 
 function parseSavedVisitDate(row) {
