@@ -111,7 +111,6 @@ tr:nth-child(even) td { background:#f9fafb; }
 
 /* ===== Repair all current month + 9 point sync ===== */
 .route-limit-note { margin:8px 0 0; color:#92400e; font-weight:700; }
-.route-over-limit { color:#dc2626; font-weight:700; }
 
 
 /* ===== Done check-in route markers ===== */
