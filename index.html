@@ -5,15 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ระบบวางแผนออกตลาด KCE</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="style.css?v=20260702-exact-tsp-fix" />
+  <link rel="stylesheet" href="style.css?v=20260702-loop7-area-coordinator" />
 </head>
 <body>
   <header class="app-header">
     <div>
       <h1>ระบบวางแผนออกตลาด KCE</h1>
-      <p>แสดงแผนเฉพาะเดือนปัจจุบัน • ตัดจุดที่ออกตลาดแล้ว • เลือกจุดเริ่มต้นที่ใกล้ทั้งเส้นทางที่สุด • จัดเส้นทางวงกลมไม่เกิน 9 จุด/วง และไม่เกิน 350 กม./วง เพื่อลดเวลาและการวิ่งย้อนกลับ</p>
+      <p>แสดงแผนเฉพาะเดือนปัจจุบัน • ตัดจุดที่ออกตลาดแล้ว • เลือกจุดเริ่มต้นที่ใกล้ทั้งเส้นทางที่สุด • จัดเส้นทางวงกลมเล็งไว้ที่ 7 จุด/วง (สูงสุด 9 จุด) และไม่เกิน 350 กม./วง จุดที่เหลือยกไปแผนรอบถัดไป เพื่อให้เป็นวงกลมและไม่วิ่งย้อนกลับ</p>
     </div>
-    <button id="reloadBtn" type="button">รีเฟรชข้อมูล</button>
   </header>
 
   <nav class="page-tabs desktop-only" aria-label="สลับหน้า">
@@ -119,7 +118,12 @@
         </datalist>
       </label>
       <label>พื้นที่<input name="area" placeholder="ต./อ./จ." /></label>
-      <label>ผู้ประสานงาน<input name="coordinator" placeholder="ชื่อผู้ประสานงาน" /></label>
+      <label>ผู้ประสานงาน
+        <select name="coordinator" id="coordinatorSelect">
+          <option value="">เลือกผู้ประสานงาน</option>
+          <option value="น้าฮ้อย">น้าฮ้อย</option>
+        </select>
+      </label>
       <label>เบอร์โทร<input name="phone" placeholder="เบอร์โทร" /></label>
       <label>ละติจูด<input name="lat" placeholder="ละ" /></label>
       <label>ลองจิจูด<input name="lng" placeholder="ลอง" /></label>
@@ -131,6 +135,7 @@
           <option value="เลิกกิจการ">เลิกกิจการ</option>
         </select>
       </label>
+      <button id="reloadBtn" class="reload-btn" type="button">รีเฟรชข้อมูล</button>
       <button id="checkinBtn" class="checkin-btn" type="button">เช็คอิน GPS</button>
       <label class="wide">หมายเหตุ<textarea name="note" placeholder="หมายเหตุเพิ่มเติม"></textarea></label>
       <button class="submit-btn" type="submit">บันทึกลงชีต “เก็บข้อมูล”</button>
@@ -272,6 +277,6 @@
   </main>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="script.js?v=20260702-exact-tsp-fix"></script>
+  <script src="script.js?v=20260702-loop7-area-coordinator"></script>
 </body>
 </html>
