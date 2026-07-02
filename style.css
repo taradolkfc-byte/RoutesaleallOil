@@ -64,6 +64,8 @@ tr:nth-child(even) td { background:#f9fafb; }
 }
 
 /* ===== Check-in GPS + Map marker update ===== */
+.reload-btn { background:#0b3b70; min-height:42px; align-self:end; }
+.reload-btn:hover { background:#0a3260; }
 .checkin-btn { background:#16a34a; min-height:42px; align-self:end; }
 .checkin-btn:disabled { opacity:.65; cursor:not-allowed; }
 .route-number-icon span {
