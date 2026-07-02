@@ -37,6 +37,16 @@ const BU_BRANCH_NAME_MAP = {
   WNN: "เค.ซี. กรีน เอ็นเนอร์จี"
 };
 
+// รายชื่อผู้ประสานงาน (dropdown) พร้อมเบอร์โทรที่ผูกไว้ เพื่อเติมเบอร์โทรอัตโนมัติเมื่อเลือกชื่อ
+// เพิ่มรายชื่อ/เบอร์ใหม่ได้ที่นี่ และเพิ่ม <option> ในไฟล์ index.html ให้ตรงกัน
+const COORDINATOR_PHONE_MAP = {
+  "น้าฮ้อย": "082-1165845"
+};
+
+function phoneForCoordinator(name) {
+  return COORDINATOR_PHONE_MAP[cleanText(name)] || "";
+}
+
 function branchNameFromBU(bu) {
   const key = cleanText(bu).toUpperCase();
   return BU_BRANCH_NAME_MAP[key] || cleanText(bu);
@@ -64,6 +74,10 @@ const MAX_ROUTE_CUSTOMER_STOPS = 9;
 // เป้าหมายขั้นต่ำต่อ 1 วง คือ 7 จุด (ช่วงที่ต้องการคือ 7-9 จุด) ถ้ามีข้อมูลลูกค้าจริงเพียงพอในพื้นที่/BU นั้น
 // ถ้าข้อมูลจริงมีน้อยกว่านี้ ระบบจะแสดงเท่าที่มีจริง ไม่สร้างจุดปลอมขึ้นมาเติม
 const MIN_ROUTE_STOPS = 7;
+// จำนวนจุดที่ "เหมาะสมที่สุด" ต่อ 1 วง = 7 จุด เพื่อให้เส้นทางเป็นวงกลมชัด ไม่วิ่งซิกแซกเข้ากลางวง
+// ถ้ามีลูกค้ามากกว่านี้ ระบบจะเลือก 7 จุดที่อยู่รอบนอกและต่อกันเป็นวงได้ดีที่สุดก่อน
+// ส่วนจุดที่เหลือ (เช่นจุดที่ 8-9) จะยกไปเป็นแผนรอบถัดไป เพื่อไม่ให้วงบิดเบี้ยว
+const PREFERRED_ROUTE_STOPS = 7;
 // ทุกแผน 1 วง (ทุกโหมดวางแผน / ทุกสถานะที่เลือก) ห้ามมีระยะทางรวมไป-กลับจุดเริ่มเกิน 350 กม.
 // เพื่อคุมเวลาเดินทางและความสิ้นเปลืองน้ำมันที่เกิดขึ้นจริง
 const MAX_ROUTE_DISTANCE_KM = 350;
@@ -948,6 +962,62 @@ function limitPointsToMaxStops(start, points, maxStops = MAX_ROUTE_CUSTOMER_STOP
   return [...required, ...ranked];
 }
 
+function optimalClosedTourDistance(start, points) {
+  // ระยะทางวงปิดที่ดีที่สุด (ใช้ exact ถ้าจุดน้อย, ไม่งั้นใช้ 2-opt/Or-opt ประมาณ)
+  const valid = (points || []).filter(validCoord);
+  if (valid.length <= 1) return routeDistanceFromStart(start, valid);
+  let ordered;
+  if (valid.length <= EXACT_ROUTE_MAX_POINTS) {
+    ordered = exactOptimalClosedRoute(start, valid) || valid;
+  } else {
+    ordered = refineClosedRoute(start, valid);
+  }
+  return routeDistanceFromStart(start, ordered);
+}
+
+function selectBestLoopSubset(start, points, targetSize, protectedKeys = new Set()) {
+  // เลือกชุดจุดที่ทำให้ได้ "วงกลมที่สวยที่สุด" ตามจำนวนเป้าหมาย (เช่น 7 จุด)
+  // หลักการ: เก็บจุดที่อยู่ "รอบนอก" (ขอบวง) ไว้ แล้วตัดจุดที่อยู่กลางวง/ซ้อนใกล้จุดอื่นออกก่อน
+  // เพราะจุดกลางวงคือสาเหตุที่ทำให้เส้นทางวิ่งเข้า-ออกกลางวงแบบซิกแซก ไม่เป็นวงกลม
+  // จุดสำคัญ (ปั๊ม/ซ่อม) ที่อยู่ใน protectedKeys จะไม่ถูกตัด
+  let valid = points.filter(validCoord).map(p => ({ ...p }));
+  if (valid.length <= targetSize) return valid;
+
+  while (valid.length > targetSize) {
+    const centroid = routeCentroid(valid) || { lat: Number(start.lat), lng: Number(start.lng) };
+    const maxFromCentroid = Math.max(...valid.map(p => haversine(centroid, { lat: toNumber(p.lat), lng: toNumber(p.lng) })), 0.0001);
+    const baseDist = optimalClosedTourDistance(start, valid);
+
+    let removeIndex = -1;
+    let bestScore = -Infinity;
+    for (let i = 0; i < valid.length; i++) {
+      if (protectedKeys.has(rowUniqueKey(valid[i]))) continue;
+      const p = valid[i];
+
+      // (1) จุดยิ่งอยู่ใกล้ศูนย์กลางวง = ยิ่งเป็นจุด "กลางวง" ควรตัดก่อน (interiorScore สูง)
+      const distFromCentroid = haversine(centroid, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
+      const interiorScore = 1 - (distFromCentroid / maxFromCentroid); // 0=ขอบวง, ~1=กลางวง
+
+      // (2) จุดที่อยู่ใกล้จุดอื่นมาก (ซ้อนกัน) ก็ควรตัดก่อน เพราะแวะทีหลังได้ ไม่ทำให้เสียรูปวง
+      const nearestOther = Math.min(...valid.filter((_, j) => j !== i)
+        .map(q => haversine({ lat: toNumber(p.lat), lng: toNumber(p.lng) }, { lat: toNumber(q.lat), lng: toNumber(q.lng) })));
+      const clusterScore = 1 / (1 + nearestOther); // ยิ่งใกล้จุดอื่น ยิ่งสูง
+
+      // (3) ถ้าตัดออกแล้ววงสั้นลงเยอะ = จุดนี้ทำให้ต้องอ้อม (ยื่นออก/ตัดข้าม) ก็ควรพิจารณาตัด
+      const without = [...valid.slice(0, i), ...valid.slice(i + 1)];
+      const detourSaving = baseDist - optimalClosedTourDistance(start, without);
+      const detourScore = detourSaving / (baseDist || 1);
+
+      // รวมคะแนน: เน้น "กลางวง" มากที่สุด รองมาคือจุดที่ซ้อนใกล้กัน และเผื่อจุดที่ทำให้อ้อมมาก
+      const score = interiorScore * 3 + clusterScore * 1.5 + detourScore * 1;
+      if (score > bestScore) { bestScore = score; removeIndex = i; }
+    }
+    if (removeIndex < 0) break; // เหลือแต่จุดที่ป้องกันไว้ ตัดต่อไม่ได้
+    valid.splice(removeIndex, 1);
+  }
+  return valid;
+}
+
 function capRouteByDistanceKm(start, order, maxKm = MAX_ROUTE_STRAIGHT_KM, protectedKeys = new Set()) {
   // ตัดจุดที่ทำให้ระยะทางรวม (ไป-กลับจุดเริ่ม) เกิน 350 กม. ออกทีละจุด
   // เลือกตัดจุดที่ไกลที่สุด/ประหยัดระยะได้มากที่สุดก่อน และไม่แตะจุดที่ถูกป้องกันไว้ (เช่น จุดปรับปรุงปั๊ม/จุดซ่อม)
@@ -1274,8 +1344,11 @@ function orderPumpFirstRoute(start, pumpRow, otherRows) {
     : start;
 
   const rest = removeSameStop(otherRows || [], pumpRow);
-  const limitedRest = limitPointsToMaxStops(pivot, rest, Math.max(0, MAX_ROUTE_CUSTOMER_STOPS - 1));
-  const orderedRest = orderCircularRoute(pivot, limitedRest);
+  // เป้าหมายวงกลม 7 จุด (รวมจุดปั๊ม): เลือกจุดออกตลาดรอบ ๆ ปั๊มที่ต่อเป็นวงได้ดีที่สุด PREFERRED-1 จุด
+  // จุดที่เหลือ (เกินเป้า 7 จุด) จะไม่ถูกยัดลงวงนี้ แต่ยกไปเป็นแผนรอบถัดไป เพื่อให้วงกลมสวยไม่วิ่งซิกแซก
+  const preferredRestCount = Math.max(0, PREFERRED_ROUTE_STOPS - 1);
+  const bestRest = selectBestLoopSubset(pivot, rest, preferredRestCount);
+  const orderedRest = orderCircularRoute(pivot, bestRest);
   const protectedKeys = new Set([rowUniqueKey(pumpRow)]);
   let capped = capRouteByDistanceKm(start, [pumpRow, ...orderedRest], MAX_ROUTE_STRAIGHT_KM, protectedKeys);
   if (capped.length > 3) {
@@ -1304,9 +1377,9 @@ function takeByStatusForMeter(marketRows, pump) {
   const winback = sameMeter.filter(x => statusGroup(x.status) === "ลูกค้าใหม่/Winback").slice(0, 5);
   let picked = uniqueRowsByIdName([...lost, ...risky, ...active, ...winback]);
 
-  // เป้าหมาย 7-9 จุด/วง (รวมจุดปั๊ม/จุดซ่อม 1 จุด) ถ้าสายมิเตอร์เดียวกันมีน้อยเกินไป
-  // ให้ดึงจุดออกตลาดที่ใกล้ที่สุดจาก BU เดียวกัน (สายอื่น) มาเติมให้ครบ โดยไม่สร้างข้อมูลปลอมขึ้นมา
-  const targetCount = Math.max(0, MIN_ROUTE_STOPS - 1);
+  // รวบรวมจุดผู้สมัครให้มากพอ (สูงสุด 8 จุด นอกเหนือจากจุดปั๊ม/ซ่อม) เพื่อให้ตัวเลือกวงกลม
+  // มีตัวเลือกพอที่จะคัดเหลือ "ชุดที่ต่อเป็นวงสวยที่สุด" ภายหลัง (selectBestLoopSubset)
+  const targetCount = Math.max(0, MAX_ROUTE_CUSTOMER_STOPS - 1);
   if (picked.length < targetCount) {
     const pickedKeys = new Set(picked.map(rowUniqueKey));
     const pivot = validCoord(pump) ? { lat: toNumber(pump.lat), lng: toNumber(pump.lng) } : null;
@@ -1732,8 +1805,9 @@ function buildNormalPlanRows(marketRows, planDays) {
   const output = [];
   groups.forEach((list, key) => {
     const [bu, meterKey] = key.split("|");
-    // จำกัดจุดต่อวงไม่เกิน MAX_ROUTE_CUSTOMER_STOPS (9 จุด) ตามเงื่อนไขใช้งานจริง แทนการอัดจุดเป็นชุดใหญ่ 16 จุด/วัน
-    const chunkSize = MAX_ROUTE_CUSTOMER_STOPS;
+    // แต่ละวง/แต่ละวัน เล็งไว้ที่ PREFERRED_ROUTE_STOPS (7 จุด) เพื่อให้เป็นวงกลมชัด ไม่วิ่งซิกแซกเข้ากลางวง
+    // ถ้ามีจุดมากกว่านี้ จุดที่เหลือ (เช่นจุดที่ 8-9) จะถูกยกไปเป็นแผนของวันถัดไปโดยอัตโนมัติ
+    const chunkSize = PREFERRED_ROUTE_STOPS;
     const maxItems = Math.min(list.length, planDays * chunkSize);
     const usable = list.slice(0, maxItems);
     for (let dayIndex = 0; dayIndex < planDays; dayIndex++) {
@@ -1741,16 +1815,16 @@ function buildNormalPlanRows(marketRows, planDays) {
       if (!chunk.length) continue;
       chunk.forEach(r => usedKeys.add(rowUniqueKey(r)));
 
-      // เป้าหมาย 7-9 จุด/วง: ถ้าสายมิเตอร์นี้มีจุดไม่พอ ให้ดึงจุดที่ใกล้กลุ่มที่สุดจาก BU เดียวกัน (สายอื่น) มาเติม
+      // เป้าหมาย 7 จุด/วง: ถ้าสายมิเตอร์นี้มีจุดไม่พอ ให้ดึงจุดที่ใกล้กลุ่มที่สุดจาก BU เดียวกัน (สายอื่น) มาเติม
       // เฉพาะกรณีที่ยังไม่ได้เลือกสถานะเจาะจง เพื่อไม่ให้ไปรบกวนผลลัพธ์ตอนกรอง "เลือกสถานะ" ที่ผู้ใช้ตั้งใจดูเฉพาะกลุ่มนั้น
-      if (!hasMarketStatusFilterSelected() && chunk.length < MIN_ROUTE_STOPS) {
+      if (!hasMarketStatusFilterSelected() && chunk.length < PREFERRED_ROUTE_STOPS) {
         const pool = (buPool.get(bu) || []).filter(r => !usedKeys.has(rowUniqueKey(r)));
         const centroid = routeCentroid(chunk) || startForRoute(chunk);
         const ranked = pool
           .map(p => ({ p, d: haversine(centroid, { lat: toNumber(p.lat), lng: toNumber(p.lng) }) }))
           .sort((a, b) => a.d - b.d);
         for (const { p } of ranked) {
-          if (chunk.length >= MIN_ROUTE_STOPS) break;
+          if (chunk.length >= PREFERRED_ROUTE_STOPS) break;
           chunk = [...chunk, p];
           usedKeys.add(rowUniqueKey(p));
         }
@@ -1842,13 +1916,13 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
     const relatedMarkets = uniqueRowsByIdName(takeByStatusForMeter(marketRows, repair));
 
     // จุดซ่อมต้องอยู่ในแผนเสมอ แล้วต่อด้วยจุดออกตลาดในสายเดียวกัน
-    // จำกัดรวมไม่เกิน 9 จุด/วง และระยะทางไป-กลับรวมไม่เกิน 350 กม. โดยจุดซ่อมห้ามถูกตัดออก
+    // เล็งไว้ที่ 7 จุด/วง (รวมจุดซ่อม) และเลือกชุดจุดที่ต่อเป็นวงกลมได้ดีที่สุด โดยจุดซ่อมห้ามถูกตัดออก
     const routePointsAll = uniqueRowsByIdName([repair, ...relatedMarkets]);
     const start = startForRoute(routePointsAll);
     const repairProtectedKeys = new Set([rowUniqueKey(repair)]);
-    // limitPointsToMaxStops ทำงานเฉพาะจุดที่มีพิกัด ส่วนจุดที่ไม่มีพิกัด (เช่น repair ที่ยังไม่กรอกพิกัด) จะถูกต่อท้ายเสมอ
+    // selectBestLoopSubset ทำงานเฉพาะจุดที่มีพิกัด ส่วนจุดที่ไม่มีพิกัด (เช่น repair ที่ยังไม่กรอกพิกัด) จะถูกต่อท้ายเสมอ
     const noCoordPoints = routePointsAll.filter(p => !validCoord(p));
-    const validPointsCapped = limitPointsToMaxStops(start, routePointsAll, MAX_ROUTE_CUSTOMER_STOPS, repairProtectedKeys);
+    const validPointsCapped = selectBestLoopSubset(start, routePointsAll, PREFERRED_ROUTE_STOPS, repairProtectedKeys);
     const routePoints = [...validPointsCapped, ...noCoordPoints];
     let ordered = orderCircularRoute(start, routePoints);
     ordered = capRouteByDistanceKm(start, ordered, MAX_ROUTE_STRAIGHT_KM, repairProtectedKeys);
@@ -2208,7 +2282,7 @@ async function renderMap(list) {
       if (metricsEl) {
         const done = validStops.filter(isCompleted).length;
         const remain = Math.max(0, validStops.length - done);
-        metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (จำกัดไม่เกิน ${MAX_ROUTE_CUSTOMER_STOPS} จุด และไม่เกิน ${MAX_ROUTE_DISTANCE_KM} กม./วง)`;
+        metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (เล็งวงกลม ${PREFERRED_ROUTE_STOPS} จุด สูงสุด ${MAX_ROUTE_CUSTOMER_STOPS} จุด และไม่เกิน ${MAX_ROUTE_DISTANCE_KM} กม./วง)`;
       }
       return;
     }
@@ -2604,10 +2678,20 @@ function fillFormFromMasterCustomer(customer, source = "manual") {
   const buCode = routeMeta.bu || customer.bu || inferBU(customer.customer_id, customer.bu);
   form.elements.bu.value = branchNameFromBU(buCode);
   form.elements.meter.value = routeMeta.meter || customer.meter || "";
-  form.elements.area.value = customer.area || "";
+  // "พื้นที่" ต้องเป็น ต./อ./จ. จริงเท่านั้น ห้ามเอา BU code (เช่น ST) หรือค่าขยะมาทับ
+  // ถ้าฟอร์มมีพื้นที่จริงอยู่แล้ว (เช่นมาจาก reverseGeocode ตอนเช็คอิน) ให้คงไว้ ไม่เขียนทับด้วยค่าจากชีตลูกค้า
+  if (isUsefulAreaText(customer.area) && !isUsefulAreaText(form.elements.area.value)) {
+    form.elements.area.value = customer.area;
+  }
   if (form.elements.purpose) form.elements.purpose.value = customer.purpose || (customer.type === "ซ่อม" ? "ซ่อม" : "ออกเยี่ยมลูกค้า");
-  form.elements.coordinator.value = customer.coordinator || "";
-  form.elements.phone.value = customer.phone || "";
+  // ผู้ประสานงานเป็น dropdown: ตั้งค่าได้เฉพาะเมื่อมีชื่อนั้นอยู่ในรายการเท่านั้น แล้วเติมเบอร์โทรที่ผูกไว้ให้ทันที
+  const coordName = cleanText(customer.coordinator);
+  if (form.elements.coordinator) {
+    const hasOption = Array.from(form.elements.coordinator.options || []).some(o => o.value === coordName);
+    if (coordName && hasOption) form.elements.coordinator.value = coordName;
+  }
+  const mappedPhone = phoneForCoordinator(form.elements.coordinator ? form.elements.coordinator.value : coordName);
+  form.elements.phone.value = mappedPhone || customer.phone || "";
   form.elements.lat.value = customer.lat || "";
   form.elements.lng.value = customer.lng || "";
   if (currentVisitDate) form.elements.visit_date.value = currentVisitDate;
@@ -2634,6 +2718,25 @@ async function saveForm(e) {
   e.preventDefault();
   const status = document.getElementById("saveStatus");
   const data = Object.fromEntries(new FormData(e.target).entries());
+
+  // กันไม่ให้ "พื้นที่" ถูกบันทึกเป็น BU code (เช่น ST) หรือค่าขยะลงชีต "เก็บข้อมูล"
+  // ถ้าพื้นที่ไม่ใช่ ต./อ./จ. จริง แต่มีพิกัด lat/lng ให้ค้นหาพื้นที่จริงจากพิกัดก่อนบันทึก
+  if (!isUsefulAreaText(data.area) && toNumber(data.lat) !== null && toNumber(data.lng) !== null) {
+    try {
+      const realArea = await reverseGeocode(data.lat, data.lng);
+      if (isValidAreaText(realArea)) {
+        data.area = realArea;
+        if (e.target.elements.area) e.target.elements.area.value = realArea;
+      } else {
+        data.area = "";
+      }
+    } catch (err) {
+      data.area = isUsefulAreaText(data.area) ? data.area : "";
+    }
+  } else if (!isUsefulAreaText(data.area)) {
+    data.area = "";
+  }
+
   if (WEB_APP_URL.includes("PUT_YOUR")) {
     status.textContent = "กรุณาใส่ Web App URL ในไฟล์ script.js ก่อน";
     status.style.color = "#dc2626";
@@ -2807,7 +2910,7 @@ function findNearestCustomer(lat, lng) {
 
 function fillFormFromCustomer(form, customer) {
   fillFormFromMasterCustomer(customer, "gps");
-  if (!form.elements.area.value && customer.area) form.elements.area.value = customer.area;
+  if (!isUsefulAreaText(form.elements.area.value) && isUsefulAreaText(customer.area)) form.elements.area.value = customer.area;
 }
 
 function unlockManualCustomerFields(form) {
@@ -2837,17 +2940,23 @@ async function checkInGps() {
     if (form.elements.visit_status && !form.elements.visit_status.value) form.elements.visit_status.value = "สำเร็จ";
 
     const area = await reverseGeocode(lat, lng);
-    if (area) form.elements.area.value = area;
+    // เก็บพื้นที่จริงจากพิกัด GPS ไว้ก่อน แล้วบังคับใช้เป็นค่าสุดท้ายเสมอ (ทุกประเภทงาน)
+    // กันเคสที่ข้อมูลลูกค้าในชีตมีพื้นที่เป็นค่าขยะ/เป็น BU code แล้วมาเขียนทับพื้นที่จริง
+    const gpsArea = isValidAreaText(area) ? area : "";
+    if (gpsArea) form.elements.area.value = gpsArea;
 
     const customer = findNearestCustomer(Number(lat), Number(lng));
     if (customer) {
       fillFormFromCustomer(form, customer);
-      if (!form.elements.area.value && customer.area) form.elements.area.value = customer.area;
+      // พื้นที่จริงจาก GPS ต้องชนะเสมอ ถ้าดึงได้
+      if (gpsArea) form.elements.area.value = gpsArea;
+      else if (!isUsefulAreaText(form.elements.area.value) && isUsefulAreaText(customer.area)) form.elements.area.value = customer.area;
       applySelectedRouteToForm(form);
       status.textContent = `เช็คอินสำเร็จ: พบลูกค้าในรัศมี ${Math.round(customer.distance)} เมตร - ${customer.customer_name || customer.customer_id}`;
       status.style.color = "#166534";
     } else {
       unlockManualCustomerFields(form);
+      if (gpsArea) form.elements.area.value = gpsArea;
       applySelectedRouteToForm(form);
       status.textContent = `เช็คอินสำเร็จ: อยู่นอกเขตลูกค้า ${CHECKIN_RADIUS_METER} เมตร ระบบเติมพื้นที่/พิกัดให้แล้ว กรุณากรอกรหัสลูกค้า ชื่อปั๊ม BU และสายมิเตอร์เอง`;
       status.style.color = "#92400e";
@@ -2877,6 +2986,17 @@ if (document.getElementById("planDays")) document.getElementById("planDays").add
 if (document.getElementById("marketStatusFilter")) document.getElementById("marketStatusFilter").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
 document.getElementById("reloadBtn").addEventListener("click", loadData);
 document.getElementById("checkinBtn").addEventListener("click", checkInGps);
+
+// เมื่อเลือกผู้ประสานงานจาก dropdown ให้เติมเบอร์โทรอัตโนมัติทันที
+const coordinatorSelectEl = document.getElementById("coordinatorSelect");
+if (coordinatorSelectEl) {
+  coordinatorSelectEl.addEventListener("change", () => {
+    const form = document.getElementById("planForm");
+    if (!form || !form.elements.phone) return;
+    const phone = phoneForCoordinator(coordinatorSelectEl.value);
+    if (phone) form.elements.phone.value = phone;
+  });
+}
 ["customer_id", "customer_name"].forEach(name => {
   const el = document.querySelector(`#planForm [name="${name}"]`);
   if (el) {
