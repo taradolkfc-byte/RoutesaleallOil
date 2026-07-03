@@ -2422,64 +2422,31 @@ function enforceRouteConstraints(start, order, fixedFirst) {
   return route;
 }
 
-function growTightClusterUnderLimit(start, anchor, candidates, maxStops, maxKm) {
-  // สร้าง "กลุ่มจุดที่แน่นที่สุด" โดยค่อย ๆ เพิ่มจุดที่ใกล้ที่สุดเข้าไปทีละจุด
-  // ตราบใดที่วง (ไป-กลับจุดเริ่มต้น) ยังไม่เกิน maxKm — ได้จำนวนจุดมากที่สุดเท่าที่พอดีในระยะ 350 กม.
-  // แก้เคสสาย 49 (KCG) ที่จุดกระจายไกล แล้วโดนตัดเหลือจุดเดียว ให้ได้ 7-9 จุดเหมือนสาย 55/65
-  const anchorValid = anchor && validCoord(anchor);
-  const anchorKey = anchorValid ? protectedPointKey(anchor) : '';
-  const ref = anchorValid
-    ? { lat: toNumber(anchor.lat), lng: toNumber(anchor.lng) }
-    : { lat: start.lat, lng: start.lng };
-
-  // เรียงจุดผู้สมัครจากใกล้ที่สุด (อ้างอิงจุดปั๊ม/ซ่อม ถ้ามี ไม่งั้นอ้างอิงจุดเริ่มต้น) แล้วค่อยดูความเร่งด่วน
-  let pool = uniqueRoutePoints(candidates)
-    .filter(validCoord)
-    .filter(p => protectedPointKey(p) !== anchorKey)
-    .map(p => ({
-      p,
-      d: haversine(ref, { lat: toNumber(p.lat), lng: toNumber(p.lng) }),
-      pri: routePriorityNumber(p)
-    }))
-    .sort((a, b) => (a.d - b.d) || (a.pri - b.pri))
-    .map(x => x.p);
-
-  let cluster = anchorValid ? [anchor] : [];
-  if (!cluster.length && pool.length) { cluster = [pool[0]]; pool = pool.slice(1); }
-
-  for (const cand of pool) {
-    if (cluster.length >= maxStops) break;
-    const trial = exactClosedRouteOrder(start, [...cluster, cand], anchorValid ? anchor : null).filter(validCoord);
-    // รับจุดนี้เฉพาะเมื่อวงยังไม่เกิน maxKm — ถ้าเกินก็ข้ามไปลองจุดถัดไปที่อาจใกล้กว่า
-    if (estimateRoadDistanceKm(start, trial) <= maxKm) {
-      cluster = trial;
-    }
-  }
-  return cluster;
-}
-
 function selectClusterForBestLoop(start, points, fixedFirst) {
   let valid = uniqueRoutePoints(points).filter(validCoord);
   if (!valid.length) return [];
 
   const fixedKey = fixedFirst && validCoord(fixedFirst) ? protectedPointKey(fixedFirst) : '';
-  // ถ้าจุดน้อยอยู่แล้ว (<=9) และวงไม่เกิน 350 กม. ใช้ทั้งหมด (เคสปกติของสาย 55/65)
-  if (valid.length <= MAX_ROUTE_CUSTOMER_STOPS) {
-    const quickOrder = exactClosedRouteOrder(start, valid, fixedFirst || null).filter(validCoord);
-    if (estimateRoadDistanceKm(start, quickOrder) <= MAX_ROUTE_DISTANCE_KM) return valid;
-    // ถ้าเกิน 350 กม. ให้ค่อย ๆ โตแบบคุมระยะ เพื่อคงจุดให้มากที่สุดเท่าที่พอดี
-    const fixedForGrow = fixedKey ? (valid.find(p => protectedPointKey(p) === fixedKey) || fixedFirst) : null;
-    return growTightClusterUnderLimit(start, fixedForGrow, valid, MAX_ROUTE_CUSTOMER_STOPS, MAX_ROUTE_DISTANCE_KM);
-  }
+  if (valid.length <= MAX_ROUTE_CUSTOMER_STOPS) return valid;
 
   if (fixedKey) {
-    // โหมดปรับปรุงปั๊ม/ตารางซ่อม: ล็อกจุดงานเป็นจุดที่ 1 แล้วโตกลุ่มจุดที่ใกล้ที่สุดให้ได้มากสุด (สูงสุด 9) ภายใน 350 กม.
     const fixed = valid.find(p => protectedPointKey(p) === fixedKey) || fixedFirst;
-    return growTightClusterUnderLimit(start, fixed, valid, MAX_ROUTE_CUSTOMER_STOPS, MAX_ROUTE_DISTANCE_KM);
+    const rest = valid.filter(p => protectedPointKey(p) !== fixedKey);
+    const fixedPoint = { lat: toNumber(fixed.lat), lng: toNumber(fixed.lng) };
+    const selected = rest
+      .map(p => ({
+        p,
+        score: haversine(fixedPoint, { lat: toNumber(p.lat), lng: toNumber(p.lng) }) * 0.70 +
+               haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }) * 0.20 +
+               routePriorityNumber(p) * 2.0
+      }))
+      .sort((a, b) => a.score - b.score)
+      .slice(0, MAX_ROUTE_CUSTOMER_STOPS - 1)
+      .map(x => x.p);
+    return [fixed, ...selected];
   }
 
-  // ไม่มีจุดบังคับ (วันปกติ/เลือกสถานะ ที่มีจุดเยอะ): ลองหลาย seed แล้วเลือกวงที่ดีที่สุด
-  // แต่ละ seed โตแบบคุมระยะ 350 กม. ให้ได้จุดมากที่สุด เพื่อให้ทุกสายเรียงเหมือนสาย 55/65
+  // สร้างหลาย cluster จาก seed ต่าง ๆ แล้วเลือกวงที่สั้น/แน่นที่สุด
   const seeds = [...valid]
     .map(p => ({
       p,
@@ -2489,7 +2456,22 @@ function selectClusterForBestLoop(start, points, fixedFirst) {
     .slice(0, Math.min(14, valid.length))
     .map(x => x.p);
 
-  const clusters = seeds.map(seed => growTightClusterUnderLimit(start, seed, valid, MAX_ROUTE_CUSTOMER_STOPS, MAX_ROUTE_DISTANCE_KM));
+  const clusters = [];
+  seeds.forEach(seed => {
+    const seedPoint = { lat: toNumber(seed.lat), lng: toNumber(seed.lng) };
+    const rest = valid.filter(p => protectedPointKey(p) !== protectedPointKey(seed));
+    const selected = rest
+      .map(p => ({
+        p,
+        score: haversine(seedPoint, { lat: toNumber(p.lat), lng: toNumber(p.lng) }) * 0.72 +
+               haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }) * 0.18 +
+               routePriorityNumber(p) * 1.8
+      }))
+      .sort((a, b) => a.score - b.score)
+      .slice(0, MAX_ROUTE_CUSTOMER_STOPS - 1)
+      .map(x => x.p);
+    clusters.push([seed, ...selected]);
+  });
 
   let bestCluster = clusters[0] || valid.slice(0, MAX_ROUTE_CUSTOMER_STOPS);
   let bestScore = Infinity;
@@ -2498,9 +2480,7 @@ function selectClusterForBestLoop(start, points, fixedFirst) {
     const km = estimateRoadDistanceKm(start, ordered);
     const priorityPenalty = ordered.reduce((sum, p) => sum + routePriorityNumber(p), 0) * 0.35;
     const underLimitBonus = km <= MAX_ROUTE_DISTANCE_KM ? -45 : 0;
-    // ยิ่งได้จุดมาก (เข้าใกล้ 7-9) ยิ่งดี: ให้โบนัสตามจำนวนจุด เพื่อไม่ให้เลือกวงที่จุดน้อยเกินไป
-    const sizeBonus = -Math.min(ordered.length, MAX_ROUTE_CUSTOMER_STOPS) * 12
-      + (ordered.length >= MIN_ROUTE_CUSTOMER_STOPS ? -18 : 0);
+    const sizeBonus = Math.min(ordered.length, MAX_ROUTE_CUSTOMER_STOPS) >= MIN_ROUTE_CUSTOMER_STOPS ? -18 : 0;
     const score = km + priorityPenalty + underLimitBonus + sizeBonus;
     if (score < bestScore) {
       bestScore = score;
@@ -2512,16 +2492,7 @@ function selectClusterForBestLoop(start, points, fixedFirst) {
 }
 
 function buildBestLoopOrder(start, points, options = {}) {
-  // รองรับการเรียกได้ 2 แบบ: ส่ง options เป็นอ็อบเจกต์ { fixedFirst } หรือส่งจุดบังคับ/null มาตรง ๆ
-  // กันบั๊กเดิมที่ takeNextBestLoopChunk ส่ง null/จุด เข้ามาแล้วทำให้อ่าน options.fixedFirst ไม่ได้
-  let fixedFirst = null;
-  if (options && typeof options === 'object') {
-    if (Object.prototype.hasOwnProperty.call(options, 'fixedFirst')) {
-      fixedFirst = options.fixedFirst || null;              // เรียกแบบ { fixedFirst: ... }
-    } else if (validCoord(options)) {
-      fixedFirst = options;                                  // เรียกแบบส่งจุดบังคับมาตรง ๆ
-    }
-  }
+  const fixedFirst = options.fixedFirst || null;
   const cluster = selectClusterForBestLoop(start, points, fixedFirst);
   let ordered = exactClosedRouteOrder(start, cluster, fixedFirst).filter(validCoord);
   ordered = enforceRouteConstraints(start, ordered, fixedFirst);
