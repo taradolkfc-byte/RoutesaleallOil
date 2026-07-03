@@ -858,6 +858,88 @@ function orOptRelocate(start, order) {
   return best;
 }
 
+function exactOptimalRouteFixedFirst(start, firstPoint, restPoints) {
+  // หาลำดับที่ดีที่สุดจริงแบบ "บังคับจุดแรก แล้ววนกลับจุดเริ่มต้น"
+  // เส้นทาง: จุดเริ่มต้น -> firstPoint (บังคับเป็นจุดที่ 1) -> จัดจุดที่เหลือให้ดีที่สุด -> กลับจุดเริ่มต้น
+  // ใช้ Held-Karp path TSP: เริ่มที่ firstPoint สิ้นสุดที่จุดเริ่มต้น เดินผ่านจุดที่เหลือครบทุกจุด
+  // รับประกันว่าเส้นทางไม่ตัดกันเอง เลขลำดับไล่ตามเส้นทางเป๊ะ ไม่วิ่งย้อนกลับ
+  if (!firstPoint) return orderCleanClosedLoop(start, restPoints || []);
+  const rest = (restPoints || []).filter(validCoord).map(p => ({ ...p }));
+  const noCoord = (restPoints || []).filter(p => !validCoord(p));
+  if (!validCoord(firstPoint)) return [firstPoint, ...orderCleanClosedLoop(start, rest), ...noCoord];
+  if (rest.length === 0) return [firstPoint, ...noCoord];
+  if (rest.length === 1) return [firstPoint, ...rest, ...noCoord];
+
+  // ถ้าจุดเยอะเกินกว่าจะคำนวณ exact ได้เร็ว ใช้ตัวประมาณ (nearest + 2-opt/Or-opt) โดยล็อกจุดแรกไว้
+  if (rest.length > EXACT_ROUTE_MAX_POINTS) {
+    const pivot = { lat: toNumber(firstPoint.lat), lng: toNumber(firstPoint.lng) };
+    const approx = refineClosedRoute(pivot, rest);
+    return [firstPoint, ...approx, ...noCoord];
+  }
+
+  const startXY = { lat: Number(start.lat), lng: Number(start.lng) };
+  const firstXY = { lat: toNumber(firstPoint.lat), lng: toNumber(firstPoint.lng) };
+  const xy = rest.map(p => ({ lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const n = xy.length;
+
+  const dist = Array.from({ length: n }, () => new Array(n).fill(0));
+  for (let i = 0; i < n; i++)
+    for (let j = 0; j < n; j++)
+      if (i !== j) dist[i][j] = haversine(xy[i], xy[j]);
+
+  const distFromFirst = xy.map(p => haversine(firstXY, p)); // firstPoint -> rest[j]
+  const distToStart = xy.map(p => haversine(p, startXY));   // rest[j] -> จุดเริ่มต้น
+
+  const FULL = (1 << n) - 1;
+  const dp = Array.from({ length: 1 << n }, () => new Array(n).fill(Infinity));
+  const parent = Array.from({ length: 1 << n }, () => new Array(n).fill(-1));
+  for (let i = 0; i < n; i++) dp[1 << i][i] = distFromFirst[i];
+
+  for (let mask = 1; mask <= FULL; mask++) {
+    for (let j = 0; j < n; j++) {
+      if (!(mask & (1 << j))) continue;
+      const cur = dp[mask][j];
+      if (!Number.isFinite(cur)) continue;
+      for (let k = 0; k < n; k++) {
+        if (mask & (1 << k)) continue;
+        const nextMask = mask | (1 << k);
+        const cand = cur + dist[j][k];
+        if (cand < dp[nextMask][k]) { dp[nextMask][k] = cand; parent[nextMask][k] = j; }
+      }
+    }
+  }
+
+  let bestJ = -1, bestCost = Infinity;
+  for (let j = 0; j < n; j++) {
+    const cost = dp[FULL][j] + distToStart[j];
+    if (cost < bestCost) { bestCost = cost; bestJ = j; }
+  }
+  if (bestJ < 0) return [firstPoint, ...rest, ...noCoord];
+
+  const orderIdx = [];
+  let mask = FULL, j = bestJ;
+  while (j !== -1) { orderIdx.push(j); const pj = parent[mask][j]; mask ^= (1 << j); j = pj; }
+  orderIdx.reverse();
+  return [firstPoint, ...orderIdx.map(idx => rest[idx]), ...noCoord];
+}
+
+function orderCleanClosedLoop(start, points) {
+  // วงปิดที่ดีที่สุด (จุดเริ่มต้น -> ... -> กลับจุดเริ่มต้น) แล้วหันทิศให้จุดแรก = จุดที่ใกล้จุดเริ่มต้นที่สุด
+  // เพื่อให้เลขลำดับไล่ตามเส้นทางเป๊ะ และจุดที่ 1 อยู่ใกล้ฐานเสมอ (เงื่อนไขโหมดวันปกติ)
+  const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
+  const noCoord = (points || []).filter(p => !validCoord(p));
+  if (valid.length <= 1) return [...valid, ...noCoord];
+
+  // เลือกจุดที่ใกล้จุดเริ่มต้นที่สุดเป็นจุดที่ 1 แล้วหาลำดับที่เหลือให้ดีที่สุดแบบวนกลับฐาน
+  const nearestFirst = [...valid].sort((a, b) =>
+    haversine(start, { lat: toNumber(a.lat), lng: toNumber(a.lng) }) -
+    haversine(start, { lat: toNumber(b.lat), lng: toNumber(b.lng) })
+  )[0];
+  const rest = valid.filter(p => rowUniqueKey(p) !== rowUniqueKey(nearestFirst));
+  const ordered = exactOptimalRouteFixedFirst(start, nearestFirst, rest);
+  return [...ordered, ...noCoord];
+}
+
 function exactOptimalClosedRoute(start, points) {
   // หาลำดับที่ "ระยะทางรวมไป-กลับจุดเริ่มสั้นที่สุดจริง" ด้วยวิธี Held-Karp (Dynamic Programming)
   // แม่นยำกว่าการเดาแบบ heuristic และรับประกันว่าเป็นวงที่ดีที่สุดเท่าที่จะเป็นไปได้ (ไม่เก็บย้อนหลังแน่นอน)
@@ -1335,27 +1417,31 @@ function removeSameStop(rows, target) {
 
 function orderPumpFirstRoute(start, pumpRow, otherRows) {
   // เงื่อนไขสำหรับ “ตามแผนปรับปรุงปั๊ม”:
-  // จุดที่ 1 ต้องเป็นจุดปรับปรุงปั๊มเสมอ แล้วค่อยจัดจุดออกตลาดที่เหลือแบบวงกลม
-  // จำกัดรวมไม่เกิน 9 จุด/วง และระยะทางไป-กลับรวมไม่เกิน 350 กม. โดยจุดปรับปรุงปั๊มห้ามถูกตัดออก
-  if (!pumpRow) return orderCircularRoute(start, otherRows || []);
+  // จุดปรับปรุงปั๊ม = จุดที่ 1 เสมอ แล้วจัดจุดออกตลาดที่เหลือให้เป็นวงกลมเดินทางเดียว วนกลับ "จุดเริ่มต้นจริง"
+  // ใช้ exactOptimalRouteFixedFirst เพื่อรับประกันว่าเลขลำดับไล่ตามเส้นทาง ไม่วิ่งย้อนกลับ
+  if (!pumpRow) return orderCleanClosedLoop(start, otherRows || []);
 
   const pivot = validCoord(pumpRow)
     ? { lat: toNumber(pumpRow.lat), lng: toNumber(pumpRow.lng) }
     : start;
 
   const rest = removeSameStop(otherRows || [], pumpRow);
-  // เป้าหมายวงกลม 7 จุด (รวมจุดปั๊ม): เลือกจุดออกตลาดรอบ ๆ ปั๊มที่ต่อเป็นวงได้ดีที่สุด PREFERRED-1 จุด
-  // จุดที่เหลือ (เกินเป้า 7 จุด) จะไม่ถูกยัดลงวงนี้ แต่ยกไปเป็นแผนรอบถัดไป เพื่อให้วงกลมสวยไม่วิ่งซิกแซก
+  // เป้าหมายวงกลม 7 จุด (รวมจุดปั๊ม): เลือกจุดออกตลาดรอบ ๆ ที่ต่อเป็นวงได้ดีที่สุด PREFERRED-1 จุด
+  // จุดที่เหลือ (เกินเป้า) ยกไปเป็นแผนรอบถัดไป เพื่อให้วงกลมสวยไม่วิ่งซิกแซก
   const preferredRestCount = Math.max(0, PREFERRED_ROUTE_STOPS - 1);
   const bestRest = selectBestLoopSubset(pivot, rest, preferredRestCount);
-  const orderedRest = orderCircularRoute(pivot, bestRest);
+
   const protectedKeys = new Set([rowUniqueKey(pumpRow)]);
-  let capped = capRouteByDistanceKm(start, [pumpRow, ...orderedRest], MAX_ROUTE_STRAIGHT_KM, protectedKeys);
-  if (capped.length > 3) {
-    const cappedRest = removeSameStop(capped, pumpRow);
-    capped = [pumpRow, ...refineClosedRoute(pivot, cappedRest)];
+  // จัดลำดับที่ดีที่สุดจริง โดยล็อกจุดปั๊มเป็นจุดที่ 1 และวนกลับจุดเริ่มต้น
+  let ordered = exactOptimalRouteFixedFirst(start, pumpRow, bestRest);
+  // คุมระยะทางไม่เกิน 350 กม. โดยไม่ตัดจุดปั๊ม แล้วจัดลำดับใหม่อีกครั้งถ้ามีการตัดจุด
+  const capped = capRouteByDistanceKm(start, ordered, MAX_ROUTE_STRAIGHT_KM, protectedKeys);
+  if (capped.length !== ordered.length && capped.length > 1) {
+    ordered = exactOptimalRouteFixedFirst(start, pumpRow, removeSameStop(capped, pumpRow));
+  } else {
+    ordered = capped;
   }
-  return capped;
+  return ordered;
 }
 function takeByStatusForMeter(marketRows, pump) {
   const selectedBU = getSelectedStartBU();
@@ -1833,26 +1919,13 @@ function buildNormalPlanRows(marketRows, planDays) {
       const planDate = addDaysTH(today, dayIndex);
       const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
       const start = startForRoute(chunk);
-      const orderedBase = hasMarketStatusFilterSelected()
-        ? orderStatusFilterRoute(start, chunk)
-        : orderNormalMarketRoute(start, chunk);
-      let ordered = hasMarketStatusFilterSelected()
-        ? orderedBase
-        : applyNormalRouteFieldFeedback(start, orderedBase, chunk);
-      // สำหรับสายที่ไม่มีกติกาพิเศษเฉพาะหน้างาน (ST55/ST57) ให้เทียบกับคำตอบที่ดีที่สุดจริง (Held-Karp)
-      // แล้วเลือกอันที่ระยะสั้นกว่า เพื่อไม่ให้พลาดเส้นทางที่ดีกว่าไปเพราะกฎ heuristic เดิม
-      const isFieldVerifiedRoute = !hasMarketStatusFilterSelected() && (isNormalST55Route(chunk) || isNormalST57Route(chunk));
-      if (!isFieldVerifiedRoute && chunk.length <= EXACT_ROUTE_MAX_POINTS) {
-        const exactAlt = exactOptimalClosedRoute(start, chunk);
-        if (exactAlt && exactAlt.length === chunk.filter(validCoord).length) {
-          const exactAltFull = [...exactAlt, ...chunk.filter(p => !validCoord(p))];
-          if (routeDistanceFromStart(start, exactAltFull) < routeDistanceFromStart(start, ordered) - 0.001) {
-            ordered = exactAltFull;
-          }
-        }
-      }
-      // คุมระยะทางรวมไป-กลับไม่เกิน 350 กม. ทุกโหมด/ทุกสถานะที่เลือก
-      ordered = capRouteByDistanceKm(start, ordered, MAX_ROUTE_STRAIGHT_KM);
+      // โหมดวันปกติ/ออกตลาดทั่วไป และตอนเลือกสถานะ:
+      // จุดที่ 1 = จุดที่ใกล้จุดเริ่มต้นที่สุด แล้วจัดจุดที่เหลือให้เป็นวงกลมเดินทางเดียว วนกลับจุดเริ่มต้น
+      // ใช้ orderCleanClosedLoop (exact TSP วนกลับฐาน) รับประกันเลขลำดับไล่ตามเส้นทาง ไม่วิ่งย้อนกลับ
+      let ordered = orderCleanClosedLoop(start, chunk);
+      // คุมระยะทางรวมไป-กลับไม่เกิน 350 กม. ทุกโหมด/ทุกสถานะที่เลือก แล้วจัดลำดับใหม่ถ้ามีการตัดจุด
+      const capped = capRouteByDistanceKm(start, ordered, MAX_ROUTE_STRAIGHT_KM);
+      ordered = capped.length !== ordered.length ? orderCleanClosedLoop(start, capped) : capped;
       ordered.forEach((row, idx) => output.push({
         ...row,
         plan_day: dayIndex + 1,
@@ -1915,7 +1988,7 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
   candidates.forEach((repair, repairIndex) => {
     const relatedMarkets = uniqueRowsByIdName(takeByStatusForMeter(marketRows, repair));
 
-    // จุดซ่อมต้องอยู่ในแผนเสมอ แล้วต่อด้วยจุดออกตลาดในสายเดียวกัน
+    // จุดซ่อมต้องอยู่ในแผนเสมอ เป็นจุดที่ 1 แล้วต่อด้วยจุดออกตลาดในสายเดียวกันเป็นวงกลมเดินทางเดียว
     // เล็งไว้ที่ 7 จุด/วง (รวมจุดซ่อม) และเลือกชุดจุดที่ต่อเป็นวงกลมได้ดีที่สุด โดยจุดซ่อมห้ามถูกตัดออก
     const routePointsAll = uniqueRowsByIdName([repair, ...relatedMarkets]);
     const start = startForRoute(routePointsAll);
@@ -1923,9 +1996,21 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
     // selectBestLoopSubset ทำงานเฉพาะจุดที่มีพิกัด ส่วนจุดที่ไม่มีพิกัด (เช่น repair ที่ยังไม่กรอกพิกัด) จะถูกต่อท้ายเสมอ
     const noCoordPoints = routePointsAll.filter(p => !validCoord(p));
     const validPointsCapped = selectBestLoopSubset(start, routePointsAll, PREFERRED_ROUTE_STOPS, repairProtectedKeys);
-    const routePoints = [...validPointsCapped, ...noCoordPoints];
-    let ordered = orderCircularRoute(start, routePoints);
-    ordered = capRouteByDistanceKm(start, ordered, MAX_ROUTE_STRAIGHT_KM, repairProtectedKeys);
+    // จัดลำดับที่ดีที่สุดจริง โดยล็อกจุดซ่อมเป็นจุดที่ 1 และวนกลับจุดเริ่มต้นจริง
+    const repairRest = validCoord(repair)
+      ? validPointsCapped.filter(p => rowUniqueKey(p) !== rowUniqueKey(repair))
+      : validPointsCapped;
+    let ordered = validCoord(repair)
+      ? exactOptimalRouteFixedFirst(start, repair, repairRest)
+      : orderCleanClosedLoop(start, validPointsCapped);
+    ordered = [...ordered, ...noCoordPoints];
+    const capped = capRouteByDistanceKm(start, ordered, MAX_ROUTE_STRAIGHT_KM, repairProtectedKeys);
+    if (capped.length !== ordered.length && validCoord(repair)) {
+      const cappedRest = capped.filter(p => validCoord(p) && rowUniqueKey(p) !== rowUniqueKey(repair));
+      ordered = [...exactOptimalRouteFixedFirst(start, repair, cappedRest), ...capped.filter(p => !validCoord(p))];
+    } else {
+      ordered = capped;
+    }
     const routeDate = repair.dateObj
       ? repair.dateObj.toLocaleDateString("th-TH", { day:"numeric", month:"long", year:"2-digit" })
       : thaiMonthYearLabel();
