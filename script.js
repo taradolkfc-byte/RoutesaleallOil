@@ -58,7 +58,7 @@ function applySelectedRouteToForm(form) {
 
 const CHECKIN_RADIUS_METER = 100;
 const MAX_PLAN_DAYS = 7;
-const MAX_STOPS_PER_DAY = 16;
+const MAX_STOPS_PER_DAY = 9;
 // จำกัดจำนวนจุดที่ส่งเข้า Map และ Google Maps ให้ตรงกัน ไม่เกิน 9 จุด ตามเงื่อนไขใช้งานจริง
 const MAX_ROUTE_CUSTOMER_STOPS = 9;
 
@@ -2237,6 +2237,461 @@ async function checkInGps() {
     status.style.color = "#dc2626";
     btn.disabled = false;
   }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+}
+
+
+
+/* =========================================================
+   KCE ROUTE ENGINE OVERRIDE 2026-07
+   เป้าหมาย: ใช้กับทุกโหมด/ทุกสถานะ, วางเส้นทางเป็นวงปิด,
+   เรียงลำดับจุด 1-9 จากจุดเริ่ม → วนรอบพื้นที่ → กลับจุดเริ่ม,
+   จำกัดสูงสุด 9 จุด และประมาณระยะทางไม่เกิน 350 กม./วัน
+   หมายเหตุ: โหมดปรับปรุงปั๊ม/ตารางซ่อม บังคับจุดงานหลักเป็นจุดที่ 1
+========================================================= */
+const MIN_ROUTE_CUSTOMER_STOPS = 7;
+const MAX_ROUTE_DISTANCE_KM = 350;
+const ROAD_DISTANCE_FACTOR = 1.32;
+
+function pointKeyForRoute(p) {
+  return `${norm(p && p.customer_id)}|${norm(p && p.customer_name)}|${cleanText(p && p.lat)}|${cleanText(p && p.lng)}|${cleanText(p && p.type)}`;
+}
+
+function uniqueRoutePoints(points) {
+  const seen = new Set();
+  const out = [];
+  (points || []).forEach(p => {
+    if (!p) return;
+    const key = pointKeyForRoute(p);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ ...p });
+  });
+  return out;
+}
+
+function protectedPointKey(p) {
+  return pointKeyForRoute(p);
+}
+
+function estimateRoadDistanceKm(start, order) {
+  return routeDistanceFromStart(start, order || []) * ROAD_DISTANCE_FACTOR;
+}
+
+function routePriorityNumber(row) {
+  const type = cleanText(row && row.type);
+  if (type === 'ปรับปรุงปั๊ม') return 0;
+  if (type === 'ซ่อม') return 1;
+  const g = statusGroup(row && row.status);
+  if (g === 'ลูกค้าหาย') return 2;
+  if (g === 'ลูกค้าหายเกิน 60 วัน') return 3;
+  if (g === 'ลูกค้าเสี่ยงหาย') return 4;
+  if (g === 'ลูกค้าใหม่/Winback') return 5;
+  if (g === 'ลูกค้าซื้อขายประจำ') return 6;
+  return 9;
+}
+
+function solveShortestPathOrder(startNode, visitPoints, endNode) {
+  const pts = (visitPoints || []).filter(validCoord).map(p => ({ ...p }));
+  const n = pts.length;
+  if (n <= 1) return pts;
+
+  const totalMasks = 1 << n;
+  const dp = Array.from({ length: totalMasks }, () => Array(n).fill(Infinity));
+  const prev = Array.from({ length: totalMasks }, () => Array(n).fill(-1));
+
+  for (let i = 0; i < n; i++) {
+    dp[1 << i][i] = haversine(startNode, { lat: toNumber(pts[i].lat), lng: toNumber(pts[i].lng) });
+  }
+
+  for (let mask = 1; mask < totalMasks; mask++) {
+    for (let last = 0; last < n; last++) {
+      const currentDist = dp[mask][last];
+      if (!Number.isFinite(currentDist)) continue;
+      for (let next = 0; next < n; next++) {
+        if (mask & (1 << next)) continue;
+        const newMask = mask | (1 << next);
+        const d = currentDist + haversine(
+          { lat: toNumber(pts[last].lat), lng: toNumber(pts[last].lng) },
+          { lat: toNumber(pts[next].lat), lng: toNumber(pts[next].lng) }
+        );
+        if (d < dp[newMask][next]) {
+          dp[newMask][next] = d;
+          prev[newMask][next] = last;
+        }
+      }
+    }
+  }
+
+  const full = totalMasks - 1;
+  let bestLast = 0;
+  let bestScore = Infinity;
+  for (let last = 0; last < n; last++) {
+    const d = dp[full][last] + haversine(
+      { lat: toNumber(pts[last].lat), lng: toNumber(pts[last].lng) },
+      endNode
+    );
+    if (d < bestScore) {
+      bestScore = d;
+      bestLast = last;
+    }
+  }
+
+  const orderIdx = [];
+  let mask = full;
+  let last = bestLast;
+  while (last >= 0) {
+    orderIdx.push(last);
+    const p = prev[mask][last];
+    mask = mask ^ (1 << last);
+    last = p;
+  }
+  orderIdx.reverse();
+  return orderIdx.map(i => pts[i]);
+}
+
+function exactClosedRouteOrder(start, points, fixedFirst) {
+  const valid = uniqueRoutePoints(points).filter(validCoord);
+  const noCoord = uniqueRoutePoints(points).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+
+  let ordered;
+  if (fixedFirst && validCoord(fixedFirst)) {
+    const fixedKey = protectedPointKey(fixedFirst);
+    const fixed = valid.find(p => protectedPointKey(p) === fixedKey) || { ...fixedFirst };
+    const remaining = valid.filter(p => protectedPointKey(p) !== fixedKey);
+    const tail = solveShortestPathOrder(
+      { lat: toNumber(fixed.lat), lng: toNumber(fixed.lng) },
+      remaining,
+      { lat: start.lat, lng: start.lng }
+    );
+    ordered = [fixed, ...tail];
+  } else {
+    ordered = solveShortestPathOrder(
+      { lat: start.lat, lng: start.lng },
+      valid,
+      { lat: start.lat, lng: start.lng }
+    );
+  }
+  return [...ordered, ...noCoord];
+}
+
+function routeRemovalScore(start, order, index, protectedKeys) {
+  const row = order[index];
+  if (!row || protectedKeys.has(protectedPointKey(row))) return -Infinity;
+  const before = estimateRoadDistanceKm(start, order);
+  const after = estimateRoadDistanceKm(start, order.filter((_, i) => i !== index));
+  const saving = before - after;
+  const far = haversine(start, { lat: toNumber(row.lat), lng: toNumber(row.lng) });
+  const lowPriorityBonus = routePriorityNumber(row) * 0.8;
+  return saving + far * 0.04 + lowPriorityBonus;
+}
+
+function enforceRouteConstraints(start, order, fixedFirst) {
+  let route = uniqueRoutePoints(order).filter(validCoord);
+  const fixedKey = fixedFirst && validCoord(fixedFirst) ? protectedPointKey(fixedFirst) : '';
+  const protectedKeys = new Set(fixedKey ? [fixedKey] : []);
+
+  if (route.length > MAX_ROUTE_CUSTOMER_STOPS) {
+    // ตัดจุดเกิน 9 โดยให้ระบบเลือกจุดที่ทำให้วงเสีย/ไกลเกินออกก่อน
+    while (route.length > MAX_ROUTE_CUSTOMER_STOPS) {
+      let removeIndex = -1;
+      let best = -Infinity;
+      for (let i = 0; i < route.length; i++) {
+        const score = routeRemovalScore(start, route, i, protectedKeys);
+        if (score > best) { best = score; removeIndex = i; }
+      }
+      if (removeIndex < 0) route.pop();
+      else route.splice(removeIndex, 1);
+    }
+  }
+
+  // คุมระยะต่อวันไม่เกิน 350 กม. เป็นหลัก ถ้าข้อมูลกระจายมากอาจต่ำกว่า 7 จุดได้
+  let guard = 0;
+  while (route.length > 1 && estimateRoadDistanceKm(start, route) > MAX_ROUTE_DISTANCE_KM && guard < 20) {
+    guard++;
+    let removeIndex = -1;
+    let best = -Infinity;
+    for (let i = 0; i < route.length; i++) {
+      const score = routeRemovalScore(start, route, i, protectedKeys);
+      if (score > best) { best = score; removeIndex = i; }
+    }
+    if (removeIndex < 0) break;
+    route.splice(removeIndex, 1);
+  }
+
+  return route;
+}
+
+function selectClusterForBestLoop(start, points, fixedFirst) {
+  let valid = uniqueRoutePoints(points).filter(validCoord);
+  if (!valid.length) return [];
+
+  const fixedKey = fixedFirst && validCoord(fixedFirst) ? protectedPointKey(fixedFirst) : '';
+  if (valid.length <= MAX_ROUTE_CUSTOMER_STOPS) return valid;
+
+  if (fixedKey) {
+    const fixed = valid.find(p => protectedPointKey(p) === fixedKey) || fixedFirst;
+    const rest = valid.filter(p => protectedPointKey(p) !== fixedKey);
+    const fixedPoint = { lat: toNumber(fixed.lat), lng: toNumber(fixed.lng) };
+    const selected = rest
+      .map(p => ({
+        p,
+        score: haversine(fixedPoint, { lat: toNumber(p.lat), lng: toNumber(p.lng) }) * 0.70 +
+               haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }) * 0.20 +
+               routePriorityNumber(p) * 2.0
+      }))
+      .sort((a, b) => a.score - b.score)
+      .slice(0, MAX_ROUTE_CUSTOMER_STOPS - 1)
+      .map(x => x.p);
+    return [fixed, ...selected];
+  }
+
+  // สร้างหลาย cluster จาก seed ต่าง ๆ แล้วเลือกวงที่สั้น/แน่นที่สุด
+  const seeds = [...valid]
+    .map(p => ({
+      p,
+      score: routePriorityNumber(p) * 3 + haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }) * 0.08
+    }))
+    .sort((a, b) => a.score - b.score)
+    .slice(0, Math.min(14, valid.length))
+    .map(x => x.p);
+
+  const clusters = [];
+  seeds.forEach(seed => {
+    const seedPoint = { lat: toNumber(seed.lat), lng: toNumber(seed.lng) };
+    const rest = valid.filter(p => protectedPointKey(p) !== protectedPointKey(seed));
+    const selected = rest
+      .map(p => ({
+        p,
+        score: haversine(seedPoint, { lat: toNumber(p.lat), lng: toNumber(p.lng) }) * 0.72 +
+               haversine(start, { lat: toNumber(p.lat), lng: toNumber(p.lng) }) * 0.18 +
+               routePriorityNumber(p) * 1.8
+      }))
+      .sort((a, b) => a.score - b.score)
+      .slice(0, MAX_ROUTE_CUSTOMER_STOPS - 1)
+      .map(x => x.p);
+    clusters.push([seed, ...selected]);
+  });
+
+  let bestCluster = clusters[0] || valid.slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  let bestScore = Infinity;
+  clusters.forEach(cluster => {
+    const ordered = exactClosedRouteOrder(start, cluster, null).filter(validCoord);
+    const km = estimateRoadDistanceKm(start, ordered);
+    const priorityPenalty = ordered.reduce((sum, p) => sum + routePriorityNumber(p), 0) * 0.35;
+    const underLimitBonus = km <= MAX_ROUTE_DISTANCE_KM ? -45 : 0;
+    const sizeBonus = Math.min(ordered.length, MAX_ROUTE_CUSTOMER_STOPS) >= MIN_ROUTE_CUSTOMER_STOPS ? -18 : 0;
+    const score = km + priorityPenalty + underLimitBonus + sizeBonus;
+    if (score < bestScore) {
+      bestScore = score;
+      bestCluster = cluster;
+    }
+  });
+
+  return bestCluster;
+}
+
+function buildBestLoopOrder(start, points, options = {}) {
+  const fixedFirst = options.fixedFirst || null;
+  const cluster = selectClusterForBestLoop(start, points, fixedFirst);
+  let ordered = exactClosedRouteOrder(start, cluster, fixedFirst).filter(validCoord);
+  ordered = enforceRouteConstraints(start, ordered, fixedFirst);
+  ordered = exactClosedRouteOrder(start, ordered, fixedFirst).filter(validCoord);
+  return ordered;
+}
+
+function expandRelatedMarketRowsForJob(jobRow, marketRows, limit = 36) {
+  const baseBU = cleanText(jobRow && jobRow.bu).toUpperCase();
+  const baseMeter = normalizeMeter((jobRow && (jobRow.meter || jobRow.meterKey)) || '');
+  const basePoint = validCoord(jobRow)
+    ? { lat: toNumber(jobRow.lat), lng: toNumber(jobRow.lng) }
+    : null;
+
+  const selectedBU = getSelectedStartBU();
+  const candidates = uniqueRowsByIdName((marketRows || [])
+    .filter(validCoord)
+    .filter(m => !selectedBU || cleanText(m.bu).toUpperCase() === selectedBU.toUpperCase())
+    .filter(m => !baseBU || !m.bu || cleanText(m.bu).toUpperCase() === baseBU || baseBU === 'KCG'));
+
+  const scored = candidates.map(m => {
+    const sameMeter = baseMeter && normalizeMeter(m.meter || m.meterKey) === baseMeter ? -35 : 0;
+    const sameBU = baseBU && cleanText(m.bu).toUpperCase() === baseBU ? -12 : 0;
+    const dist = basePoint ? haversine(basePoint, { lat: toNumber(m.lat), lng: toNumber(m.lng) }) : 0;
+    return {
+      row: m,
+      score: dist + routePriorityNumber(m) * 4 + sameMeter + sameBU
+    };
+  }).sort((a, b) => a.score - b.score);
+
+  return scored.slice(0, limit).map(x => x.row);
+}
+
+// Override: ทุกโหมดที่ไม่ได้บังคับจุดงานหลัก ใช้ TSP วงปิด 1-9 จุด
+function orderCircularRoute(start, points) {
+  const noCoord = uniqueRoutePoints(points).filter(p => !validCoord(p));
+  return [...buildBestLoopOrder(start, points), ...noCoord];
+}
+
+// Override: Dropdown เลือกสถานะ ใช้ logic เดียวกันกับวงปิด ไม่แยกอัลกอริทึมให้เพี้ยน
+function orderStatusFilterRoute(start, points) {
+  const noCoord = uniqueRoutePoints(points).filter(p => !validCoord(p));
+  return [...buildBestLoopOrder(start, points), ...noCoord];
+}
+
+// Override: วันปกติ/ออกตลาดทั่วไป ใช้ logic วงปิดเหมือนต้นแบบ
+function orderNormalMarketRoute(start, points) {
+  const noCoord = uniqueRoutePoints(points).filter(p => !validCoord(p));
+  return [...buildBestLoopOrder(start, points), ...noCoord];
+}
+
+// Override: ปรับปรุงปั๊ม จุดปรับปรุงต้องเป็นจุด 1 ก่อนเสมอ
+function orderPumpFirstRoute(start, pumpRow, otherRows) {
+  if (!pumpRow) return orderCircularRoute(start, otherRows || []);
+  const all = uniqueRoutePoints([pumpRow, ...(otherRows || [])]);
+  const noCoord = all.filter(p => !validCoord(p));
+  return [...buildBestLoopOrder(start, all, { fixedFirst: pumpRow }), ...noCoord];
+}
+
+function orderFixedJobFirstRoute(start, jobRow, otherRows) {
+  if (!jobRow) return orderCircularRoute(start, otherRows || []);
+  const all = uniqueRoutePoints([jobRow, ...(otherRows || [])]);
+  const noCoord = all.filter(p => !validCoord(p));
+  return [...buildBestLoopOrder(start, all, { fixedFirst: jobRow }), ...noCoord];
+}
+
+// Override: แผนปรับปรุงปั๊ม เติมจุดออกตลาดใกล้เคียงเพื่อให้ได้ 7-9 จุดถ้าข้อมูลมีพอ
+function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
+  const selectedBU = getSelectedStartBU();
+  const selectedPumps = chooseOnePumpPerMeterCurrentMonth(pumpRows)
+    .filter(p => !selectedBU || cleanText(p.bu).toUpperCase() === selectedBU.toUpperCase());
+  const output = [];
+
+  selectedPumps.forEach(pump => {
+    const relatedMarkets = expandRelatedMarketRowsForJob(pump, marketRows, 42);
+    const routeDate = pump.dateObj ? pump.dateObj.toLocaleDateString('th-TH', { day: 'numeric', month: 'long', year: '2-digit' }) : pump.dateRaw;
+    const routeId = `${pump.bu || 'BU-?'} สาย ${pump.meterKey} วันที่ ${routeDate}`;
+    const start = startForRoute([pump, ...relatedMarkets]);
+    const ordered = orderPumpFirstRoute(start, pump, relatedMarkets).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+    ordered.forEach((row, idx) => output.push({
+      ...row,
+      plan_day: 1,
+      plan_date: pump.dateObj || thaiNow(),
+      route_group: routeId,
+      stop_no: `${idx + 1}/${ordered.length}`,
+      start_name: start.name,
+      priorityLabel: idx === 0 && row.type === 'ปรับปรุงปั๊ม' ? '1-ปรับปรุงปั๊ม' : row.priorityLabel
+    }));
+  });
+
+  const repairs = repairRows
+    .filter(r => inCurrentThaiMonth(r.dateObj))
+    .map(r => ({ ...r, plan_day: 1, plan_date: r.dateObj || thaiNow(), route_group: 'ตารางซ่อมเดือนปัจจุบัน', stop_no: '-', start_name: '-' }));
+  return [...output, ...repairs];
+}
+
+function takeNextBestLoopChunk(start, available, fixedFirst = null) {
+  const ordered = buildBestLoopOrder(start, available, fixedFirst).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  const keys = new Set(ordered.map(pointKeyForRoute));
+  const remaining = (available || []).filter(p => !keys.has(pointKeyForRoute(p)));
+  return { ordered, remaining };
+}
+
+// Override: วันปกติ + เลือกสถานะ ทุกสาย ใช้วงปิดและแยกวันตาม planDays
+function buildNormalPlanRows(marketRows, planDays) {
+  const today = thaiNow();
+  const selectedBU = getSelectedStartBU();
+  const selectedMarketStatus = getMarketStatusFilterValue();
+  const candidates = marketRows
+    .filter(r => !selectedBU || cleanText(r.bu).toUpperCase() === selectedBU.toUpperCase())
+    .filter(r => marketStatusFilterMatch(r, selectedMarketStatus))
+    .filter(validCoord)
+    .sort((a, b) =>
+      (marketScore(a.status) - marketScore(b.status)) ||
+      cleanText(a.bu).localeCompare(cleanText(b.bu), 'th') ||
+      cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), 'th')
+    );
+
+  const groups = new Map();
+  candidates.forEach(r => {
+    const key = `${r.bu || 'ไม่ระบุ'}|${r.meterKey || 'ไม่ระบุ'}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  });
+
+  const output = [];
+  groups.forEach((list, key) => {
+    const [bu, meterKey] = key.split('|');
+    let remaining = uniqueRowsByIdName(list);
+    for (let dayIndex = 0; dayIndex < planDays && remaining.length; dayIndex++) {
+      const planDate = addDaysTH(today, dayIndex);
+      const start = startForRoute(remaining);
+      const result = takeNextBestLoopChunk(start, remaining, null);
+      const ordered = result.ordered;
+      remaining = result.remaining;
+      if (!ordered.length) continue;
+      const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
+      ordered.forEach((row, idx) => output.push({
+        ...row,
+        plan_day: dayIndex + 1,
+        plan_date: planDate,
+        route_group: routeId,
+        stop_no: `${idx + 1}/${ordered.length}`,
+        start_name: start.name,
+        priorityLabel: row.priorityLabel || statusGroup(row.status)
+      }));
+    }
+  });
+  return output;
+}
+
+// Override: ตารางซ่อม จุดซ่อมเป็นจุด 1 แล้วเติมลูกค้าใกล้เคียงเข้าวง
+function buildRepairPlanRows(repairRows, marketRows, planDays) {
+  const selectedBU = getSelectedStartBU();
+  let candidates = repairRows
+    .filter(validCoord)
+    .filter(r => inCurrentThaiMonth(r.dateObj))
+    .map(r => {
+      const nearest = nearestStartPointForRow(r);
+      const buFromText = inferBUFromAnyText(r.customer_name, r.area, r.coordinator, r.meter, r.customer_id);
+      const bu = r.bu || buFromText || nearest.bu || '';
+      return { ...r, bu, __nearestStartName: nearest.name, __nearestBU: bu };
+    })
+    .filter(r => !selectedBU || cleanText(r.__nearestBU).toUpperCase() === selectedBU.toUpperCase())
+    .sort((a, b) =>
+      dateSortValue(a.dateObj) - dateSortValue(b.dateObj) ||
+      cleanText(a.bu).localeCompare(cleanText(b.bu), 'th') ||
+      cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), 'th') ||
+      cleanText(a.customer_name).localeCompare(cleanText(b.customer_name), 'th')
+    );
+
+  const output = [];
+  candidates.forEach((repair, repairIndex) => {
+    const relatedMarkets = expandRelatedMarketRowsForJob(repair, marketRows, 42);
+    const start = startForRoute([repair, ...relatedMarkets]);
+    const ordered = orderFixedJobFirstRoute(start, repair, relatedMarkets).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+    const routeDate = repair.dateObj
+      ? repair.dateObj.toLocaleDateString('th-TH', { day:'numeric', month:'long', year:'2-digit' })
+      : thaiMonthYearLabel();
+    const routeId = `ตารางซ่อม ${routeDate} ${repair.bu || selectedBU || 'ทุก BU'} สาย ${repair.meterKey || 'ไม่ระบุ'} • ${repair.customer_name || ''}`;
+
+    ordered.forEach((row, idx) => output.push({
+      ...row,
+      plan_day: 1,
+      plan_date: repair.dateObj || thaiNow(),
+      route_group: routeId,
+      stop_no: `${idx + 1}/${ordered.length}`,
+      start_name: start.name,
+      priorityLabel: row.type === 'ซ่อม' ? (row.priorityLabel || 'ซ่อม') : row.priorityLabel,
+      __repairIndex: repairIndex + 1
+    }));
+  });
+  return output;
+}
+
+// Override: หน้าแสดงผลไม่ต้องคำนวณเส้นทางซ้ำ ใช้ลำดับ stop_no ที่จัดไว้แล้ว
+function routeDisplayStops(list) {
+  const sorted = sortRowsByPlannedStopNo(list).filter(validCoord);
+  return sorted.slice(0, MAX_ROUTE_CUSTOMER_STOPS);
 }
 
 document.getElementById("planForm").addEventListener("submit", saveForm);
