@@ -2367,7 +2367,7 @@ async function renderMap(list) {
       if (metricsEl) {
         const done = validStops.filter(isCompleted).length;
         const remain = Math.max(0, validStops.length - done);
-        metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (เล็งวงกลม ${PREFERRED_ROUTE_STOPS} จุด สูงสุด ${MAX_ROUTE_CUSTOMER_STOPS} จุด และไม่เกิน ${MAX_ROUTE_DISTANCE_KM} กม./วง)`;
+        metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (จัดวงกลม ${MIN_ROUTE_STOPS}-${MAX_ROUTE_CUSTOMER_STOPS} จุด และไม่เกิน ${MAX_ROUTE_DISTANCE_KM} กม./วง)`;
       }
       return;
     }
@@ -3110,3 +3110,402 @@ function showAppPage(pageNo) {
 
 if (document.getElementById("btnPage1")) document.getElementById("btnPage1").addEventListener("click", () => showAppPage(1));
 if (document.getElementById("btnPage2")) document.getElementById("btnPage2").addEventListener("click", () => showAppPage(2));
+
+
+/* ========================================================================
+   KCE ROUTE ENGINE V8 — แก้เฉพาะ Logic วางแผนเส้นทางทุกโหมด/เลือกสถานะ
+   เงื่อนไข: 7-9 จุด, สูงสุด 9 จุด, วงกลม, ลดวิ่งย้อนกลับ, ไม่เกิน 350 กม./วัน
+   หมายเหตุ: ใช้การ override function เดิมด้านล่าง เพื่อคง HTML/CSS/Dashboard/Form เดิมครบถ้วน
+======================================================================== */
+function kcePointLatLng(p) {
+  return { lat: toNumber(p.lat), lng: toNumber(p.lng) };
+}
+
+function kceValidStops(points) {
+  return (points || []).filter(validCoord).map(p => ({ ...p }));
+}
+
+function kceNoCoordStops(points) {
+  return (points || []).filter(p => !validCoord(p));
+}
+
+function kceRouteKey(route) {
+  return (route || []).map(rowUniqueKey).join("|");
+}
+
+function kceCenter(points) {
+  const valid = kceValidStops(points);
+  if (!valid.length) return null;
+  return {
+    lat: valid.reduce((s, p) => s + toNumber(p.lat), 0) / valid.length,
+    lng: valid.reduce((s, p) => s + toNumber(p.lng), 0) / valid.length
+  };
+}
+
+function kceAngle(center, p) {
+  return Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng);
+}
+
+function kceRotate(route, index) {
+  if (!route || !route.length) return [];
+  const i = ((index % route.length) + route.length) % route.length;
+  return [...route.slice(i), ...route.slice(0, i)];
+}
+
+function kceInternalDistance(route) {
+  let total = 0;
+  for (let i = 0; i < route.length - 1; i++) total += haversine(kcePointLatLng(route[i]), kcePointLatLng(route[i + 1]));
+  return total;
+}
+
+function kceDistanceProfilePenalty(start, route) {
+  if (!route || route.length < 4) return 0;
+  const ds = route.map(p => haversine(start, kcePointLatLng(p)));
+  const maxD = Math.max(...ds, 0.0001);
+  let penalty = 0;
+
+  // ระหว่างทางไม่ควรวกกลับมาใกล้ฐาน แล้วออกไปไกลใหม่ เพราะคือการวิ่งฟรี/ย้อนกลับมาเก็บจุด
+  for (let i = 1; i < ds.length - 1; i++) {
+    const nearBaseMiddle = ds[i] < maxD * 0.42;
+    const farBefore = ds[i - 1] > ds[i] + Math.max(5, maxD * 0.12);
+    const farAfter = ds[i + 1] > ds[i] + Math.max(5, maxD * 0.12);
+    if (nearBaseMiddle && farBefore && farAfter) penalty += 180;
+  }
+
+  // จุดใกล้ฐานควรเป็นหัววงหรือท้ายวง ไม่ควรอยู่กลางลำดับ
+  const nearThreshold = Math.max(8, maxD * 0.35);
+  for (let i = 1; i < ds.length - 1; i++) {
+    if (ds[i] < nearThreshold) penalty += 55;
+  }
+
+  // ระยะจากฐานควรมี pattern ออกไป-วนรอบ-กลับ ไม่แกว่งขึ้นลงหลายรอบ
+  let changes = 0;
+  let prevSign = 0;
+  for (let i = 1; i < ds.length; i++) {
+    const diff = ds[i] - ds[i - 1];
+    const sign = Math.abs(diff) < 4 ? 0 : Math.sign(diff);
+    if (sign && prevSign && sign !== prevSign) changes++;
+    if (sign) prevSign = sign;
+  }
+  if (changes > 2) penalty += (changes - 2) * 35;
+  return penalty;
+}
+
+function kceLoopScore(start, route, fixedFirstKey = "") {
+  if (!route || !route.length) return Infinity;
+  const dStartFirst = haversine(start, kcePointLatLng(route[0]));
+  const dLastStart = haversine(kcePointLatLng(route[route.length - 1]), start);
+  const total = routeDistanceFromStart(start, route);
+  const internal = kceInternalDistance(route);
+  const turn = routeTurnPenalty(start, route);
+  const back = kceDistanceProfilePenalty(start, route);
+
+  // น้ำหนักหลัก: เส้นทางสั้น + หัว/ท้ายวงใกล้จุดเริ่ม + ลดหักกลับ/วกเข้าฐานกลางทาง
+  let score = (total * 1.0) + ((dStartFirst + dLastStart) * 1.55) + (turn * 2.6) + back;
+
+  // ถ้าไม่ได้บังคับจุดแรก ให้ลงโทษกรณีเริ่มจากจุดที่ไกลผิดฝั่งเกินไป แต่ยังเปิดโอกาสถ้าลูปโดยรวมสั้นกว่า
+  if (!fixedFirstKey && route.length >= 5) {
+    const ds = route.map(p => haversine(start, kcePointLatLng(p)));
+    const minD = Math.min(...ds);
+    if (dStartFirst > minD + 18) score += 45;
+  }
+
+  // ถ้ามี fixed first ต้องคงจุดแรกไว้จริง
+  if (fixedFirstKey && rowUniqueKey(route[0]) !== fixedFirstKey) score += 100000;
+
+  // ลด candidate ที่มี edge ภายในยาวผิดปกติ เพราะมักคือการตัดข้ามวง
+  const edges = [];
+  for (let i = 0; i < route.length - 1; i++) edges.push(haversine(kcePointLatLng(route[i]), kcePointLatLng(route[i + 1])));
+  if (edges.length) {
+    const avg = internal / edges.length;
+    const maxEdge = Math.max(...edges);
+    if (maxEdge > avg * 2.4 && maxEdge > 25) score += (maxEdge - avg * 2.4) * 2.2;
+  }
+  return score;
+}
+
+function kceAngleSweepBases(points) {
+  const valid = kceValidStops(points);
+  if (valid.length <= 2) return [valid];
+  const center = kceCenter(valid);
+  const asc = [...valid].sort((a, b) => kceAngle(center, a) - kceAngle(center, b));
+  const desc = [...asc].reverse();
+  return [asc, desc];
+}
+
+function kceGenerateLoopCandidates(start, points, fixedFirst = null) {
+  const valid = kceValidStops(points);
+  if (valid.length <= 2) return [valid];
+  const candidates = [];
+  const add = (route) => {
+    if (!route || route.length !== valid.length) return;
+    const keys = new Set(route.map(rowUniqueKey));
+    if (keys.size !== valid.length) return;
+    candidates.push(route.map(p => ({ ...p })));
+  };
+
+  const fixedKey = fixedFirst ? rowUniqueKey(fixedFirst) : "";
+  const bases = kceAngleSweepBases(valid);
+  bases.forEach(base => {
+    if (fixedKey) {
+      const idx = base.findIndex(p => rowUniqueKey(p) === fixedKey);
+      if (idx >= 0) add(kceRotate(base, idx));
+    } else {
+      for (let i = 0; i < base.length; i++) add(kceRotate(base, i));
+    }
+  });
+
+  // เพิ่ม candidate จาก nearest/farthest เฉพาะเพื่อเทียบคะแนน แต่จะไม่ใช้ถ้าทำให้คะแนนวกกลับสูง
+  const nearest = nearestNeighborOrder(start, valid);
+  if (fixedKey) {
+    const idx = nearest.findIndex(p => rowUniqueKey(p) === fixedKey);
+    if (idx >= 0) add(kceRotate(nearest, idx));
+  } else {
+    add(nearest);
+    add([...nearest].reverse());
+  }
+
+  // ดึงจุดที่อยู่ระหว่างทางขึ้นมาเป็น candidate เสริม ลดการวิ่งผ่านแล้วค่อยย้อนกลับ
+  const pulled = [];
+  candidates.forEach(c => pulled.push(pullPointsThatAreOnTheWay(start, c)));
+  pulled.forEach(add);
+
+  const seen = new Set();
+  return candidates.filter(c => {
+    const key = kceRouteKey(c);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function kceBestCircularOrder(start, points, fixedFirst = null) {
+  const valid = kceValidStops(points);
+  const noCoord = kceNoCoordStops(points);
+  if (valid.length <= 1) return [...valid, ...noCoord];
+  const fixedKey = fixedFirst && validCoord(fixedFirst) ? rowUniqueKey(fixedFirst) : "";
+  const candidates = kceGenerateLoopCandidates(start, valid, fixedFirst);
+  const best = (candidates.length ? candidates : [valid])
+    .sort((a, b) => kceLoopScore(start, a, fixedKey) - kceLoopScore(start, b, fixedKey))[0] || valid;
+  return [...best, ...noCoord];
+}
+
+function kceSelectRouteSubset(start, points, maxStops = MAX_ROUTE_CUSTOMER_STOPS, protectedKeys = new Set()) {
+  let valid = kceValidStops(points);
+  const noCoord = kceNoCoordStops(points);
+  if (valid.length <= maxStops) return [...valid, ...noCoord];
+
+  const required = valid.filter(p => protectedKeys.has(rowUniqueKey(p)));
+  const optional = valid.filter(p => !protectedKeys.has(rowUniqueKey(p)));
+  const slots = Math.max(0, maxStops - required.length);
+  if (slots <= 0) return required.slice(0, maxStops);
+
+  const center = kceCenter(valid) || start;
+  const rankedByPriority = [...optional]
+    .sort((a, b) => (marketScore(a.status) - marketScore(b.status)) || haversine(center, kcePointLatLng(a)) - haversine(center, kcePointLatLng(b)));
+  const rankedByCompact = [...optional]
+    .sort((a, b) => haversine(center, kcePointLatLng(a)) - haversine(center, kcePointLatLng(b)));
+  const rankedByOuter = [...optional]
+    .sort((a, b) => haversine(center, kcePointLatLng(b)) - haversine(center, kcePointLatLng(a)));
+
+  const candidateSets = [
+    [...required, ...rankedByPriority.slice(0, slots)],
+    [...required, ...rankedByCompact.slice(0, slots)],
+    [...required, ...rankedByOuter.slice(0, slots)]
+  ];
+
+  // สร้างชุดแบบ greedy จากจุดสำคัญ/จุดใกล้ฐาน แล้วเติมจุดที่ใกล้ชุดปัจจุบันที่สุด เพื่อให้วงไม่กระจายเกินไป
+  const seeds = [...rankedByPriority.slice(0, Math.min(6, rankedByPriority.length)), ...rankedByCompact.slice(0, Math.min(4, rankedByCompact.length))];
+  seeds.forEach(seed => {
+    const chosen = [...required];
+    if (!chosen.some(p => rowUniqueKey(p) === rowUniqueKey(seed))) chosen.push(seed);
+    while (chosen.length < maxStops) {
+      const rest = optional.filter(p => !chosen.some(c => rowUniqueKey(c) === rowUniqueKey(p)));
+      if (!rest.length) break;
+      rest.sort((a, b) => {
+        const da = Math.min(...chosen.map(c => haversine(kcePointLatLng(c), kcePointLatLng(a))));
+        const db = Math.min(...chosen.map(c => haversine(kcePointLatLng(c), kcePointLatLng(b))));
+        return da - db || marketScore(a.status) - marketScore(b.status);
+      });
+      chosen.push(rest[0]);
+    }
+    candidateSets.push(chosen);
+  });
+
+  const unique = [];
+  const seen = new Set();
+  candidateSets.forEach(set => {
+    const trimmed = uniqueRowsByIdName(set).slice(0, maxStops);
+    const key = kceRouteKey(trimmed);
+    if (!seen.has(key)) { seen.add(key); unique.push(trimmed); }
+  });
+
+  const bestSet = unique.sort((a, b) => {
+    const oa = kceBestCircularOrder(start, a);
+    const ob = kceBestCircularOrder(start, b);
+    return kceLoopScore(start, oa) - kceLoopScore(start, ob);
+  })[0] || valid.slice(0, maxStops);
+  return [...bestSet, ...noCoord];
+}
+
+// Override เดิม: ให้ทุกโหมดใช้วงกลมจริง ไม่ใช้ exact TSP ที่มักตัดข้ามวง/เลขกระโดด
+function orderCleanClosedLoop(start, points) {
+  const subset = kceSelectRouteSubset(start, points, MAX_ROUTE_CUSTOMER_STOPS);
+  return kceBestCircularOrder(start, subset);
+}
+
+function exactOptimalRouteFixedFirst(start, firstPoint, restPoints) {
+  if (!firstPoint) return orderCleanClosedLoop(start, restPoints || []);
+  const all = uniqueRowsByIdName([firstPoint, ...(restPoints || [])]);
+  const protectedKeys = new Set([rowUniqueKey(firstPoint)]);
+  const subset = kceSelectRouteSubset(start, all, MAX_ROUTE_CUSTOMER_STOPS, protectedKeys);
+  return kceBestCircularOrder(start, subset, firstPoint);
+}
+
+function refineClosedRoute(start, order) {
+  return kceBestCircularOrder(start, order || []);
+}
+
+function selectBestLoopSubset(start, points, targetSize, protectedKeys = new Set()) {
+  // แม้ caller เดิมส่ง targetSize=7 ให้ตีความใหม่เป็น 7-9 จุด โดยใช้ได้สูงสุด 9 จุดตามข้อมูลจริง
+  const target = Math.min(MAX_ROUTE_CUSTOMER_STOPS, Math.max(MIN_ROUTE_STOPS, Number(targetSize) || MAX_ROUTE_CUSTOMER_STOPS, kceValidStops(points).length));
+  return kceSelectRouteSubset(start, points || [], target, protectedKeys);
+}
+
+function finalizeRouteOrder(start, order, { maxStops = MAX_ROUTE_CUSTOMER_STOPS, maxKm = MAX_ROUTE_STRAIGHT_KM, protectedKeys = new Set(), fixedFirst = null } = {}) {
+  let route = kceSelectRouteSubset(start, order || [], maxStops, protectedKeys);
+  route = kceBestCircularOrder(start, route, fixedFirst);
+  route = capRouteByDistanceKm(start, route, maxKm, protectedKeys);
+  route = kceBestCircularOrder(start, route, fixedFirst && route.some(p => rowUniqueKey(p) === rowUniqueKey(fixedFirst)) ? fixedFirst : null);
+  return route;
+}
+
+function orderPumpFirstRoute(start, pumpRow, otherRows) {
+  if (!pumpRow) return orderCleanClosedLoop(start, otherRows || []);
+  const protectedKeys = new Set([rowUniqueKey(pumpRow)]);
+  return finalizeRouteOrder(start, [pumpRow, ...(otherRows || [])], {
+    maxStops: MAX_ROUTE_CUSTOMER_STOPS,
+    maxKm: MAX_ROUTE_STRAIGHT_KM,
+    protectedKeys,
+    fixedFirst: pumpRow
+  });
+}
+
+function orderStatusFilterRoute(start, points) {
+  // ใช้เมื่อเลือกสถานะ: ใช้ logic เดียวกับทุกโหมด คือเลือก 7-9 จุด/สูงสุด 9 แล้วเรียงเป็นวงกลม
+  return finalizeRouteOrder(start, points || [], {
+    maxStops: MAX_ROUTE_CUSTOMER_STOPS,
+    maxKm: MAX_ROUTE_STRAIGHT_KM
+  });
+}
+
+function buildNormalPlanRows(marketRows, planDays) {
+  const today = thaiNow();
+  const selectedBU = getSelectedStartBU();
+  const selectedMarketStatus = getMarketStatusFilterValue();
+  const candidates = marketRows
+    .filter(r => !selectedBU || cleanText(r.bu).toUpperCase() === selectedBU.toUpperCase())
+    .filter(r => marketStatusFilterMatch(r, selectedMarketStatus))
+    .filter(validCoord)
+    .sort((a,b) => (marketScore(a.status) - marketScore(b.status)) || cleanText(a.bu).localeCompare(cleanText(b.bu), "th") || cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), "th"));
+
+  const groups = new Map();
+  const buPool = new Map();
+  candidates.forEach(r => {
+    const key = `${r.bu || "ไม่ระบุ"}|${r.meterKey || "ไม่ระบุ"}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+    const buKey = r.bu || "ไม่ระบุ";
+    if (!buPool.has(buKey)) buPool.set(buKey, []);
+    buPool.get(buKey).push(r);
+  });
+
+  const usedKeys = new Set();
+  const output = [];
+  groups.forEach((list, key) => {
+    const [bu, meterKey] = key.split("|");
+    const chunkSize = MAX_ROUTE_CUSTOMER_STOPS;
+    const maxItems = Math.min(list.length, planDays * chunkSize);
+    const usable = list.slice(0, maxItems);
+    for (let dayIndex = 0; dayIndex < planDays; dayIndex++) {
+      let chunk = usable.slice(dayIndex * chunkSize, (dayIndex + 1) * chunkSize);
+      if (!chunk.length) continue;
+      chunk.forEach(r => usedKeys.add(rowUniqueKey(r)));
+
+      // ถ้าไม่ได้เลือกสถานะและจุดในสายมีน้อยกว่า 7 ให้เติมจาก BU เดียวกันที่ใกล้กลุ่ม เพื่อให้ได้วง 7-9 จุด
+      if (!hasMarketStatusFilterSelected() && chunk.length < MIN_ROUTE_STOPS) {
+        const pool = (buPool.get(bu) || []).filter(r => !usedKeys.has(rowUniqueKey(r)));
+        const centroid = routeCentroid(chunk) || startForRoute(chunk);
+        const ranked = pool
+          .map(p => ({ p, d: haversine(centroid, kcePointLatLng(p)) }))
+          .sort((a, b) => a.d - b.d || marketScore(a.p.status) - marketScore(b.p.status));
+        for (const { p } of ranked) {
+          if (chunk.length >= MAX_ROUTE_CUSTOMER_STOPS) break;
+          chunk = [...chunk, p];
+          usedKeys.add(rowUniqueKey(p));
+          if (chunk.length >= MIN_ROUTE_STOPS) break;
+        }
+      }
+
+      const planDate = addDaysTH(today, dayIndex);
+      const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
+      const start = startForRoute(chunk);
+      let ordered = hasMarketStatusFilterSelected()
+        ? orderStatusFilterRoute(start, chunk)
+        : finalizeRouteOrder(start, chunk, { maxStops: MAX_ROUTE_CUSTOMER_STOPS, maxKm: MAX_ROUTE_STRAIGHT_KM });
+      ordered.forEach((row, idx) => output.push({
+        ...row,
+        plan_day: dayIndex + 1,
+        plan_date: planDate,
+        route_group: routeId,
+        stop_no: `${idx + 1}/${ordered.length}`,
+        start_name: start.name,
+        priorityLabel: row.priorityLabel || statusGroup(row.status)
+      }));
+    }
+  });
+  return output;
+}
+
+function buildRepairPlanRows(repairRows, marketRows, planDays) {
+  const selectedBU = getSelectedStartBU();
+  let candidates = repairRows
+    .filter(r => inCurrentThaiMonth(r.dateObj))
+    .map(r => {
+      const nearest = nearestStartPointForRow(r);
+      const buFromText = inferBUFromAnyText(r.customer_name, r.area, r.coordinator, r.meter, r.customer_id);
+      const bu = r.bu || buFromText || nearest.bu || "";
+      return { ...r, bu, __nearestStartName: nearest.name, __nearestBU: bu };
+    })
+    .filter(r => !selectedBU || cleanText(r.__nearestBU).toUpperCase() === selectedBU.toUpperCase())
+    .sort((a,b) => dateSortValue(a.dateObj) - dateSortValue(b.dateObj) || cleanText(a.bu).localeCompare(cleanText(b.bu), "th") || cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), "th") || cleanText(a.customer_name).localeCompare(cleanText(b.customer_name), "th"));
+
+  const output = [];
+  candidates.forEach((repair, repairIndex) => {
+    const relatedMarkets = uniqueRowsByIdName(takeByStatusForMeter(marketRows, repair));
+    const routePointsAll = uniqueRowsByIdName([repair, ...relatedMarkets]);
+    const start = startForRoute(routePointsAll);
+    const protectedKeys = new Set([rowUniqueKey(repair)]);
+    let ordered = validCoord(repair)
+      ? finalizeRouteOrder(start, routePointsAll, { maxStops: MAX_ROUTE_CUSTOMER_STOPS, maxKm: MAX_ROUTE_STRAIGHT_KM, protectedKeys, fixedFirst: repair })
+      : finalizeRouteOrder(start, routePointsAll, { maxStops: MAX_ROUTE_CUSTOMER_STOPS, maxKm: MAX_ROUTE_STRAIGHT_KM, protectedKeys });
+
+    const routeDate = repair.dateObj
+      ? repair.dateObj.toLocaleDateString("th-TH", { day:"numeric", month:"long", year:"2-digit" })
+      : thaiMonthYearLabel();
+    const repairUniqueName = cleanText(repair.customer_name || `แถว ${repair.__repairSourceRow || repairIndex + 1}`);
+    const routeId = `ตารางซ่อม ${routeDate} ${repair.bu || selectedBU || "ทุก BU"} สาย ${repair.meterKey || "ไม่ระบุ"} • ${repairUniqueName}`;
+
+    ordered.forEach((row, idx) => output.push({
+      ...row,
+      plan_day: 1,
+      plan_date: repair.dateObj || thaiNow(),
+      route_group: routeId,
+      stop_no: `${idx + 1}/${ordered.length}`,
+      start_name: start.name,
+      priorityLabel: row.type === "ซ่อม" ? (row.priorityLabel || "ซ่อม") : row.priorityLabel,
+      __repairIndex: repairIndex + 1
+    }));
+  });
+  return output;
+}
