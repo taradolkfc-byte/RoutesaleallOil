@@ -64,7 +64,6 @@ tr:nth-child(even) td { background:#f9fafb; }
 }
 
 /* ===== Check-in GPS + Map marker update ===== */
-.reload-form-btn { background:#0b3b70; min-height:42px; align-self:end; }
 .checkin-btn { background:#16a34a; min-height:42px; align-self:end; }
 .checkin-btn:disabled { opacity:.65; cursor:not-allowed; }
 .route-number-icon span {
@@ -79,7 +78,7 @@ tr:nth-child(even) td { background:#f9fafb; }
 }
 .leaflet-marker-icon.route-start-icon,
 .leaflet-marker-icon.route-number-icon { background:transparent; border:0; }
-@media (max-width:900px){ .reload-form-btn,.checkin-btn{width:100%;} }
+@media (max-width:900px){ .checkin-btn{width:100%;} }
 
 
 /* ===== Final route/table fixes 20260615-08 ===== */
@@ -590,3 +589,12 @@ tr:nth-child(even) td { background:#f9fafb; }
   .dashboard-mini-cards,
   .two-charts{ grid-template-columns:1fr !important; }
 }
+
+/* ===== Route limit + form refresh update 20260706 ===== */
+.reload-form-btn {
+  background:#0b3b70;
+  min-height:42px;
+  align-self:end;
+}
+.reload-form-btn:hover { filter:brightness(1.05); }
+@media (max-width:900px){ .reload-form-btn{width:100%;} }
