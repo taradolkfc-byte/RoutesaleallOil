@@ -1,7 +1,7 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
 // URL Apps Script ของคุณ
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxu0zeUAfHU1YBI0KJRTFC97xRTsPvXPx8cbw-8iXKqzHomAy0T48reAcQouaS0Ob1A/exec";
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxLDIGniwUc2lNzG0ten-T4f7UMJ_RyA9dMYg1rphu9ZuVWicfiFOPpfdO_HyRNCTJ5/exec";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
@@ -117,7 +117,6 @@ async function fetchSheetByIndex(sheetName, optional = false) {
   const json = JSON.parse(jsonText);
   return json.table.rows.map(r => (r.c || []).map(c => c ? (c.f || c.v || "") : ""));
 }
-
 
 
 // ===== Robust dashboard saved-sheet reader =====
@@ -503,16 +502,16 @@ function buildVisitedSet(savedRows) {
   const ids = new Set();
   const names = new Set();
   savedRows.slice(1).forEach(r => {
-    const visitDate = parseDateTH(cell(r, 1)) || parseDateTH(cell(r, 0));
+    const visitDate = parseDateTH(savedCell(r, "วันที่ออกตลาด", 1)) || parseDateTH(savedCell(r, "วันที่บันทึกระบบ", 0));
     if (visitDate && !inCurrentThaiMonth(visitDate)) return;
 
-    // โครงสร้างชีตใหม่: 0 วันที่บันทึก, 1 วันที่ออกตลาด, 2 ประเภท, 3 รหัส, 4 ชื่อ, ... 14 สถานะเข้าพบ
+    // โครงสร้างชีตใหม่: 0 วันที่บันทึก, 1 วันที่ออกตลาด, 2 ประเภท, 3 รหัส, 4 ชื่อ, ... 13 สถานะเข้าพบ
     // ถ้าเป็นข้อมูลเก่าไม่มีคอลัมน์สถานะ ให้ถือว่า “สำเร็จ” เพื่อไม่ให้จุดเก่ากลับมาในแผน
     const visitStatus = cleanText(savedCell(r, "สถานะเข้าพบ", 13) || "สำเร็จ");
     if (visitStatus && visitStatus !== "สำเร็จ") return;
 
-    const idCandidates = [cell(r, 3), cell(r, 2)];
-    const nameCandidates = [cell(r, 4), cell(r, 3)];
+    const idCandidates = [savedCell(r, "รหัสลูกค้า", 3), cell(r, 2)];
+    const nameCandidates = [savedCell(r, "ชื่อลูกค้า/ชื่อปั๊ม", 4), cell(r, 3)];
     idCandidates.map(norm).filter(Boolean).forEach(x => ids.add(x));
     nameCandidates.map(norm).filter(Boolean).forEach(x => names.add(x));
   });
@@ -600,6 +599,7 @@ function normalizeRepair(rows) {
       };
     });
 }
+
 function normalizeMarket(rows) {
   return rows.slice(1).map(r => {
     const status = cell(r,10);
@@ -1640,6 +1640,7 @@ async function loadData() {
     if (dashBody) dashBody.innerHTML = `<tr><td colspan="9" class="loading">เกิดข้อผิดพลาด: ${escapeHtml(err.message)}</td></tr>`;
   }
 }
+
 function escapeHtml(str) {
   return cleanText(str).replace(/[&<>'"]/g, m => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[m]));
 }
@@ -2601,6 +2602,7 @@ document.getElementById("checkinBtn").addEventListener("click", checkInGps);
   }
 });
 loadData();
+
 
 /* ===== Page switch: Page 1 planning / Page 2 dashboard ===== */
 function showAppPage(pageNo) {
