@@ -1,7 +1,7 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
 // URL Apps Script ของคุณ
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxu0zeUAfHU1YBI0KJRTFC97xRTsPvXPx8cbw-8iXKqzHomAy0T48reAcQouaS0Ob1A/exec";
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxLDIGniwUc2lNzG0ten-T4f7UMJ_RyA9dMYg1rphu9ZuVWicfiFOPpfdO_HyRNCTJ5/exec";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
@@ -63,7 +63,8 @@ const MAX_STOPS_PER_DAY = 16;
 const MAX_ROUTE_CUSTOMER_STOPS = 9;
 const MIN_ROUTE_CUSTOMER_STOPS = 7;
 const MAX_ROUTE_DISTANCE_KM = 350;
-const ROAD_DISTANCE_FACTOR = 1.22;
+const ROAD_DISTANCE_FACTOR = 1.45;
+const VISIT_REFRESH_DAYS = 60;
 
 const COORDINATOR_PHONE_MAP = {
   "น้าฮ้อย": "082-1165845"
@@ -508,12 +509,18 @@ function completedLabel(row) {
 function buildVisitedSet(savedRows) {
   const ids = new Set();
   const names = new Set();
-  savedRows.slice(1).forEach(r => {
-    const visitDate = parseDateTH(savedCell(r, "วันที่ออกตลาด", 1)) || parseDateTH(savedCell(r, "วันที่บันทึกระบบ", 0));
-    if (visitDate && !inCurrentThaiMonth(visitDate)) return;
+  const today = thaiNow();
+  today.setHours(23, 59, 59, 999);
+  const cutoff = addDaysTH(today, -VISIT_REFRESH_DAYS);
+  cutoff.setHours(0, 0, 0, 0);
 
-    // โครงสร้างชีตใหม่: 0 วันที่บันทึก, 1 วันที่ออกตลาด, 2 ประเภท, 3 รหัส, 4 ชื่อ, ... 13 สถานะเข้าพบ
-    // ถ้าเป็นข้อมูลเก่าไม่มีคอลัมน์สถานะ ให้ถือว่า “สำเร็จ” เพื่อไม่ให้จุดเก่ากลับมาในแผน
+  (savedRows || []).slice(1).forEach(r => {
+    const visitDate = parseDateTH(savedCell(r, "วันที่ออกตลาด", 1)) || parseDateTH(savedCell(r, "วันที่บันทึกระบบ", 0));
+    if (!visitDate) return;
+
+    // จุดที่เช็คอินสำเร็จจะถูกตัดออกจากแผน 60 วัน แล้วกลับมาแสดงอีกครั้งอัตโนมัติ
+    if (visitDate < cutoff || visitDate > today) return;
+
     const visitStatus = cleanText(savedCell(r, "สถานะเข้าพบ", 13) || "สำเร็จ");
     if (visitStatus && visitStatus !== "สำเร็จ") return;
 
@@ -648,7 +655,7 @@ function chooseOnePumpPerMeterCurrentMonth(pumpRows) {
   const monthRows = pumpRows
     .filter(r => inCurrentThaiMonth(r.dateObj))
     .filter(r => cleanText(r.status) !== "เสร็จ")
-    /* แสดงจุดที่เช็คอินสำเร็จไว้ในแผน เพื่อให้ขึ้นเครื่องหมายถูก */;
+    .filter(r => !isVisited(r));
 
   const groups = new Map();
   monthRows.forEach(r => {
@@ -733,6 +740,7 @@ function rankMarketCandidatesForTarget(marketRows, target, start) {
   const targetPoint = validCoord(target) ? target : start;
 
   return uniqueRowsByIdName((marketRows || []).filter(validCoord))
+    .filter(m => !isVisited(m))
     .filter(m => !isSameStop(m, target || {}))
     .filter(m => !selectedBU || buEquivalent(m.bu, selectedBU))
     .filter(m => !targetBU || buEquivalent(m.bu, targetBU))
@@ -780,6 +788,46 @@ function limitRouteByStopsAndDistance(start, requiredRows, candidateRows, orderB
 
   return buildOrdered(selected);
 }
+function requiredRouteKeySet(requiredRows) {
+  const set = new Set();
+  (requiredRows || []).forEach(r => set.add(rowUniqueKey(r)));
+  return set;
+}
+
+function trimRouteToMaxDistance(start, orderedRows, requiredRows = [], minStops = MIN_ROUTE_CUSTOMER_STOPS) {
+  let rows = [...(orderedRows || [])];
+  const requiredKeys = requiredRouteKeySet(requiredRows);
+  const minAllowed = Math.max(1, Math.min(minStops, routeStopCount(rows)));
+
+  // ตัดจากท้ายก่อน เช่น จุด 8-9 ตามเคสตัวอย่าง เพื่อรักษาลำดับ 1-7 ที่ดีที่สุดไว้
+  while (routeStopCount(rows) > minAllowed && approxRoadDistanceKm(start, rows) > MAX_ROUTE_DISTANCE_KM) {
+    let removeIndex = -1;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (!validCoord(rows[i])) continue;
+      if (requiredKeys.has(rowUniqueKey(rows[i]))) continue;
+      removeIndex = i;
+      break;
+    }
+    if (removeIndex < 0) break;
+    rows.splice(removeIndex, 1);
+  }
+
+  // ถ้ายังเกิน 350 กม. ให้ลดต่อโดยยังรักษาจุดงานหลักไว้ เพราะเงื่อนไขระยะทางสำคัญกว่า
+  while (routeStopCount(rows) > requiredKeys.size && approxRoadDistanceKm(start, rows) > MAX_ROUTE_DISTANCE_KM) {
+    let removeIndex = -1;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (!validCoord(rows[i])) continue;
+      if (requiredKeys.has(rowUniqueKey(rows[i]))) continue;
+      removeIndex = i;
+      break;
+    }
+    if (removeIndex < 0) break;
+    rows.splice(removeIndex, 1);
+  }
+
+  return rows;
+}
+
 
 function nearestNeighborOrder(start, points) {
   const remaining = points.map(p => ({ ...p }));
@@ -1196,7 +1244,7 @@ function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
     const routeId = `${pump.bu || "BU-?"} สาย ${pump.meterKey} วันที่ ${routeDate}`;
     const start = startForRoute([pump]);
     const rankedMarkets = rankMarketCandidatesForTarget(marketRows, pump, start);
-    const ordered = limitRouteByStopsAndDistance(
+    let ordered = limitRouteByStopsAndDistance(
       start,
       [pump],
       rankedMarkets,
@@ -1206,6 +1254,7 @@ function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
         return orderPumpFirstRoute(start, pivotPump, rest);
       }
     );
+    ordered = trimRouteToMaxDistance(start, ordered, [pump]);
 
     ordered.forEach((row, idx) => output.push({
       ...row,
@@ -1566,7 +1615,7 @@ function buildNormalPlanRows(marketRows, planDays) {
     .filter(r => !selectedBU || cleanText(r.bu).toUpperCase() === selectedBU.toUpperCase())
     /* ใช้เฉพาะ Dropdown "เลือกสถานะ" เท่านั้น ไม่กระทบโหมดวางแผนอื่น */
     .filter(r => marketStatusFilterMatch(r, selectedMarketStatus))
-    /* แสดงจุดที่เช็คอินสำเร็จไว้ในแผน เพื่อให้ขึ้นเครื่องหมายถูก */
+    .filter(r => !isVisited(r))
     .filter(validCoord)
     .sort((a,b) => (marketScore(a.status) - marketScore(b.status)) || cleanText(a.bu).localeCompare(cleanText(b.bu), "th") || cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), "th"));
 
@@ -1634,6 +1683,7 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
   // แต่ละงานซ่อมจะถูกเติมจุดออกตลาดใกล้เคียง/สายเดียวกัน ให้ได้ 7-9 จุดเท่าที่ทำได้ โดยคุมระยะไม่เกินประมาณ 350 กม.
   let candidates = repairRows
     .filter(r => inCurrentThaiMonth(r.dateObj))
+    .filter(r => !isVisited(r))
     .map(r => {
       const nearest = nearestStartPointForRow(r);
       const buFromText = inferBUFromAnyText(r.customer_name, r.area, r.coordinator, r.meter, r.customer_id);
@@ -1653,12 +1703,13 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
   candidates.forEach((repair, repairIndex) => {
     const start = startForRoute([repair]);
     const rankedMarkets = rankMarketCandidatesForTarget(marketRows, repair, start);
-    const ordered = limitRouteByStopsAndDistance(
+    let ordered = limitRouteByStopsAndDistance(
       start,
       [repair],
       rankedMarkets,
       rows => orderCircularRoute(start, rows)
     );
+    ordered = trimRouteToMaxDistance(start, ordered, [repair]);
     const routeDate = repair.dateObj
       ? repair.dateObj.toLocaleDateString("th-TH", { day:"numeric", month:"long", year:"2-digit" })
       : thaiMonthYearLabel();
@@ -1768,18 +1819,25 @@ function routeDisplayStops(list) {
   // สำคัญ: ใช้ลำดับที่คำนวณไว้ตอนสร้างแผนแล้ว ไม่คำนวณซ้ำในหน้า Map
   // เพื่อให้การ์ดแผน / ตาราง / Map / Google Maps ตรงกัน และไม่เพิ่มจุดเกิน 9 จุด
   const sorted = sortRowsByPlannedStopNo(list).filter(validCoord);
+  const mode = getPlanSettings().mode;
+  const start = getRouteStartForList(list);
 
   // โหมดปรับปรุงปั๊ม: บังคับให้จุดปรับปรุงปั๊มเป็นจุดที่ 1 ใน Map/Google Maps เสมอ
-  // และจุดอื่น ๆ ยังคงไม่เกิน 8 จุด รวมทั้งหมดไม่เกิน 9 จุด
-  if (getPlanSettings().mode === "pump") {
+  if (mode === "pump") {
     const pump = sorted.find(isPumpRow);
     if (pump) {
       const rest = removeSameStop(sorted, pump);
-      return [pump, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+      const stops = [pump, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+      return trimRouteToMaxDistance(start, stops, [pump]);
     }
   }
 
-  return sorted.slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  const stops = sorted.slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  if (mode === "repair") {
+    const repair = stops.find(r => cleanText(r.type) === "ซ่อม");
+    return trimRouteToMaxDistance(start, stops, repair ? [repair] : []);
+  }
+  return stops;
 }
 function routeNavPoints(list) {
   const valid = routeDisplayStops(list);
