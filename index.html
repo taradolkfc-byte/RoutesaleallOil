@@ -13,7 +13,6 @@
       <h1>ระบบวางแผนออกตลาด KCE</h1>
       <p>แสดงแผนเฉพาะเดือนปัจจุบัน • ตัดจุดที่ออกตลาดแล้ว • เลือกจุดเริ่มต้นที่ใกล้ทั้งเส้นทางที่สุด</p>
     </div>
-    <button id="reloadBtn" type="button">รีเฟรชข้อมูล</button>
   </header>
 
   <nav class="page-tabs desktop-only" aria-label="สลับหน้า">
@@ -119,7 +118,12 @@
           </datalist>
         </label>
         <label>พื้นที่<input name="area" placeholder="ต./อ./จ." /></label>
-        <label>ผู้ประสานงาน<input name="coordinator" placeholder="ชื่อผู้ประสานงาน" /></label>
+        <label>ผู้ประสานงาน
+        <select name="coordinator" id="coordinatorSelect">
+          <option value="">เลือกผู้ประสานงาน</option>
+          <option value="น้าฮ้อย">น้าฮ้อย</option>
+        </select>
+      </label>
         <label>เบอร์โทร<input name="phone" placeholder="เบอร์โทร" /></label>
         <label>ละติจูด<input name="lat" placeholder="ละ" /></label>
         <label>ลองจิจูด<input name="lng" placeholder="ลอง" /></label>
@@ -131,7 +135,8 @@
             <option value="เลิกกิจการ">เลิกกิจการ</option>
           </select>
         </label>
-        <button id="checkinBtn" class="checkin-btn" type="button">เช็คอิน GPS</button>
+        <button id="reloadBtn" class="reload-form-btn" type="button">รีเฟรชข้อมูล</button>
+      <button id="checkinBtn" class="checkin-btn" type="button">เช็คอิน GPS</button>
         <label class="wide">หมายเหตุ<textarea name="note" placeholder="หมายเหตุเพิ่มเติม"></textarea></label>
         <button class="submit-btn" type="submit">บันทึกลงชีต “เก็บข้อมูล”</button>
       </form>
