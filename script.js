@@ -1716,14 +1716,50 @@ function improveTargetNormalLoopRoute(start, order, sourcePoints) {
 }
 
 
+function optimizeNormalST55CompactRoute(start, order, sourcePoints) {
+  // สาย 55 โหมดวันปกติ: ใช้แนวทางเดียวกับแผนที่ออกมาดี คือคัด "วงหลัก" ประมาณ 7 จุด
+  // ไม่ฝืนเก็บจุด 8-9 ถ้าจุดนั้นทำให้ต้องวนกลับ/ออกนอกวง และลองหาจุดทดแทนที่อยู่ในวงเดียวกันแทน
+  const source = uniqueRowsByIdName([...(sourcePoints || []), ...(order || [])])
+    .filter(validCoord)
+    .filter(r => buEquivalent(r.bu, "ST"))
+    .filter(r => normalizeMeter(r.meter || r.meterKey) === "55")
+    .filter(r => !isVisited(r));
+
+  const pool = source.length ? source : (order || []).filter(validCoord);
+  const targetStops = Math.min(PREFERRED_ROUTE_CUSTOMER_STOPS, Math.max(1, routeStopCount(pool)));
+  if (pool.length <= targetStops) return orderNormalMarketRoute(start, pool);
+
+  const orderBuilder = rows => orderNormalMarketRoute(start, rows);
+  let compact = buildBestTargetRoute(start, [], pool, orderBuilder);
+
+  // บังคับให้เหลือวงหลัก 7 จุดก่อน เพื่อไม่ให้กลับไปเกิดเคสจุด 8-9 ที่ต้องวนไปเก็บย้อนหลัง
+  while (routeStopCount(compact) > targetStops) {
+    const detour = bestDetourStopToRemove(start, compact, []);
+    const removeIndex = detour.index >= 0 ? detour.index : compact.length - 1;
+    compact.splice(removeIndex, 1);
+    compact = orderBuilder(compact);
+  }
+
+  // หลังตัดแล้ว ลองสลับกับจุดอื่นในสายเดียวกัน ถ้าทำให้ระยะ/การวกกลับดีขึ้นจริง
+  compact = improveOptionalStopsByRouteScore(start, compact, [], pool, orderBuilder);
+  while (routeStopCount(compact) > targetStops) {
+    const detour = bestDetourStopToRemove(start, compact, []);
+    const removeIndex = detour.index >= 0 ? detour.index : compact.length - 1;
+    compact.splice(removeIndex, 1);
+    compact = orderBuilder(compact);
+  }
+
+  return compact;
+}
+
 function applyNormalRouteFieldFeedback(start, order, sourcePoints) {
   // กติกาหน้างานเฉพาะโหมด "วันปกติ / ออกตลาดทั่วไป"
   // ไม่กระทบสายอื่น เช่น ST สาย 65 ที่ผู้ใช้ยืนยันว่าเส้นทางเดิมดีอยู่แล้ว
 
   // เคสสามทองบริการ ST สาย 55:
-  // ลำดับ 1,2,3 ดีแล้ว จากนั้นให้วิ่งต่อไปชุด 6,7,8,9 ก่อน แล้วค่อยกลับ 5,4
-  if (isNormalST55Route(sourcePoints) && order.length >= 9) {
-    return reorderByIndexPattern(order, [0, 1, 2, 5, 6, 7, 8, 4, 3]);
+  // คัดวงหลัก 7 จุดที่ดีที่สุด และตัด/แทนจุดที่ทำให้ต้องวนกลับไปเก็บ เช่น จุด 8-9 ในภาพตัวอย่าง
+  if (isNormalST55Route(sourcePoints)) {
+    return optimizeNormalST55CompactRoute(start, order, sourcePoints);
   }
 
   // เคสสามทองบริการ ST สาย 57:
