@@ -589,12 +589,3 @@ tr:nth-child(even) td { background:#f9fafb; }
   .dashboard-mini-cards,
   .two-charts{ grid-template-columns:1fr !important; }
 }
-
-/* ===== Route limit + form refresh update 20260706 ===== */
-.reload-form-btn {
-  background:#0b3b70;
-  min-height:42px;
-  align-self:end;
-}
-.reload-form-btn:hover { filter:brightness(1.05); }
-@media (max-width:900px){ .reload-form-btn{width:100%;} }
