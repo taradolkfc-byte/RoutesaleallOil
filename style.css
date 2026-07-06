@@ -465,7 +465,8 @@ tr:nth-child(even) td { background:#f9fafb; }
   }
 }
 
-/* ===== Dashboard page redesign 20260624 ===== */
+
+/* ===== Dashboard page redesign 20260706 route merge ===== */
 .page-tabs{
   display:flex;
   gap:10px;
