@@ -1,7 +1,7 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
 // URL Apps Script ของคุณ
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxu0zeUAfHU1YBI0KJRTFC97xRTsPvXPx8cbw-8iXKqzHomAy0T48reAcQouaS0Ob1A/exec";
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxLDIGniwUc2lNzG0ten-T4f7UMJ_RyA9dMYg1rphu9ZuVWicfiFOPpfdO_HyRNCTJ5/exec";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
@@ -36,6 +36,33 @@ const BU_BRANCH_NAME_MAP = {
   KCG: "เค.ซี.จี.ปิโตรเลียม",
   WNN: "เค.ซี. กรีน เอ็นเนอร์จี"
 };
+
+const COORDINATOR_PHONE_MAP = {
+  "น้าฮ้อย": "082-1165845"
+};
+
+function canonicalBUCode(v) {
+  const raw = cleanText(v);
+  const s = raw.toUpperCase();
+  if (!s) return "";
+  if (s === "KCG" || s === "MUK" || raw.includes("เค.ซี.จี")) return "MUK";
+  if (s === "ST" || raw.includes("สามทอง")) return "ST";
+  if (s === "KN" || raw.includes("เค.ซี.ปิโตรเลียม2006")) return "KN";
+  if (s === "WNN" || raw.includes("กรีน")) return "WNN";
+  return s;
+}
+
+function sameBU(a, b) {
+  const ca = canonicalBUCode(a);
+  const cb = canonicalBUCode(b);
+  if (!ca || !cb) return true;
+  return ca === cb;
+}
+
+function matchesSelectedBU(rowBU) {
+  const selectedBU = getSelectedStartBU();
+  return !selectedBU || sameBU(rowBU, selectedBU);
+}
 
 function branchNameFromBU(bu) {
   const key = cleanText(bu).toUpperCase();
@@ -1091,28 +1118,73 @@ function orderPumpFirstRoute(start, pumpRow, otherRows) {
   const orderedRest = orderCircularRoute(pivot, rest);
   return [pumpRow, ...orderedRest];
 }
-function takeByStatusForMeter(marketRows, pump) {
-  const selectedBU = getSelectedStartBU();
-  const sameMeter = marketRows
-    .filter(m => m.meterKey === pump.meterKey)
-    .filter(m => !selectedBU || cleanText(m.bu).toUpperCase() === selectedBU.toUpperCase())
-    /* แสดงจุดที่เช็คอินสำเร็จไว้ในแผน เพื่อให้ขึ้นเครื่องหมายถูก */
-    .filter(m => {
-      if (!pump.bu || pump.bu === "KCG") return true;
-      return !m.bu || cleanText(m.bu).toUpperCase() === cleanText(pump.bu).toUpperCase();
-    })
-    .sort((a,b) => marketScore(a.status) - marketScore(b.status));
-
-  const lost = sameMeter.filter(x => ["ลูกค้าหาย", "ลูกค้าหายเกิน 60 วัน"].includes(statusGroup(x.status))).slice(0, 5);
-  const risky = sameMeter.filter(x => statusGroup(x.status) === "ลูกค้าเสี่ยงหาย").slice(0, 5);
-  const active = sameMeter.filter(x => statusGroup(x.status) === "ลูกค้าซื้อขายประจำ").slice(0, 5);
-  const winback = sameMeter.filter(x => statusGroup(x.status) === "ลูกค้าใหม่/Winback").slice(0, 5);
-  return [...lost, ...risky, ...active, ...winback];
+function pumpMarketDistance(row, pump) {
+  if (validCoord(row) && validCoord(pump)) {
+    return haversine({ lat: toNumber(pump.lat), lng: toNumber(pump.lng) }, { lat: toNumber(row.lat), lng: toNumber(row.lng) });
+  }
+  return 99999;
 }
+
+function sortMarketsForPump(list, pump) {
+  return [...list].sort((a, b) =>
+    (marketScore(a.status) - marketScore(b.status)) ||
+    (pumpMarketDistance(a, pump) - pumpMarketDistance(b, pump)) ||
+    cleanText(a.customer_name).localeCompare(cleanText(b.customer_name), "th")
+  );
+}
+
+function addUniqueMarketStops(target, source, limit) {
+  for (const row of source) {
+    if (target.length >= limit) break;
+    if (!row || !row.customer_name) continue;
+    if (target.some(x => rowUniqueKey(x) === rowUniqueKey(row))) continue;
+    target.push(row);
+  }
+  return target;
+}
+
+function takeByStatusForMeter(marketRows, pump) {
+  // โหมด “ตามแผนปรับปรุงปั๊ม” ต้องวางแผนได้ทุกสายแบบเดียวกับสาย 65
+  // ลำดับการดึงลูกค้า:
+  // 1) ลูกค้าในสายมิเตอร์เดียวกัน + BU เดียวกัน/BU alias เดียวกัน
+  // 2) ลูกค้าในสายมิเตอร์เดียวกัน แม้ BU ในชีตจะใช้ KCG/MUK สลับกัน
+  // 3) ถ้าสายนั้นมีข้อมูลน้อย ให้เติมลูกค้า BU เดียวกันที่ใกล้จุดปรับปรุงปั๊ม เพื่อไม่ให้เหลือแค่ 1 จุด
+  const limit = Math.max(1, MAX_ROUTE_CUSTOMER_STOPS - 1);
+  const selectedBU = getSelectedStartBU();
+  const meterKey = normalizeMeter(pump.meterKey || pump.meter);
+  const targetBU = selectedBU || pump.bu;
+  const result = [];
+
+  const baseRows = (marketRows || [])
+    .filter(m => !selectedBU || sameBU(m.bu, selectedBU));
+
+  const sameMeterSameBU = baseRows
+    .filter(m => normalizeMeter(m.meterKey || m.meter) === meterKey)
+    .filter(m => sameBU(m.bu, pump.bu));
+
+  const sameMeterAnyAliasBU = baseRows
+    .filter(m => normalizeMeter(m.meterKey || m.meter) === meterKey);
+
+  const sameBusinessUnitFallback = baseRows
+    .filter(m => sameBU(m.bu, targetBU || pump.bu))
+    .filter(validCoord);
+
+  addUniqueMarketStops(result, sortMarketsForPump(sameMeterSameBU, pump), limit);
+  addUniqueMarketStops(result, sortMarketsForPump(sameMeterAnyAliasBU, pump), limit);
+  addUniqueMarketStops(result, sortMarketsForPump(sameBusinessUnitFallback, pump), limit);
+
+  // กรณีเลือก “อัตโนมัติ” และยังไม่พอ ให้เติมจากลูกค้าที่ใกล้จุดปรับปรุงปั๊มที่สุดทั้งระบบ
+  if (!selectedBU && result.length < limit) {
+    addUniqueMarketStops(result, sortMarketsForPump((marketRows || []).filter(validCoord), pump), limit);
+  }
+
+  return result;
+}
+
 function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
   const selectedBU = getSelectedStartBU();
   const selectedPumps = chooseOnePumpPerMeterCurrentMonth(pumpRows)
-    .filter(p => !selectedBU || cleanText(p.bu).toUpperCase() === selectedBU.toUpperCase());
+    .filter(p => !selectedBU || sameBU(p.bu, selectedBU));
   const output = [];
 
   selectedPumps.forEach(pump => {
@@ -1478,7 +1550,7 @@ function buildNormalPlanRows(marketRows, planDays) {
   const selectedBU = getSelectedStartBU();
   const selectedMarketStatus = getMarketStatusFilterValue();
   const candidates = marketRows
-    .filter(r => !selectedBU || cleanText(r.bu).toUpperCase() === selectedBU.toUpperCase())
+    .filter(r => !selectedBU || sameBU(r.bu, selectedBU))
     /* ใช้เฉพาะ Dropdown "เลือกสถานะ" เท่านั้น ไม่กระทบโหมดวางแผนอื่น */
     .filter(r => marketStatusFilterMatch(r, selectedMarketStatus))
     /* แสดงจุดที่เช็คอินสำเร็จไว้ในแผน เพื่อให้ขึ้นเครื่องหมายถูก */
@@ -1558,7 +1630,7 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
       const bu = r.bu || buFromText || nearest.bu || "";
       return { ...r, bu, __nearestStartName: nearest.name, __nearestBU: bu };
     })
-    .filter(r => !selectedBU || cleanText(r.__nearestBU).toUpperCase() === selectedBU.toUpperCase())
+    .filter(r => !selectedBU || sameBU(r.__nearestBU, selectedBU))
     .sort((a,b) =>
       dateSortValue(a.dateObj) - dateSortValue(b.dateObj) ||
       cleanText(a.bu).localeCompare(cleanText(b.bu), "th") ||
@@ -2323,8 +2395,11 @@ function fillFormFromMasterCustomer(customer, source = "manual") {
   form.elements.meter.value = routeMeta.meter || customer.meter || "";
   form.elements.area.value = customer.area || "";
   if (form.elements.purpose) form.elements.purpose.value = customer.purpose || (customer.type === "ซ่อม" ? "ซ่อม" : "ออกเยี่ยมลูกค้า");
-  form.elements.coordinator.value = customer.coordinator || "";
-  form.elements.phone.value = customer.phone || "";
+  const customerCoordinator = cleanText(customer.coordinator || "");
+  form.elements.coordinator.value = COORDINATOR_PHONE_MAP[customerCoordinator] ? customerCoordinator : "";
+  form.elements.phone.value = form.elements.coordinator.value
+    ? (COORDINATOR_PHONE_MAP[form.elements.coordinator.value] || customer.phone || "")
+    : (customer.phone || "");
   form.elements.lat.value = customer.lat || "";
   form.elements.lng.value = customer.lng || "";
   if (currentVisitDate) form.elements.visit_date.value = currentVisitDate;
@@ -2581,6 +2656,34 @@ async function checkInGps() {
   }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
 }
 
+function resetVisitFormToBlank() {
+  const form = document.getElementById("planForm");
+  if (!form) return;
+  form.reset();
+  unlockManualCustomerFields(form);
+  if (form.elements.visit_status) form.elements.visit_status.value = "สำเร็จ";
+  if (form.elements.job_type) form.elements.job_type.value = "ออกเยี่ยมลูกค้า";
+  const status = document.getElementById("saveStatus");
+  if (status) status.textContent = "";
+}
+
+function updateCoordinatorPhone() {
+  const form = document.getElementById("planForm");
+  if (!form || !form.elements.coordinator || !form.elements.phone) return;
+  const name = cleanText(form.elements.coordinator.value);
+  form.elements.phone.value = COORDINATOR_PHONE_MAP[name] || "";
+}
+
+async function handleReloadClick() {
+  const status = document.getElementById("saveStatus");
+  if (status) {
+    status.textContent = "กำลังรีเฟรชข้อมูล...";
+    status.style.color = "#92400e";
+  }
+  await loadData();
+  resetVisitFormToBlank();
+}
+
 document.getElementById("planForm").addEventListener("submit", saveForm);
 if (document.getElementById("searchBox")) document.getElementById("searchBox").addEventListener("input", renderTable);
 if (document.getElementById("typeFilter")) document.getElementById("typeFilter").addEventListener("change", renderTable);
@@ -2592,7 +2695,8 @@ if (document.getElementById("startPointInput")) document.getElementById("startPo
 if (document.getElementById("planMode")) document.getElementById("planMode").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
 if (document.getElementById("planDays")) document.getElementById("planDays").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
 if (document.getElementById("marketStatusFilter")) document.getElementById("marketStatusFilter").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
-document.getElementById("reloadBtn").addEventListener("click", loadData);
+if (document.getElementById("reloadBtn")) document.getElementById("reloadBtn").addEventListener("click", handleReloadClick);
+if (document.getElementById("coordinatorSelect")) document.getElementById("coordinatorSelect").addEventListener("change", updateCoordinatorPhone);
 document.getElementById("checkinBtn").addEventListener("click", checkInGps);
 ["customer_id", "customer_name"].forEach(name => {
   const el = document.querySelector(`#planForm [name="${name}"]`);
