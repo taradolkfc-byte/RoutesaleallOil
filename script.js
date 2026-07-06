@@ -64,6 +64,10 @@ const MAX_ROUTE_CUSTOMER_STOPS = 9;
 const MIN_ROUTE_CUSTOMER_STOPS = 7;
 const MAX_ROUTE_DISTANCE_KM = 350;
 const ROAD_DISTANCE_FACTOR = 1.45;
+// ถ้าแผน 8-9 จุดเริ่มกลายเป็นการวิ่งออกนอกวง/วนกลับไกลเกินไป ให้คงจุดที่ดีที่สุด 7 จุด
+const PREFERRED_ROUTE_CUSTOMER_STOPS = 7;
+const DETOUR_TRIM_DISTANCE_KM = 320;
+const DETOUR_STOP_MIN_SAVING_KM = 12;
 const VISIT_REFRESH_DAYS = 60;
 
 const COORDINATOR_PHONE_MAP = {
@@ -828,6 +832,50 @@ function trimRouteToMaxDistance(start, orderedRows, requiredRows = [], minStops 
   return rows;
 }
 
+function routeDistanceWithoutStop(start, rows, removeIndex) {
+  return approxRoadDistanceKm(start, rows.filter((_, idx) => idx !== removeIndex));
+}
+
+function bestDetourStopToRemove(start, rows, requiredRows = []) {
+  const requiredKeys = requiredRouteKeySet(requiredRows);
+  const baseDistance = approxRoadDistanceKm(start, rows);
+  let best = { index: -1, saving: -Infinity, score: -Infinity };
+
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i];
+    if (!validCoord(row)) continue;
+    if (requiredKeys.has(rowUniqueKey(row))) continue;
+    const trial = rows.filter((_, idx) => idx !== i);
+    if (routeStopCount(trial) < PREFERRED_ROUTE_CUSTOMER_STOPS) continue;
+
+    const saving = baseDistance - approxRoadDistanceKm(start, trial);
+    // ให้ความสำคัญกับจุดท้ายแผนก่อน เช่น จุด 8-9 ซึ่งมักเป็นจุดที่ต้องวกกลับไปเก็บ
+    const tailBonus = i >= PREFERRED_ROUTE_CUSTOMER_STOPS ? 100 : 0;
+    const score = saving + tailBonus;
+    if (score > best.score) best = { index: i, saving, score };
+  }
+  return best;
+}
+
+function trimOutOfLoopStops(start, orderedRows, requiredRows = []) {
+  let rows = trimRouteToMaxDistance(start, orderedRows, requiredRows, PREFERRED_ROUTE_CUSTOMER_STOPS);
+
+  // กรณีแผนยังมี 8-9 จุดและระยะเริ่มสูง/เกิดการวนกลับ ให้ตัดจุดที่เพิ่มระยะมากที่สุดออก
+  // เพื่อรักษาเส้นทางวงกลมหลัก 1-7 จุด ไม่ให้วิ่งออกนอกวงแล้ววกกลับไปเก็บจุดท้าย
+  while (routeStopCount(rows) > PREFERRED_ROUTE_CUSTOMER_STOPS) {
+    const currentDistance = approxRoadDistanceKm(start, rows);
+    const detour = bestDetourStopToRemove(start, rows, requiredRows);
+    const shouldTrim =
+      detour.index >= 0 &&
+      (currentDistance > DETOUR_TRIM_DISTANCE_KM || detour.saving >= DETOUR_STOP_MIN_SAVING_KM || detour.index >= PREFERRED_ROUTE_CUSTOMER_STOPS);
+
+    if (!shouldTrim) break;
+    rows.splice(detour.index, 1);
+  }
+
+  return rows;
+}
+
 
 function nearestNeighborOrder(start, points) {
   const remaining = points.map(p => ({ ...p }));
@@ -1254,7 +1302,7 @@ function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
         return orderPumpFirstRoute(start, pivotPump, rest);
       }
     );
-    ordered = trimRouteToMaxDistance(start, ordered, [pump]);
+    ordered = trimOutOfLoopStops(start, ordered, [pump]);
 
     ordered.forEach((row, idx) => output.push({
       ...row,
@@ -1680,7 +1728,7 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
   const selectedBU = getSelectedStartBU();
 
   // ตารางซ่อม: แสดงทุกจุดซ่อมของเดือนปัจจุบันที่ยังไม่ใช่ "แล้วเสร็จ"
-  // แต่ละงานซ่อมจะถูกเติมจุดออกตลาดใกล้เคียง/สายเดียวกัน ให้ได้ 7-9 จุดเท่าที่ทำได้ โดยคุมระยะไม่เกินประมาณ 350 กม.
+  // แต่ละงานซ่อมจะถูกเติมจุดออกตลาดใกล้เคียง/สายเดียวกัน และตัดจุดนอกวง/จุดที่ทำให้วกกลับ เพื่อคงเส้นทางหลักที่ดีที่สุด
   let candidates = repairRows
     .filter(r => inCurrentThaiMonth(r.dateObj))
     .filter(r => !isVisited(r))
@@ -1709,7 +1757,7 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
       rankedMarkets,
       rows => orderCircularRoute(start, rows)
     );
-    ordered = trimRouteToMaxDistance(start, ordered, [repair]);
+    ordered = trimOutOfLoopStops(start, ordered, [repair]);
     const routeDate = repair.dateObj
       ? repair.dateObj.toLocaleDateString("th-TH", { day:"numeric", month:"long", year:"2-digit" })
       : thaiMonthYearLabel();
@@ -1828,14 +1876,14 @@ function routeDisplayStops(list) {
     if (pump) {
       const rest = removeSameStop(sorted, pump);
       const stops = [pump, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
-      return trimRouteToMaxDistance(start, stops, [pump]);
+      return trimOutOfLoopStops(start, stops, [pump]);
     }
   }
 
   const stops = sorted.slice(0, MAX_ROUTE_CUSTOMER_STOPS);
   if (mode === "repair") {
     const repair = stops.find(r => cleanText(r.type) === "ซ่อม");
-    return trimRouteToMaxDistance(start, stops, repair ? [repair] : []);
+    return trimOutOfLoopStops(start, stops, repair ? [repair] : []);
   }
   return stops;
 }
@@ -2066,7 +2114,7 @@ async function renderMap(list) {
       if (metricsEl) {
         const done = validStops.filter(isCompleted).length;
         const remain = Math.max(0, validStops.length - done);
-        metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (จำกัดแผน ${MIN_ROUTE_CUSTOMER_STOPS}-${MAX_ROUTE_CUSTOMER_STOPS} จุด และประมาณไม่เกิน ${MAX_ROUTE_DISTANCE_KM} กม.)`;
+        metricsEl.textContent = `จัดลำดับแบบวงกลมและลดการเก็บย้อนหลัง ${validStops.length} จุด ตรงกับ Google Maps • สำเร็จ ${done} จุด • คงเหลือ ${remain} จุด • ระยะทางตามถนนประมาณ ${formatKm(routed.distanceKm)} • เวลาเดินทางประมาณ ${formatDuration(routed.durationSec)} (คัดจุดวงกลมหลัก ${validStops.length} จุด และตัดจุดนอกวง/จุดที่ทำให้วกกลับ)`;
       }
       return;
     }
