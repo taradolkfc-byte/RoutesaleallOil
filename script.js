@@ -75,6 +75,15 @@ const ROUTE_REPLACEMENT_MIN_IMPROVE_KM = 1.2;
 const WEAK_STOP_SAVING_PENALTY_KM = 18;
 const VISIT_REFRESH_DAYS = 60;
 
+// ===== Pump reference routes 20260706 =====
+// ใช้เฉพาะโหมด "ตามแผนปรับปรุงปั๊ม" สำหรับสายที่ต้องการรูปแบบเป๊ะตาม Ref
+// ST สาย 65 และ KCG/MUK สาย 49 จะคัด 7 จุดหลักที่เป็นวง/แนวเดียวกันที่สุด
+// เพื่อลดจุดที่ต้องวนกลับไปเก็บ และคงจุดปรับปรุงปั๊มเป็นลำดับ 1 เสมอ
+const PUMP_REFERENCE_ROUTE_STOPS = 7;
+const PUMP_REFERENCE_POOL_LIMIT = 30;
+const PUMP_REFERENCE_BEAM_WIDTH = 55;
+const PUMP_REFERENCE_POOL_RANK_WEIGHT = 0.18;
+
 const COORDINATOR_PHONE_MAP = {
   "น้าฮ้อย": "082-1165845"
 };
@@ -965,6 +974,275 @@ function buildBestTargetRoute(start, requiredRows, candidateRows, orderBuilder) 
   return ordered;
 }
 
+
+function pumpReferenceRouteType(pump) {
+  const meter = normalizeMeter(pump && (pump.meter || pump.meterKey));
+  const bu = normalizeBUCode(pump && pump.bu);
+  if (meter === "65" && bu === "ST") return "ST65";
+  if (meter === "49" && (bu === "MUK" || bu === "KCG")) return "KCG49";
+  return "";
+}
+
+function routeCentroid(rows) {
+  const valid = (rows || []).filter(validCoord);
+  if (!valid.length) return { lat: 0, lng: 0 };
+  return {
+    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
+    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
+  };
+}
+
+function normalizeAnglePositive(rad) {
+  let a = rad;
+  while (a < 0) a += Math.PI * 2;
+  while (a >= Math.PI * 2) a -= Math.PI * 2;
+  return a;
+}
+
+function clockwiseDelta(fromAngle, toAngle) {
+  return normalizeAnglePositive(fromAngle - toAngle);
+}
+
+function counterClockwiseDelta(fromAngle, toAngle) {
+  return normalizeAnglePositive(toAngle - fromAngle);
+}
+
+function openPathDistanceFromPumpThenReturn(start, pump, rest) {
+  let total = 0;
+  let current = { lat: toNumber(pump.lat), lng: toNumber(pump.lng) };
+  (rest || []).forEach(p => {
+    total += haversine(current, { lat: toNumber(p.lat), lng: toNumber(p.lng) });
+    current = { lat: toNumber(p.lat), lng: toNumber(p.lng) };
+  });
+  total += haversine(current, { lat: start.lat, lng: start.lng });
+  return total;
+}
+
+function projectionOnLine(a, b, p) {
+  const ax = toNumber(a.lng), ay = toNumber(a.lat);
+  const bx = toNumber(b.lng), by = toNumber(b.lat);
+  const px = toNumber(p.lng), py = toNumber(p.lat);
+  const vx = bx - ax, vy = by - ay;
+  const wx = px - ax, wy = py - ay;
+  const vv = vx * vx + vy * vy;
+  if (!vv) return { t: 0, perp: 0 };
+  const t = (wx * vx + wy * vy) / vv;
+  const proj = { lng: ax + (t * vx), lat: ay + (t * vy) };
+  return { t, perp: haversine({ lat: py, lng: px }, proj) };
+}
+
+function orderST65ReferencePumpRoute(start, pump, rows) {
+  const rest = uniqueRowsByIdName((rows || [])
+    .filter(validCoord)
+    .filter(r => !isSameStop(r, pump)));
+  if (rest.length <= 1) return [pump, ...rest];
+
+  const center = routeCentroid([pump, ...rest]);
+  const pumpAngle = angleFromCenter(center, pump);
+  const withAngles = rest.map(p => ({
+    p,
+    cw: clockwiseDelta(pumpAngle, angleFromCenter(center, p)),
+    ccw: counterClockwiseDelta(pumpAngle, angleFromCenter(center, p)),
+    dPump: haversine(pump, { lat: toNumber(p.lat), lng: toNumber(p.lng) })
+  }));
+
+  const cw = withAngles
+    .slice()
+    .sort((a, b) => a.cw - b.cw || a.dPump - b.dPump)
+    .map(x => x.p);
+  const ccw = withAngles
+    .slice()
+    .sort((a, b) => a.ccw - b.ccw || a.dPump - b.dPump)
+    .map(x => x.p);
+  const circular = removeSameStop(orderCircularRoute({ lat: toNumber(pump.lat), lng: toNumber(pump.lng) }, rest), pump);
+  const pulledCw = pullPointsThatAreOnTheWay({ lat: toNumber(pump.lat), lng: toNumber(pump.lng) }, cw);
+  const pulledCcw = pullPointsThatAreOnTheWay({ lat: toNumber(pump.lat), lng: toNumber(pump.lng) }, ccw);
+
+  const candidates = [cw, ccw, circular, pulledCw, pulledCcw]
+    .filter(r => r.length === rest.length);
+  const unique = [];
+  const seen = new Set();
+  candidates.forEach(c => {
+    const key = uniqueRouteCandidateKey(c);
+    if (!seen.has(key)) { seen.add(key); unique.push(c); }
+  });
+
+  const bestRest = (unique.length ? unique : [cw])
+    .sort((a, b) => referencePumpRouteScore(start, pump, [pump, ...a], "ST65") - referencePumpRouteScore(start, pump, [pump, ...b], "ST65"))[0] || cw;
+  return [pump, ...bestRest];
+}
+
+function orderKCG49ReferencePumpRoute(start, pump, rows) {
+  const rest = uniqueRowsByIdName((rows || [])
+    .filter(validCoord)
+    .filter(r => !isSameStop(r, pump)));
+  if (rest.length <= 1) return [pump, ...rest];
+
+  const farthest = rest
+    .slice()
+    .sort((a, b) => haversine(pump, { lat: toNumber(b.lat), lng: toNumber(b.lng) }) - haversine(pump, { lat: toNumber(a.lat), lng: toNumber(a.lng) }))[0];
+  const center = routeCentroid(rest);
+
+  const byProjectionToFar = rest.slice().sort((a, b) => {
+    const pa = projectionOnLine(pump, farthest, a);
+    const pb = projectionOnLine(pump, farthest, b);
+    return pa.t - pb.t || pa.perp - pb.perp;
+  });
+  const byProjectionToCenter = rest.slice().sort((a, b) => {
+    const pa = projectionOnLine(pump, center, a);
+    const pb = projectionOnLine(pump, center, b);
+    return pa.t - pb.t || pa.perp - pb.perp;
+  });
+  const byDistanceFromPump = rest.slice().sort((a, b) =>
+    haversine(pump, { lat: toNumber(a.lat), lng: toNumber(a.lng) }) -
+    haversine(pump, { lat: toNumber(b.lat), lng: toNumber(b.lng) })
+  );
+  const nearestFromPump = nearestNeighborOrder({ lat: toNumber(pump.lat), lng: toNumber(pump.lng) }, rest);
+  const circular = removeSameStop(orderCircularRoute({ lat: toNumber(pump.lat), lng: toNumber(pump.lng) }, rest), pump);
+
+  const candidates = [byProjectionToFar, byProjectionToCenter, byDistanceFromPump, nearestFromPump, circular]
+    .map(route => pullPointsThatAreOnTheWay({ lat: toNumber(pump.lat), lng: toNumber(pump.lng) }, route))
+    .filter(r => r.length === rest.length);
+  const unique = [];
+  const seen = new Set();
+  candidates.forEach(c => {
+    const key = uniqueRouteCandidateKey(c);
+    if (!seen.has(key)) { seen.add(key); unique.push(c); }
+  });
+
+  const bestRest = (unique.length ? unique : [byProjectionToFar])
+    .sort((a, b) => referencePumpRouteScore(start, pump, [pump, ...a], "KCG49") - referencePumpRouteScore(start, pump, [pump, ...b], "KCG49"))[0] || byProjectionToFar;
+  return [pump, ...bestRest];
+}
+
+function orderReferencePumpRoute(start, pump, rows, type) {
+  if (!pump || !validCoord(pump)) return orderCircularRoute(start, rows || []);
+  const unique = uniqueRowsByIdName([pump, ...(rows || []).filter(r => !isSameStop(r, pump))]);
+  if (type === "ST65") return orderST65ReferencePumpRoute(start, pump, unique);
+  if (type === "KCG49") return orderKCG49ReferencePumpRoute(start, pump, unique);
+  return orderPumpFirstRoute(start, pump, removeSameStop(unique, pump));
+}
+
+function referencePumpRouteScore(start, pump, route, type) {
+  const validRoute = (route || []).filter(validCoord);
+  if (!validRoute.length) return Infinity;
+  const rest = validRoute.slice(1);
+  let score = approxRoadDistanceKm(start, validRoute);
+  score += routeTurnPenalty(start, validRoute) * 1.6;
+  score += loopBacktrackPenalty(start, validRoute) * 0.9;
+
+  const savings = optionalStopSavings(start, validRoute, [pump]);
+  if (savings.length) score += Math.max(0, savings[0].saving - WEAK_STOP_SAVING_PENALTY_KM) * 2.4;
+
+  // ต้องการ 7 จุดตาม Ref ถ้าไม่ครบให้เสียคะแนนมาก เพื่อไม่กลับไปดึง 8-9 จุดอีก
+  score += Math.abs(routeStopCount(validRoute) - PUMP_REFERENCE_ROUTE_STOPS) * 650;
+
+  // ความกระชับของกลุ่มจุด: จุดที่หลุดวง/ไกลจากกลุ่มหลักจะโดน penalty
+  const center = routeCentroid(validRoute);
+  const radial = validRoute.map(p => haversine(center, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const avgRadial = radial.reduce((a, b) => a + b, 0) / Math.max(1, radial.length);
+  const maxRadial = Math.max(...radial, 0);
+  score += Math.max(0, maxRadial - (avgRadial * 1.75)) * 4.0;
+
+  if (type === "KCG49" && rest.length >= 2) {
+    // สาย 49 ตาม Ref เป็นแนวไหลจากจุดปรับปรุงขึ้นไปทางเหนือ/ปลายทาง ไม่ควรถอยกลับลงมาเก็บจุดเดิม
+    const farthest = rest
+      .slice()
+      .sort((a, b) => haversine(pump, { lat: toNumber(b.lat), lng: toNumber(b.lng) }) - haversine(pump, { lat: toNumber(a.lat), lng: toNumber(a.lng) }))[0];
+    let previousT = -Infinity;
+    let monotonicPenalty = 0;
+    rest.forEach(p => {
+      const proj = projectionOnLine(pump, farthest, p);
+      if (proj.t + 0.04 < previousT) monotonicPenalty += 45;
+      previousT = Math.max(previousT, proj.t);
+      monotonicPenalty += Math.max(0, proj.perp - 9) * 2.5;
+    });
+    score += monotonicPenalty;
+    score += openPathDistanceFromPumpThenReturn(start, pump, rest) * 0.25;
+  }
+
+  if (type === "ST65" && rest.length >= 2) {
+    // สาย 65 ตาม Ref เป็นวงกว้าง: หลังจุดปรับปรุงให้วิ่งลงล่าง-ซ้าย-ขึ้นบน ไม่กระโดดกลับเข้ากลางบ่อย
+    const center65 = routeCentroid(validRoute);
+    const pumpAngle = angleFromCenter(center65, pump);
+    let previous = -Infinity;
+    let sweepPenalty = 0;
+    rest.forEach(p => {
+      const cw = clockwiseDelta(pumpAngle, angleFromCenter(center65, p));
+      if (cw + 0.12 < previous) sweepPenalty += 30;
+      previous = Math.max(previous, cw);
+    });
+    score += sweepPenalty;
+  }
+
+  return score;
+}
+
+function sameMeterAndBUCandidatePool(rankedMarkets, pump) {
+  const meter = normalizeMeter(pump && (pump.meter || pump.meterKey));
+  const bu = pump && pump.bu;
+  const strict = uniqueRowsByIdName((rankedMarkets || [])
+    .filter(validCoord)
+    .filter(m => !isVisited(m))
+    .filter(m => !isSameStop(m, pump))
+    .filter(m => !meter || normalizeMeter(m.meter || m.meterKey) === meter)
+    .filter(m => !bu || buEquivalent(m.bu, bu)));
+  if (strict.length >= PUMP_REFERENCE_ROUTE_STOPS - 1) return strict;
+  return uniqueRowsByIdName((rankedMarkets || [])
+    .filter(validCoord)
+    .filter(m => !isVisited(m))
+    .filter(m => !isSameStop(m, pump))
+    .filter(m => !bu || buEquivalent(m.bu, bu)));
+}
+
+function buildReferencePumpRoute(start, pump, rankedMarkets) {
+  const type = pumpReferenceRouteType(pump);
+  if (!type) return null;
+
+  const pool = sameMeterAndBUCandidatePool(rankedMarkets, pump)
+    .slice(0, PUMP_REFERENCE_POOL_LIMIT)
+    .map((row, index) => ({ ...row, __referencePoolRank: index }));
+
+  if (pool.length < PUMP_REFERENCE_ROUTE_STOPS - 1) {
+    const fallback = orderReferencePumpRoute(start, pump, [pump, ...pool], type);
+    return trimRouteToMaxDistance(start, fallback, [pump], Math.min(PUMP_REFERENCE_ROUTE_STOPS, routeStopCount(fallback)));
+  }
+
+  let beams = [{ seed: [pump], ordered: [pump], score: 0 }];
+  for (let depth = 1; depth < PUMP_REFERENCE_ROUTE_STOPS; depth++) {
+    const expanded = [];
+    beams.forEach(beam => {
+      pool.forEach(candidate => {
+        if (beam.seed.some(r => isSameStop(r, candidate))) return;
+        const seed = uniqueRowsByIdName([...beam.seed, candidate]);
+        if (routeStopCount(seed) !== depth + 1) return;
+        const ordered = orderReferencePumpRoute(start, pump, seed, type);
+        const approxDistance = approxRoadDistanceKm(start, ordered);
+        // ยอมให้ beam โตได้เล็กน้อยตอนยังไม่ครบ เพื่อไม่ตัด candidate ดีทิ้งเร็วเกินไป
+        const hardDistance = depth < PUMP_REFERENCE_ROUTE_STOPS - 1 ? MAX_ROUTE_DISTANCE_KM * 1.12 : MAX_ROUTE_DISTANCE_KM;
+        if (approxDistance > hardDistance) return;
+        const rankPenalty = seed.slice(1).reduce((sum, r) => sum + Number(r.__referencePoolRank || 0), 0) * PUMP_REFERENCE_POOL_RANK_WEIGHT;
+        const score = referencePumpRouteScore(start, pump, ordered, type) + rankPenalty;
+        expanded.push({ seed, ordered, score });
+      });
+    });
+    expanded.sort((a, b) => a.score - b.score);
+    beams = expanded.slice(0, PUMP_REFERENCE_BEAM_WIDTH);
+    if (!beams.length) break;
+  }
+
+  if (!beams.length) return null;
+  const best = beams
+    .filter(b => routeStopCount(b.ordered) === PUMP_REFERENCE_ROUTE_STOPS)
+    .sort((a, b) => a.score - b.score)[0] || beams.sort((a, b) => a.score - b.score)[0];
+
+  let ordered = best.ordered;
+  ordered = trimRouteToMaxDistance(start, ordered, [pump], Math.min(PUMP_REFERENCE_ROUTE_STOPS, routeStopCount(ordered)));
+  // หากระบบยังเหลือเกิน 7 จากเหตุ edge case ให้ตัดท้ายให้ตรง Ref
+  ordered = ordered.slice(0, PUMP_REFERENCE_ROUTE_STOPS);
+  return ordered;
+}
+
 function nearestNeighborOrder(start, points) {
   const remaining = points.map(p => ({ ...p }));
   const ordered = [];
@@ -1385,7 +1663,8 @@ function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
       const rest = removeSameStop(rows, pivotPump);
       return orderPumpFirstRoute(start, pivotPump, rest);
     };
-    let ordered = buildBestTargetRoute(start, [pump], rankedMarkets, pumpOrderBuilder);
+    let ordered = buildReferencePumpRoute(start, pump, rankedMarkets);
+    if (!ordered || !ordered.length) ordered = buildBestTargetRoute(start, [pump], rankedMarkets, pumpOrderBuilder);
 
     ordered.forEach((row, idx) => output.push({
       ...row,
