@@ -598,3 +598,5 @@ tr:nth-child(even) td { background:#f9fafb; }
 }
 .reload-form-btn:hover { filter:brightness(1.05); }
 @media (max-width:900px){ .reload-form-btn{width:100%;} }
+
+/* ===== Stable route merge 20260707: keep original UI/conditions ===== */
