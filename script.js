@@ -1,7 +1,7 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
 // URL Apps Script ของคุณ
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxu0zeUAfHU1YBI0KJRTFC97xRTsPvXPx8cbw-8iXKqzHomAy0T48reAcQouaS0Ob1A/exec";
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxLDIGniwUc2lNzG0ten-T4f7UMJ_RyA9dMYg1rphu9ZuVWicfiFOPpfdO_HyRNCTJ5/exec";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
@@ -58,7 +58,7 @@ function applySelectedRouteToForm(form) {
 
 const CHECKIN_RADIUS_METER = 100;
 const MAX_PLAN_DAYS = 7;
-const MAX_STOPS_PER_DAY = 16;
+const MAX_STOPS_PER_DAY = 9;
 // จำกัดจำนวนจุดที่ส่งเข้า Map และ Google Maps ให้ตรงกัน ไม่เกิน 9 จุด ตามเงื่อนไขใช้งานจริง
 const MAX_ROUTE_CUSTOMER_STOPS = 9;
 const MIN_ROUTE_CUSTOMER_STOPS = 7;
@@ -2888,6 +2888,342 @@ function applyCoordinatorPhone() {
   const phone = COORDINATOR_PHONE_MAP[select.value] || "";
   if (phone) form.elements.phone.value = phone;
 }
+
+
+
+/* ===== BEST ROUTE PLANNER MERGE 20260706 =====
+   ใช้เฉพาะส่วนวางแผนเส้นทางและเรียงลำดับจุด
+   ส่วนหน้าจอ Dropdown, ฟอร์มบันทึก, GPS, Dashboard และเงื่อนไขอื่น ๆ ใช้ของเดิมทั้งหมด
+*/
+function bestRoutePoint(row) {
+  return { lat: toNumber(row.lat), lng: toNumber(row.lng) };
+}
+
+function bestRouteSameRoute(a, b) {
+  return uniqueRouteCandidateKey(a || []) === uniqueRouteCandidateKey(b || []);
+}
+
+function bestRouteAddCandidate(out, seen, route) {
+  const clean = (route || []).filter(validCoord).map(p => ({ ...p }));
+  if (!clean.length) return;
+  const key = uniqueRouteCandidateKey(clean);
+  if (seen.has(key)) return;
+  seen.add(key);
+  out.push(clean);
+}
+
+function bestRouteAngleFromCenter(center, p) {
+  return Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng);
+}
+
+function bestRouteCentroid(points) {
+  const valid = (points || []).filter(validCoord);
+  if (!valid.length) return { lat: 0, lng: 0 };
+  return {
+    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
+    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
+  };
+}
+
+function bestRouteSweepCandidates(start, points) {
+  const valid = uniqueRowsByIdName(points || []).filter(validCoord).map(p => ({ ...p }));
+  const out = [];
+  const seen = new Set();
+  if (!valid.length) return out;
+
+  bestRouteAddCandidate(out, seen, valid);
+  bestRouteAddCandidate(out, seen, nearestNeighborOrder(start, valid));
+  bestRouteAddCandidate(out, seen, farthestInsertionOrder(start, valid));
+
+  const center = bestRouteCentroid(valid);
+  const byCenter = [...valid].sort((a, b) => bestRouteAngleFromCenter(center, a) - bestRouteAngleFromCenter(center, b));
+  const byStart = [...valid].sort((a, b) => angleFromStart(start, a) - angleFromStart(start, b));
+  const byDistanceNear = [...valid].sort((a, b) => haversine(start, bestRoutePoint(a)) - haversine(start, bestRoutePoint(b)));
+  const byDistanceFar = [...byDistanceNear].reverse();
+
+  [byCenter, [...byCenter].reverse(), byStart, [...byStart].reverse(), byDistanceNear, byDistanceFar].forEach(base => {
+    for (let i = 0; i < base.length; i++) {
+      const rotated = [...base.slice(i), ...base.slice(0, i)];
+      bestRouteAddCandidate(out, seen, rotated);
+      bestRouteAddCandidate(out, seen, pullPointsThatAreOnTheWay(start, rotated));
+      bestRouteAddCandidate(out, seen, pushNearStartStopsToEnd(start, rotated));
+      bestRouteAddCandidate(out, seen, pullPointsThatAreOnTheWay(start, pushNearStartStopsToEnd(start, rotated)));
+    }
+  });
+
+  // ปรับ 2-opt เฉพาะ candidate จำนวนหนึ่ง เพื่อไม่ให้หนักเครื่องมือถือ แต่ช่วยลดระยะทางที่ตัดกัน
+  out.slice(0, 36).forEach(route => {
+    bestRouteAddCandidate(out, seen, twoOptClosedRoute(start, route));
+    bestRouteAddCandidate(out, seen, pullPointsThatAreOnTheWay(start, twoOptClosedRoute(start, route)));
+  });
+
+  return out;
+}
+
+function bestRouteOrientation(a, b, c) {
+  const ax = toNumber(a.lng), ay = toNumber(a.lat);
+  const bx = toNumber(b.lng), by = toNumber(b.lat);
+  const cx = toNumber(c.lng), cy = toNumber(c.lat);
+  return (by - ay) * (cx - bx) - (bx - ax) * (cy - by);
+}
+
+function bestRouteSegmentsCross(a, b, c, d) {
+  // ไม่คิดเส้นที่ใช้จุดร่วมกันเป็นการตัดกัน
+  const same = (p, q) => Math.abs(toNumber(p.lat) - toNumber(q.lat)) < 1e-9 && Math.abs(toNumber(p.lng) - toNumber(q.lng)) < 1e-9;
+  if (same(a, c) || same(a, d) || same(b, c) || same(b, d)) return false;
+  const o1 = bestRouteOrientation(a, b, c);
+  const o2 = bestRouteOrientation(a, b, d);
+  const o3 = bestRouteOrientation(c, d, a);
+  const o4 = bestRouteOrientation(c, d, b);
+  return (o1 * o2 < 0) && (o3 * o4 < 0);
+}
+
+function bestRouteCrossPenalty(start, order) {
+  if (!order || order.length < 4) return 0;
+  const pts = [{ lat: start.lat, lng: start.lng }, ...order.map(bestRoutePoint), { lat: start.lat, lng: start.lng }];
+  let count = 0;
+  for (let i = 0; i < pts.length - 1; i++) {
+    for (let j = i + 2; j < pts.length - 1; j++) {
+      if (i === 0 && j === pts.length - 2) continue;
+      if (bestRouteSegmentsCross(pts[i], pts[i + 1], pts[j], pts[j + 1])) count++;
+    }
+  }
+  return count * 85;
+}
+
+function bestRouteJumpPenalty(start, order) {
+  if (!order || order.length < 3) return 0;
+  const legs = [];
+  let current = { lat: start.lat, lng: start.lng };
+  order.forEach(p => {
+    legs.push(haversine(current, bestRoutePoint(p)));
+    current = bestRoutePoint(p);
+  });
+  legs.push(haversine(current, { lat: start.lat, lng: start.lng }));
+
+  const avg = legs.reduce((a, b) => a + b, 0) / Math.max(1, legs.length);
+  let penalty = 0;
+  legs.forEach(d => {
+    if (d > avg * 2.25 && d > 18) penalty += (d - avg * 2.25) * 2.5;
+  });
+  return penalty;
+}
+
+function bestRouteDistanceWavePenalty(start, order) {
+  if (!order || order.length < 5) return 0;
+  const ds = order.map(p => haversine(start, bestRoutePoint(p)));
+  const maxD = Math.max(...ds, 0);
+  if (!maxD) return 0;
+  let penalty = 0;
+
+  // ลดการออกไปไกล -> วกกลับใกล้ฐานกลางทาง -> ออกไปไกลอีกครั้ง
+  for (let i = 1; i < ds.length - 2; i++) {
+    if (ds[i - 1] > ds[i] + Math.max(4, maxD * 0.12) && ds[i + 1] > ds[i] + Math.max(5, maxD * 0.15)) {
+      penalty += 55;
+    }
+  }
+
+  // ถ้าเก็บจุดใกล้ฐานตั้งแต่ต้น แต่ยังมีจุดไกลจำนวนมาก ให้คะแนนแย่ลง เพื่อให้เส้นทางเป็นวงกลับเข้าฐาน
+  if (order.length >= 7 && ds[0] < maxD * 0.30 && ds.slice(1, 5).some(d => d > maxD * 0.70)) penalty += 45;
+  return penalty;
+}
+
+function bestRouteRequiredPenalty(route, requiredRows) {
+  const required = (requiredRows || []).filter(validCoord);
+  if (!required.length) return 0;
+  let penalty = 0;
+  required.forEach(req => {
+    if (!route.some(r => isSameStop(r, req))) penalty += 100000;
+  });
+  return penalty;
+}
+
+function bestRouteScore(start, order, requiredRows = [], options = {}) {
+  const valid = (order || []).filter(validCoord);
+  if (!valid.length) return Infinity;
+  const requiredPenalty = bestRouteRequiredPenalty(valid, requiredRows);
+  if (requiredPenalty >= 100000) return requiredPenalty;
+
+  if (options.pumpFirst && options.pumpRow && !isSameStop(valid[0], options.pumpRow)) return 1000000;
+
+  const distance = routeDistanceFromStart(start, valid);
+  const turn = routeTurnPenalty(start, valid) * 2.1;
+  const backtrack = loopBacktrackPenalty(start, valid) * 1.35;
+  const cross = bestRouteCrossPenalty(start, valid);
+  const jump = bestRouteJumpPenalty(start, valid);
+  const wave = bestRouteDistanceWavePenalty(start, valid);
+
+  return distance + turn + backtrack + cross + jump + wave + requiredPenalty;
+}
+
+function bestRoutePick(start, points, requiredRows = [], options = {}) {
+  const valid = uniqueRowsByIdName(points || []).filter(validCoord).map(p => ({ ...p }));
+  const noCoord = uniqueRowsByIdName(points || []).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+
+  let candidates = [];
+  let seen = new Set();
+
+  if (options.pumpFirst && options.pumpRow) {
+    const pumpRow = valid.find(p => isSameStop(p, options.pumpRow)) || options.pumpRow;
+    const rest = valid.filter(p => !isSameStop(p, pumpRow));
+    const pivot = validCoord(pumpRow) ? bestRoutePoint(pumpRow) : start;
+    const restCandidates = rest.length ? bestRouteSweepCandidates(pivot, rest) : [[]];
+    restCandidates.forEach(restRoute => bestRouteAddCandidate(candidates, seen, [pumpRow, ...restRoute]));
+  } else {
+    bestRouteSweepCandidates(start, valid).forEach(route => bestRouteAddCandidate(candidates, seen, route));
+  }
+
+  // เพิ่ม candidate จากกติกาหน้างานเดิมเป็นตัวเลือก แต่ไม่บังคับ ถ้าคะแนนรวมแย่กว่า
+  candidates.slice(0, 24).forEach(route => {
+    bestRouteAddCandidate(candidates, seen, applyRouteBusinessRules(route));
+  });
+
+  let best = candidates
+    .map(route => ({ route, score: bestRouteScore(start, route, requiredRows, options) }))
+    .sort((a, b) => a.score - b.score)[0];
+
+  let finalRoute = best ? best.route : valid;
+  finalRoute = pullPointsThatAreOnTheWay(start, finalRoute);
+
+  // ถ้าการดึงจุดระหว่างทางทำให้คะแนนแย่ลง ให้ใช้เส้นทางเดิม
+  if (best && bestRouteScore(start, finalRoute, requiredRows, options) > best.score * 1.08) finalRoute = best.route;
+
+  return [...finalRoute, ...noCoord];
+}
+
+function bestRouteOptionalSaving(start, rows, requiredRows = []) {
+  const requiredKeys = requiredRouteKeySet(requiredRows);
+  const base = approxRoadDistanceKm(start, rows);
+  return (rows || []).map((row, index) => {
+    if (!validCoord(row)) return null;
+    if (requiredKeys.has(rowUniqueKey(row))) return null;
+    const trial = rows.filter((_, i) => i !== index);
+    return { index, saving: base - approxRoadDistanceKm(start, trial), row };
+  }).filter(Boolean).sort((a, b) => b.saving - a.saving);
+}
+
+function bestRouteTrim(start, ordered, requiredRows = [], maxStops = MAX_ROUTE_CUSTOMER_STOPS) {
+  const requiredKeys = requiredRouteKeySet(requiredRows);
+  let rows = uniqueRowsByIdName(ordered || []).filter(validCoord);
+
+  while (routeStopCount(rows) > maxStops) {
+    let removeIndex = -1;
+    const optional = bestRouteOptionalSaving(start, rows, requiredRows);
+    if (optional.length) removeIndex = optional[0].index;
+    if (removeIndex < 0) {
+      removeIndex = rows.findIndex(r => !requiredKeys.has(rowUniqueKey(r)));
+      if (removeIndex < 0) break;
+    }
+    rows.splice(removeIndex, 1);
+  }
+
+  while (routeStopCount(rows) > requiredKeys.size && approxRoadDistanceKm(start, rows) > MAX_ROUTE_DISTANCE_KM) {
+    const optional = bestRouteOptionalSaving(start, rows, requiredRows);
+    if (!optional.length || optional[0].saving <= 0) break;
+    rows.splice(optional[0].index, 1);
+  }
+
+  return rows;
+}
+
+function bestRouteBuildWithPool(start, requiredRows, candidateRows, options = {}) {
+  const required = uniqueRowsByIdName(requiredRows || []).filter(validCoord);
+  const requiredKeys = requiredRouteKeySet(required);
+  const pool = uniqueRowsByIdName(candidateRows || [])
+    .filter(validCoord)
+    .filter(c => !required.some(r => isSameStop(r, c)))
+    .slice(0, ROUTE_REPLACEMENT_POOL_LIMIT);
+
+  let selected = [...required];
+
+  while (routeStopCount(selected) < MAX_ROUTE_CUSTOMER_STOPS) {
+    let bestAdd = null;
+    for (let i = 0; i < pool.length; i++) {
+      const candidate = pool[i];
+      if (selected.some(r => isSameStop(r, candidate))) continue;
+      const trialSeed = uniqueRowsByIdName([...selected, candidate]);
+      const trialOrder = bestRoutePick(start, trialSeed, required, options).filter(validCoord);
+      if (approxRoadDistanceKm(start, trialOrder) > MAX_ROUTE_DISTANCE_KM && routeStopCount(trialOrder) >= MIN_ROUTE_CUSTOMER_STOPS) continue;
+      const score = bestRouteScore(start, trialOrder, required, options) + (i * 0.35) + (marketScore(candidate.status) * 0.8);
+      if (!bestAdd || score < bestAdd.score) bestAdd = { candidate, score, order: trialOrder };
+    }
+    if (!bestAdd) break;
+    selected.push(bestAdd.candidate);
+  }
+
+  let ordered = bestRoutePick(start, selected, required, options).filter(validCoord);
+  ordered = bestRouteTrim(start, ordered, required, MAX_ROUTE_CUSTOMER_STOPS);
+
+  // ถ้าตัดแล้วลำดับควรปรับใหม่อีกครั้ง
+  ordered = bestRoutePick(start, ordered, required, options).filter(validCoord);
+  ordered = bestRouteTrim(start, ordered, required, MAX_ROUTE_CUSTOMER_STOPS);
+
+  return ordered;
+}
+
+// Override เฉพาะเครื่องยนต์เรียงเส้นทาง
+orderCircularRoute = function(start, points) {
+  const valid = uniqueRowsByIdName(points || []).filter(validCoord);
+  const noCoord = uniqueRowsByIdName(points || []).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+  return [...bestRoutePick(start, valid), ...noCoord];
+};
+
+orderNormalMarketRoute = function(start, points) {
+  const valid = uniqueRowsByIdName(points || []).filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  const noCoord = uniqueRowsByIdName(points || []).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+  return [...bestRoutePick(start, valid), ...noCoord];
+};
+
+orderStatusFilterRoute = function(start, points) {
+  const valid = uniqueRowsByIdName(points || []).filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  const noCoord = uniqueRowsByIdName(points || []).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+  return [...bestRoutePick(start, valid), ...noCoord];
+};
+
+orderPumpFirstRoute = function(start, pumpRow, otherRows) {
+  if (!pumpRow) return orderCircularRoute(start, otherRows || []);
+  const rest = uniqueRowsByIdName(otherRows || []).filter(r => !isSameStop(r, pumpRow));
+  return bestRoutePick(start, [pumpRow, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS), [pumpRow], { pumpFirst: true, pumpRow });
+};
+
+buildBestTargetRoute = function(start, requiredRows, candidateRows, orderBuilder) {
+  const pumpRow = (requiredRows || []).find(isPumpRow);
+  const options = pumpRow ? { pumpFirst: true, pumpRow } : {};
+  return bestRouteBuildWithPool(start, requiredRows || [], candidateRows || [], options);
+};
+
+trimOutOfLoopStops = function(start, orderedRows, requiredRows = []) {
+  const pumpRow = (requiredRows || []).find(isPumpRow);
+  const options = pumpRow ? { pumpFirst: true, pumpRow } : {};
+  let rows = bestRouteTrim(start, orderedRows || [], requiredRows, MAX_ROUTE_CUSTOMER_STOPS);
+  rows = bestRoutePick(start, rows, requiredRows, options).filter(validCoord);
+  return bestRouteTrim(start, rows, requiredRows, MAX_ROUTE_CUSTOMER_STOPS);
+};
+
+optimizeStopsForDisplay = function(list) {
+  // ใช้ลำดับจากแผนที่คำนวณไว้แล้ว ไม่คำนวณซ้ำตอนแสดงผล
+  return sortRowsByPlannedStopNo(list || []).filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+};
+
+routeDisplayStops = function(list) {
+  // จุดในรายการ / Map / Google Maps ต้องเป็นชุดเดียวกันและลำดับเดียวกันเสมอ
+  const sorted = sortRowsByPlannedStopNo(list || []).filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  const mode = getPlanSettings().mode;
+  if (mode === "pump") {
+    const pump = sorted.find(isPumpRow);
+    if (pump && !isSameStop(sorted[0], pump)) {
+      const rest = sorted.filter(r => !isSameStop(r, pump));
+      return [pump, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+    }
+  }
+  return sorted;
+};
+
+/* ===== END BEST ROUTE PLANNER MERGE ===== */
 
 document.getElementById("planForm").addEventListener("submit", saveForm);
 if (document.getElementById("searchBox")) document.getElementById("searchBox").addEventListener("input", renderTable);
