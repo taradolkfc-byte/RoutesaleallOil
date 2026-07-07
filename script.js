@@ -73,6 +73,14 @@ const ROUTE_REPLACEMENT_POOL_LIMIT = 90;
 const ROUTE_REPLACEMENT_MAX_ITERATIONS = 12;
 const ROUTE_REPLACEMENT_MIN_IMPROVE_KM = 0.8;
 const WEAK_STOP_SAVING_PENALTY_KM = 8;
+// ===== V5: ใช้กับทุกสาย ให้เส้นทางเป็นวงกลมแบบสาย 49 ลดจุดปลายติ่ง/ย้อนกลับ =====
+const ROUTE_LOOP_MIN_STOPS = 7;
+const ROUTE_LOOP_MAX_STOPS = 9;
+const ROUTE_OPTIONAL_SOFT_STOP = 8;
+const ROUTE_ENDPOINT_DEADEND_LIMIT_KM = 3.0;
+const ROUTE_ENDPOINT_DEADEND_HARD_KM = 6.0;
+const ROUTE_ADD_OPTIONAL_MAX_DEGRADE = 32;
+const ROUTE_GREEDY_POOL_LIMIT = 120;
 const VISIT_REFRESH_DAYS = 60;
 
 const COORDINATOR_PHONE_MAP = {
@@ -758,44 +766,109 @@ function rankMarketCandidatesForTarget(marketRows, target, start) {
       const sameBU = targetBU && buEquivalent(m.bu, targetBU) ? 0 : 1;
       const dTarget = validCoord(targetPoint) ? haversine(targetPoint, { lat: toNumber(m.lat), lng: toNumber(m.lng) }) : 9999;
       const dStart = start ? haversine(start, { lat: toNumber(m.lat), lng: toNumber(m.lng) }) : 9999;
-      const score = (sameMeter * 1000) + (sameBU * 450) + (marketScore(m.status) * 20) + dTarget + (dStart * 0.15);
-      return { ...m, __candidateScore: score };
+      // V5: ยังให้ความสำคัญกับสายเดียวกัน แต่ไม่ยอมเลือกจุดที่ไกล/หลุดวงเกินไป
+      // เพื่อให้ทุกสายวางเส้นทางได้เป็นวงกลมเหมือนสาย 49 และตัดจุดปลายติ่งออกอัตโนมัติ
+      const score = (sameMeter * 220) + (sameBU * 520) + (marketScore(m.status) * 14) + (dTarget * 1.65) + (dStart * 0.35);
+      return { ...m, __candidateScore: score, __sameMeter: sameMeter === 0, __dTarget: dTarget, __dStart: dStart };
     })
     .sort((a, b) => a.__candidateScore - b.__candidateScore);
 }
 
-function limitRouteByStopsAndDistance(start, requiredRows, candidateRows, orderBuilder) {
-  const required = uniqueRowsByIdName(requiredRows || []);
+function routeEndpointDeadEndPenalty(start, rows) {
+  // คะแนนสูง = ปลายเส้นทางเป็นติ่ง ต้องวิ่งออกไปเก็บแล้ววกกลับ
+  const valid = (rows || []).filter(validCoord);
+  if (valid.length < 3) return 0;
+  let penalty = 0;
+
+  const first = valid[0];
+  const second = valid[1];
+  const last = valid[valid.length - 1];
+  const prev = valid[valid.length - 2];
+
+  const firstDetour = Math.max(0, (haversine(start, first) + haversine(first, second) - haversine(start, second)) * ROAD_DISTANCE_FACTOR);
+  const tailDetour = Math.max(0, (haversine(prev, last) + haversine(last, start) - haversine(prev, start)) * ROAD_DISTANCE_FACTOR);
+
+  // จุดแรกถ้าเป็นงานหลัก เช่น ปรับปรุงปั๊ม/ซ่อม ไม่ลงโทษมาก เพราะเป็นจุดบังคับ
+  if (firstDetour > ROUTE_ENDPOINT_DEADEND_LIMIT_KM) penalty += (firstDetour - ROUTE_ENDPOINT_DEADEND_LIMIT_KM) * 1.2;
+  if (tailDetour > ROUTE_ENDPOINT_DEADEND_LIMIT_KM) penalty += (tailDetour - ROUTE_ENDPOINT_DEADEND_LIMIT_KM) * 2.6;
+
+  // ตรวจว่าจุดปลายอยู่ห่างจากแนวกลับฐานมากเกินไปหรือไม่
+  const projTail = pointSegmentProjection(prev, start, last);
+  if (projTail && projTail.distKm > 2.5) penalty += (projTail.distKm - 2.5) * 3.0;
+
+  return penalty;
+}
+
+function hasHardEndpointDeadEnd(start, rows, requiredRows = []) {
+  const valid = (rows || []).filter(validCoord);
+  if (valid.length < 3) return false;
+  const requiredKeys = requiredRouteKeySet(requiredRows);
+  const last = valid[valid.length - 1];
+  if (requiredKeys.has(rowUniqueKey(last))) return false;
+  const prev = valid[valid.length - 2];
+  const tailDetour = Math.max(0, (haversine(prev, last) + haversine(last, start) - haversine(prev, start)) * ROAD_DISTANCE_FACTOR);
+  const projTail = pointSegmentProjection(prev, start, last);
+  return tailDetour >= ROUTE_ENDPOINT_DEADEND_HARD_KM || (projTail && projTail.distKm >= 6.0);
+}
+
+function greedyAddBestLoopStops(start, requiredRows, candidateRows, orderBuilder) {
+  // เลือกจุดแบบเดียวกับสาย 49: ค่อย ๆ เพิ่มจุดที่ทำให้วงกลมดีที่สุด ไม่ใช่เพิ่มตามลำดับรายชื่ออย่างเดียว
+  const buildOrdered = (rows) => orderBuilder ? orderBuilder(rows) : orderCircularRoute(start, rows);
+  const required = uniqueRowsByIdName(requiredRows || []).filter(validCoord);
   let selected = [...required];
+  let current = buildOrdered(selected).filter(validCoord);
+  let currentScore = routeQualityScore(start, current, requiredRows);
+
   const pool = uniqueRowsByIdName(candidateRows || [])
     .filter(validCoord)
-    .filter(c => !selected.some(s => isSameStop(s, c)));
+    .filter(c => !selected.some(s => isSameStop(s, c)))
+    .slice(0, ROUTE_GREEDY_POOL_LIMIT);
 
-  const buildOrdered = (rows) => orderBuilder ? orderBuilder(rows) : orderCircularRoute(start, rows);
+  while (routeStopCount(current) < ROUTE_LOOP_MAX_STOPS) {
+    const currentCount = routeStopCount(current);
+    let best = null;
 
-  // เพิ่มจุดทีละจุด โดยคุมไม่เกิน 9 จุด และระยะประมาณไม่เกิน 350 กม.
-  for (const candidate of pool) {
-    if (routeStopCount(selected) >= MAX_ROUTE_CUSTOMER_STOPS) break;
-    const trialRows = uniqueRowsByIdName([...selected, candidate]);
-    const trialOrdered = buildOrdered(trialRows);
-    const trialDistance = approxRoadDistanceKm(start, trialOrdered);
-    if (trialDistance <= MAX_ROUTE_DISTANCE_KM) {
-      selected = trialRows;
-    }
-  }
-
-  // ถ้ายังไม่ถึง 7 จุด ให้ลองไล่จุดที่ใกล้ที่สุดอีกครั้ง แต่ยังไม่ฝืนเกิน 350 กม.
-  if (routeStopCount(selected) < MIN_ROUTE_CUSTOMER_STOPS) {
     for (const candidate of pool) {
-      if (routeStopCount(selected) >= MIN_ROUTE_CUSTOMER_STOPS || routeStopCount(selected) >= MAX_ROUTE_CUSTOMER_STOPS) break;
       if (selected.some(s => isSameStop(s, candidate))) continue;
-      const trialRows = uniqueRowsByIdName([...selected, candidate]);
-      const trialOrdered = buildOrdered(trialRows);
-      if (approxRoadDistanceKm(start, trialOrdered) <= MAX_ROUTE_DISTANCE_KM) selected = trialRows;
+      const seed = uniqueRowsByIdName([...selected, candidate]);
+      let trial = buildOrdered(seed).filter(validCoord);
+      const trialCount = routeStopCount(trial);
+      if (trialCount <= currentCount || trialCount > ROUTE_LOOP_MAX_STOPS) continue;
+
+      const approxKm = approxRoadDistanceKm(start, trial);
+      if (approxKm > MAX_ROUTE_DISTANCE_KM) continue;
+
+      const quality = routeQualityScore(start, trial, requiredRows);
+      const deadEnd = routeEndpointDeadEndPenalty(start, trial);
+      const hardDeadEnd = hasHardEndpointDeadEnd(start, trial, requiredRows);
+
+      // จุดที่ 8-9 เป็น optional ถ้าทำให้ต้องย้อนกลับ/หลุดวงให้ไม่รับเข้ามา
+      if (currentCount >= ROUTE_LOOP_MIN_STOPS) {
+        const degrade = quality - currentScore;
+        if (hardDeadEnd) continue;
+        if (degrade > ROUTE_ADD_OPTIONAL_MAX_DEGRADE) continue;
+      }
+
+      // ก่อนครบ 7 จุด ให้เน้นเติมจุดให้ครบ แต่ยังลงโทษ dead-end
+      // หลังครบ 7 จุด ให้เพิ่มเฉพาะจุดที่ทำให้วงยังสวยและไม่ย้อนกลับ
+      const needBonus = trialCount <= ROUTE_LOOP_MIN_STOPS ? -80 : (trialCount <= ROUTE_OPTIONAL_SOFT_STOP ? -18 : -4);
+      const score = quality + (deadEnd * 2.5) + needBonus;
+      if (!best || score < best.score) best = { seed, route: trial, score, quality };
     }
+
+    if (!best) break;
+    selected = best.seed;
+    current = best.route;
+    currentScore = best.quality;
   }
 
-  return buildOrdered(selected);
+  return buildOrdered(selected).filter(validCoord);
+}
+
+function limitRouteByStopsAndDistance(start, requiredRows, candidateRows, orderBuilder) {
+  // V5: ใช้กับทุกสาย/ทุกเดือน โดยเลือก 7-9 จุดที่ทำให้เส้นทางเป็นวงกลมมากที่สุด
+  // ลดเคสจุดท้ายหลุดวง เช่น ต้องวิ่งไปเก็บจุด 9 แล้ววกกลับ
+  return greedyAddBestLoopStops(start, requiredRows, candidateRows, orderBuilder);
 }
 function requiredRouteKeySet(requiredRows) {
   const set = new Set();
@@ -906,10 +979,11 @@ function trimOutOfLoopStops(start, orderedRows, requiredRows = []) {
       (
         currentDistance > DETOUR_TRIM_DISTANCE_KM ||
         detour.saving >= DETOUR_STOP_MIN_SAVING_KM ||
-        detour.tailDetour >= 7 ||
-        detour.outlier >= 10 ||
-        (isTail && (detour.saving >= 2.5 || detour.tailDetour >= 4 || detour.outlier >= 5)) ||
-        (isBeyondPreferred && (detour.saving >= 3.5 || detour.tailDetour >= 5))
+        detour.tailDetour >= 4.5 ||
+        detour.outlier >= 7 ||
+        (isTail && (detour.saving >= 1.2 || detour.tailDetour >= 2.5 || detour.outlier >= 3)) ||
+        (isBeyondPreferred && (detour.saving >= 2.0 || detour.tailDetour >= 3.0)) ||
+        hasHardEndpointDeadEnd(start, rows, requiredRows)
       );
 
     if (!shouldTrim) break;
@@ -945,12 +1019,13 @@ function routeQualityScore(start, rows, requiredRows = []) {
   const distance = approxRoadDistanceKm(start, validRows);
   const turn = routeTurnPenalty(start, validRows) * 1.35;
   const backtrack = loopBacktrackPenalty(start, validRows) * 0.85;
+  const endpoint = routeEndpointDeadEndPenalty(start, validRows) * 2.0;
   const savings = optionalStopSavings(start, validRows, requiredRows);
   const weakest = savings.length ? Math.max(0, (savings[0].score || savings[0].saving) - WEAK_STOP_SAVING_PENALTY_KM) : 0;
 
   // ถ้ามีจุดใดจุดหนึ่งที่ตัดออกแล้วระยะลดลงเยอะ แปลว่าจุดนั้นมักอยู่นอกวง/ทำให้ต้องวนกลับไปเก็บ
-  // จึงเพิ่ม penalty เพื่อให้ระบบเลือกจุดทดแทนที่อยู่ในวงเส้นทางหลักมากกว่า
-  return distance + turn + backtrack + (weakest * 2.2);
+  // V5 เพิ่ม endpoint penalty เพื่อไม่ให้ทุกสายมีจุดปลายติ่งแบบจุด 9
+  return distance + turn + backtrack + endpoint + (weakest * 2.2);
 }
 
 function improveOptionalStopsByRouteScore(start, orderedRows, requiredRows = [], candidateRows = [], orderBuilder = null) {
@@ -1039,6 +1114,12 @@ function buildBestTargetRoute(start, requiredRows, candidateRows, orderBuilder) 
 
   // 5) คุมระยะสุดท้ายไม่ให้เกิน 350 กม. และคงจุดหลักไว้
   ordered = trimRouteToMaxDistance(start, ordered, requiredRows, MIN_ROUTE_CUSTOMER_STOPS);
+
+  // 6) จัดลำดับสุดท้ายอีกครั้งด้วย loop score เพื่อให้ทุกสายออกมาเป็นวงกลม ไม่ต้องย้อนกลับไปเก็บจุดท้าย
+  const buildOrdered = (rows) => orderBuilder ? orderBuilder(rows) : orderCircularRoute(start, rows);
+  ordered = buildOrdered(ordered).filter(validCoord);
+  ordered = trimOutOfLoopStops(start, ordered, requiredRows);
+  ordered = fillRouteBackToMinimum(start, ordered, requiredRows, candidateRows, orderBuilder);
   return ordered.slice(0, MAX_ROUTE_CUSTOMER_STOPS);
 }
 
