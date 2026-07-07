@@ -1,7 +1,7 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
 // URL Apps Script ของคุณ
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxu0zeUAfHU1YBI0KJRTFC97xRTsPvXPx8cbw-8iXKqzHomAy0T48reAcQouaS0Ob1A/exec";
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxLDIGniwUc2lNzG0ten-T4f7UMJ_RyA9dMYg1rphu9ZuVWicfiFOPpfdO_HyRNCTJ5/exec";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
@@ -3498,6 +3498,405 @@ optimizeStopsForDisplay = function(list) {
 };
 /* ===== END SAFE ROUTE PLANNER FIX 20260707 ===== */
 
+
+
+/* ===== ULTRA STABLE ROUTE ENGINE 20260707-v3 =====
+   เป้าหมายหลัก: ให้หน้าเว็บเปิดได้ ไม่ค้าง และคงเงื่อนไขระบบเดิมไว้
+   - ใช้เฉพาะส่วนวางแผนเส้นทาง / เรียงลำดับจุด
+   - จำกัด 7-9 จุดในโหมดปรับปรุงปั๊มและตารางซ่อมเท่าที่ข้อมูลและระยะ <= 350 กม. อนุญาต
+   - ลดการคำนวณหนักแบบ nested/2-opt หลายรอบ เพื่อแก้ Page Unresponsive
+*/
+const ULTRA_ROUTE_POOL_LIMIT = 45;
+const ULTRA_ROUTE_CARD_LIMIT = 120;
+let __kceMasterIndexCache = null;
+let __kceMasterIndexSize = -1;
+
+function ultraRows(points) {
+  return uniqueRowsByIdName(points || []).filter(validCoord).map(p => ({ ...p }));
+}
+
+function ultraNoCoordRows(points) {
+  return uniqueRowsByIdName(points || []).filter(p => !validCoord(p)).map(p => ({ ...p }));
+}
+
+function ultraPoint(row) {
+  return { lat: toNumber(row.lat), lng: toNumber(row.lng) };
+}
+
+function ultraRouteKey(route) {
+  return (route || []).map(r => `${norm(r.customer_id)}:${norm(r.customer_name)}:${cleanText(r.lat)}:${cleanText(r.lng)}:${cleanText(r.type)}`).join('|');
+}
+
+function ultraAddCandidate(out, seen, route) {
+  const clean = ultraRows(route);
+  if (!clean.length) return;
+  const key = ultraRouteKey(clean);
+  if (seen.has(key)) return;
+  seen.add(key);
+  out.push(clean);
+}
+
+function ultraCentroid(points) {
+  const valid = ultraRows(points);
+  if (!valid.length) return { lat: 0, lng: 0 };
+  return {
+    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
+    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
+  };
+}
+
+function ultraAngle(center, p) {
+  return Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng);
+}
+
+function ultraBacktrackPenalty(start, route) {
+  const valid = ultraRows(route);
+  if (valid.length < 4) return 0;
+  const ds = valid.map(p => haversine(start, ultraPoint(p)));
+  const maxD = Math.max(...ds, 0);
+  let penalty = 0;
+  for (let i = 1; i < ds.length - 2; i++) {
+    if (maxD > 0 && ds[i] < maxD * 0.50 && ds[i + 1] > ds[i] + Math.max(5, maxD * 0.16)) penalty += 80;
+  }
+  return penalty;
+}
+
+function ultraScore(start, route, requiredRows = [], options = {}) {
+  const valid = ultraRows(route);
+  if (!valid.length) return Infinity;
+  const required = ultraRows(requiredRows);
+  for (const req of required) {
+    if (!valid.some(r => isSameStop(r, req))) return 1000000;
+  }
+  if (options.pumpFirst && options.pumpRow && !isSameStop(valid[0], options.pumpRow)) return 1000000;
+  const approxKm = approxRoadDistanceKm(start, valid);
+  const over = approxKm > MAX_ROUTE_DISTANCE_KM ? 100000 + ((approxKm - MAX_ROUTE_DISTANCE_KM) * 400) : 0;
+  return routeDistanceFromStart(start, valid) + (routeTurnPenalty(start, valid) * 1.2) + ultraBacktrackPenalty(start, valid) + over;
+}
+
+function ultraSweepOrder(start, points, requiredRows = [], options = {}) {
+  const valid = ultraRows(points);
+  const noCoord = ultraNoCoordRows(points);
+  if (valid.length <= 2) return [...valid, ...noCoord];
+
+  if (options.pumpFirst && options.pumpRow) {
+    const pump = valid.find(p => isSameStop(p, options.pumpRow)) || options.pumpRow;
+    const rest = valid.filter(p => !isSameStop(p, pump));
+    const pivot = validCoord(pump) ? ultraPoint(pump) : start;
+    const orderedRest = ultraSweepOrder(pivot, rest).filter(validCoord);
+    return [pump, ...orderedRest, ...noCoord];
+  }
+
+  const out = [];
+  const seen = new Set();
+  const center = ultraCentroid(valid);
+  const byCenter = [...valid].sort((a, b) => ultraAngle(center, a) - ultraAngle(center, b));
+  const byStart = [...valid].sort((a, b) => angleFromStart(start, a) - angleFromStart(start, b));
+  const byNear = [...valid].sort((a, b) => haversine(start, ultraPoint(a)) - haversine(start, ultraPoint(b)));
+
+  [byCenter, [...byCenter].reverse(), byStart, [...byStart].reverse(), byNear, [...byNear].reverse()].forEach(base => {
+    for (let i = 0; i < base.length; i++) ultraAddCandidate(out, seen, [...base.slice(i), ...base.slice(0, i)]);
+  });
+
+  const best = (out.length ? out : [valid])
+    .map(route => ({ route, score: ultraScore(start, route, requiredRows, options) }))
+    .sort((a, b) => a.score - b.score)[0];
+
+  return [...(best ? best.route : valid), ...noCoord];
+}
+
+function ultraRemoveOptionalIndex(start, rows, requiredRows = []) {
+  const requiredKeys = requiredRouteKeySet(requiredRows);
+  const base = approxRoadDistanceKm(start, rows);
+  let best = { index: -1, saving: -Infinity };
+  rows.forEach((row, index) => {
+    if (requiredKeys.has(rowUniqueKey(row))) return;
+    const trial = rows.filter((_, i) => i !== index);
+    const saving = base - approxRoadDistanceKm(start, trial);
+    if (saving > best.saving) best = { index, saving };
+  });
+  return best.index;
+}
+
+function ultraTrimRoute(start, orderedRows, requiredRows = [], minStops = 1) {
+  let rows = ultraRows(orderedRows);
+  const requiredCount = ultraRows(requiredRows).length;
+  const minAllowed = Math.max(requiredCount, Math.min(minStops, rows.length));
+
+  while (rows.length > MAX_ROUTE_CUSTOMER_STOPS) {
+    const idx = ultraRemoveOptionalIndex(start, rows, requiredRows);
+    if (idx < 0) break;
+    rows.splice(idx, 1);
+  }
+
+  while (rows.length > minAllowed && approxRoadDistanceKm(start, rows) > MAX_ROUTE_DISTANCE_KM) {
+    const idx = ultraRemoveOptionalIndex(start, rows, requiredRows);
+    if (idx < 0) break;
+    rows.splice(idx, 1);
+  }
+  return rows;
+}
+
+function ultraCandidateRank(start, targetRows, candidate, rankIndex = 0) {
+  const targets = ultraRows(targetRows);
+  const anchor = targets[0] || start;
+  const targetPoint = validCoord(anchor) ? ultraPoint(anchor) : start;
+  const dTarget = haversine(targetPoint, ultraPoint(candidate));
+  const dStart = haversine(start, ultraPoint(candidate));
+  const status = marketScore(candidate.status) * 4;
+  return dTarget + (dStart * 0.15) + status + (rankIndex * 0.05);
+}
+
+function ultraRankMarketPool(marketRows, target, start, maxItems = ULTRA_ROUTE_POOL_LIMIT) {
+  const selectedBU = getSelectedStartBU();
+  const targetBU = cleanText(target && target.bu);
+  const targetMeter = normalizeMeter(target && (target.meter || target.meterKey));
+  return uniqueRowsByIdName(marketRows || [])
+    .filter(validCoord)
+    .filter(m => !isVisited(m))
+    .filter(m => !target || !isSameStop(m, target))
+    .filter(m => !selectedBU || buEquivalent(m.bu, selectedBU))
+    .filter(m => !targetBU || buEquivalent(m.bu, targetBU))
+    .map((m, i) => {
+      const sameMeterBonus = targetMeter && normalizeMeter(m.meter || m.meterKey) === targetMeter ? -120 : 0;
+      const sameBUBonus = targetBU && buEquivalent(m.bu, targetBU) ? -60 : 0;
+      return { ...m, __ultraRank: ultraCandidateRank(start, [target].filter(Boolean), m, i) + sameMeterBonus + sameBUBonus };
+    })
+    .sort((a, b) => a.__ultraRank - b.__ultraRank)
+    .slice(0, maxItems);
+}
+
+function ultraBuildRoute(start, requiredRows, candidateRows, options = {}) {
+  const required = ultraRows(requiredRows).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  const minTarget = Math.min(MAX_ROUTE_CUSTOMER_STOPS, Math.max(MIN_ROUTE_CUSTOMER_STOPS, required.length));
+  const pool = ultraRows(candidateRows)
+    .filter(c => !required.some(r => isSameStop(r, c)))
+    .map((c, i) => ({ ...c, __ultraRank: c.__ultraRank ?? ultraCandidateRank(start, required, c, i) }))
+    .sort((a, b) => a.__ultraRank - b.__ultraRank)
+    .slice(0, ULTRA_ROUTE_POOL_LIMIT);
+
+  let selected = [...required];
+  for (const candidate of pool) {
+    if (selected.length >= MAX_ROUTE_CUSTOMER_STOPS) break;
+    if (selected.some(r => isSameStop(r, candidate))) continue;
+    const trial = ultraSweepOrder(start, [...selected, candidate], required, options).filter(validCoord);
+    if (approxRoadDistanceKm(start, trial) <= MAX_ROUTE_DISTANCE_KM) selected.push(candidate);
+  }
+
+  let ordered = ultraSweepOrder(start, selected, required, options).filter(validCoord);
+  ordered = ultraTrimRoute(start, ordered, required, Math.min(minTarget, ordered.length));
+  ordered = ultraSweepOrder(start, ordered, required, options).filter(validCoord);
+  return ultraTrimRoute(start, ordered, required, Math.min(minTarget, ordered.length));
+}
+
+// Override route functions แบบเบา เพื่อให้หน้าเว็บไม่ค้าง
+orderCircularRoute = function(start, points) {
+  return ultraSweepOrder(start, points || []);
+};
+
+orderNormalMarketRoute = function(start, points) {
+  return ultraSweepOrder(start, ultraRows(points).slice(0, MAX_ROUTE_CUSTOMER_STOPS));
+};
+
+orderStatusFilterRoute = function(start, points) {
+  return ultraSweepOrder(start, ultraRows(points).slice(0, MAX_ROUTE_CUSTOMER_STOPS));
+};
+
+orderPumpFirstRoute = function(start, pumpRow, otherRows) {
+  if (!pumpRow) return ultraSweepOrder(start, otherRows || []);
+  const rest = ultraRows(otherRows || []).filter(r => !isSameStop(r, pumpRow));
+  return ultraSweepOrder(start, [pumpRow, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS), [pumpRow], { pumpFirst: true, pumpRow });
+};
+
+buildBestTargetRoute = function(start, requiredRows, candidateRows, orderBuilder) {
+  const pumpRow = (requiredRows || []).find(isPumpRow);
+  const options = pumpRow ? { pumpFirst: true, pumpRow } : {};
+  return ultraBuildRoute(start, requiredRows || [], candidateRows || [], options);
+};
+
+trimOutOfLoopStops = function(start, orderedRows, requiredRows = []) {
+  return ultraTrimRoute(start, orderedRows || [], requiredRows || [], Math.min(MIN_ROUTE_CUSTOMER_STOPS, ultraRows(orderedRows).length));
+};
+
+function ultraRouteDateLabel(dateObj, fallback) {
+  return dateObj ? dateObj.toLocaleDateString("th-TH", { day: "numeric", month: "long", year: "2-digit" }) : (fallback || thaiMonthYearLabel());
+}
+
+// โหมดตามแผนปรับปรุงปั๊ม: ใช้หลักเดียวกับสาย 49 กับทุกสาย/ทุกเดือนอัตโนมัติ
+buildPumpPlanRows = function(pumpRows, repairRows, marketRows) {
+  const selectedBU = getSelectedStartBU();
+  const selectedPumps = chooseOnePumpPerMeterCurrentMonth(pumpRows)
+    .filter(p => !selectedBU || buEquivalent(p.bu, selectedBU));
+  const output = [];
+
+  selectedPumps.forEach(pump => {
+    const routeDate = ultraRouteDateLabel(pump.dateObj, pump.dateRaw);
+    const routeId = `${pump.bu || "BU-?"} สาย ${pump.meterKey} วันที่ ${routeDate}`;
+    const start = startForRoute([pump]);
+    const ranked = ultraRankMarketPool(marketRows, pump, start, ULTRA_ROUTE_POOL_LIMIT);
+    const ordered = ultraBuildRoute(start, [pump], ranked, { pumpFirst: true, pumpRow: pump });
+
+    ordered.forEach((row, idx) => output.push({
+      ...row,
+      plan_day: 1,
+      plan_date: pump.dateObj || thaiNow(),
+      route_group: routeId,
+      stop_no: `${idx + 1}/${ordered.length}`,
+      start_name: start.name,
+      priorityLabel: idx === 0 && row.type === "ปรับปรุงปั๊ม" ? "1-ปรับปรุงปั๊ม" : row.priorityLabel
+    }));
+  });
+
+  // คงข้อมูลซ่อมของเดือนปัจจุบันไว้เหมือนเงื่อนไขเดิม แต่ไม่เอาเข้าการ์ดเส้นทางของโหมดปรับปรุงปั๊ม
+  const repairs = (repairRows || [])
+    .filter(r => inCurrentThaiMonth(r.dateObj))
+    .map(r => ({ ...r, plan_day: 1, plan_date: r.dateObj || thaiNow(), route_group: "ตารางซ่อมเดือนปัจจุบัน", stop_no: "-", start_name: "-" }));
+
+  return [...output, ...repairs];
+};
+
+// โหมดตารางซ่อม: เติมจุดออกตลาดใกล้งานซ่อมให้เป็น 7-9 จุด โดยคุมระยะไม่เกิน 350 กม. เท่าที่ข้อมูลอนุญาต
+buildRepairPlanRows = function(repairRows, marketRows, planDays) {
+  const selectedBU = getSelectedStartBU();
+  const repairs = (repairRows || [])
+    .filter(r => inCurrentThaiMonth(r.dateObj))
+    .filter(r => !isVisited(r))
+    .map((r, i) => {
+      const nearest = nearestStartPointForRow(r);
+      const buFromText = inferBUFromAnyText(r.customer_name, r.area, r.coordinator, r.meter, r.customer_id);
+      const bu = r.bu || buFromText || nearest.bu || "";
+      return { ...r, bu, __repairIndex: i + 1, __nearestBU: bu };
+    })
+    .filter(r => !selectedBU || buEquivalent(r.__nearestBU, selectedBU))
+    .sort((a, b) => dateSortValue(a.dateObj) - dateSortValue(b.dateObj));
+
+  const output = [];
+  repairs.forEach((repair, repairIndex) => {
+    const start = startForRoute([repair]);
+    const ranked = ultraRankMarketPool(marketRows, repair, start, ULTRA_ROUTE_POOL_LIMIT);
+    const ordered = ultraBuildRoute(start, [repair], ranked, {});
+    const routeDate = ultraRouteDateLabel(repair.dateObj, repair.dateRaw);
+    const repairName = cleanText(repair.customer_name || `แถว ${repair.__repairSourceRow || repairIndex + 1}`);
+    const routeId = `ตารางซ่อม ${routeDate} ${repair.bu || selectedBU || "ทุก BU"} สาย ${repair.meterKey || "ไม่ระบุ"} • ${repairName}`;
+
+    ordered.forEach((row, idx) => output.push({
+      ...row,
+      plan_day: 1,
+      plan_date: repair.dateObj || thaiNow(),
+      route_group: routeId,
+      stop_no: `${idx + 1}/${ordered.length}`,
+      start_name: start.name,
+      priorityLabel: row.type === "ซ่อม" ? (row.priorityLabel || "ซ่อม") : row.priorityLabel,
+      __repairIndex: repairIndex + 1
+    }));
+  });
+  return output;
+};
+
+routeDisplayStops = function(list) {
+  const sorted = sortRowsByPlannedStopNo(list || []).filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  const mode = getPlanSettings().mode;
+  if (mode === "pump") {
+    const pump = sorted.find(isPumpRow);
+    if (pump && !isSameStop(sorted[0], pump)) {
+      const rest = sorted.filter(r => !isSameStop(r, pump));
+      return [pump, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+    }
+  }
+  return sorted;
+};
+
+optimizeStopsForDisplay = function(list) {
+  return routeDisplayStops(list || []);
+};
+
+// ลดงานหนักตอนเปิดหน้า: ไม่ render Dashboard ย้อนหลังจนกว่าจะกดเข้าแท็บ Dashboard
+const __kceOriginalRenderTable = renderTable;
+renderTable = function() {
+  const tbody = document.getElementById("resultBody");
+  renderRouteSummary(plannedRows || []);
+
+  const page2 = document.getElementById("page2");
+  if (page2 && !page2.hidden) renderVisitDashboard();
+
+  const rows = plannedRows || [];
+  const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
+  setText("sumAll", rows.length);
+  setText("sumPump", rows.filter(r => r.type === "ปรับปรุงปั๊ม").length);
+  setText("sumRepair", rows.filter(r => r.type === "ซ่อม").length);
+  setText("sumMarket", rows.filter(r => r.type === "พื้นที่ออกตลาด").length);
+
+  if (!tbody) return;
+
+  // ถ้ามีตารางข้อมูลล่างในบางเวอร์ชัน ให้ใช้ renderer เดิม แต่เลี่ยงการวาด Dashboard ซ้ำด้วยการเรียกเฉพาะเมื่อจำเป็น
+  try { return __kceOriginalRenderTable(); } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="18" class="loading">ไม่สามารถแสดงตารางข้อมูลได้: ${escapeHtml(err.message)}</td></tr>`;
+  }
+};
+
+function ultraBuildMasterIndex() {
+  const byId = new Map();
+  const byName = new Map();
+  const byCompact = new Map();
+  (customerMasterRows || []).forEach(c => {
+    const id = norm(c.customer_id);
+    const name = norm(c.customer_name);
+    const compact = compactCustomerName(c.customer_name);
+    if (id && !byId.has(id)) byId.set(id, c);
+    if (name && !byName.has(name)) byName.set(name, c);
+    if (compact && compact.length >= 4 && !byCompact.has(compact)) byCompact.set(compact, c);
+  });
+  __kceMasterIndexCache = { byId, byName, byCompact };
+  __kceMasterIndexSize = (customerMasterRows || []).length;
+  return __kceMasterIndexCache;
+}
+
+function ultraMasterIndex() {
+  if (!__kceMasterIndexCache || __kceMasterIndexSize !== (customerMasterRows || []).length) return ultraBuildMasterIndex();
+  return __kceMasterIndexCache;
+}
+
+findMasterForSavedVisit = function(row) {
+  const idx = ultraMasterIndex();
+  const id = norm(savedCell(row, "รหัสลูกค้า", 3));
+  const nameRaw = savedCell(row, "ชื่อลูกค้า/ชื่อปั๊ม", 4);
+  const name = norm(nameRaw);
+  const compact = compactCustomerName(nameRaw);
+  if (id && idx.byId.has(id)) return idx.byId.get(id);
+  if (name && idx.byName.has(name)) return idx.byName.get(name);
+  if (compact && idx.byCompact.has(compact)) return idx.byCompact.get(compact);
+  return null;
+};
+
+visitDashboardGroup = function(row, masterAlready) {
+  const master = masterAlready || findMasterForSavedVisit(row);
+  const status = master ? master.status : cleanText(savedCell(row, "สถานะลูกค้า", 14) || savedCell(row, "กลุ่มลูกค้า", 14));
+  const group = statusGroup(status);
+  if (group === "ลูกค้าซื้อขายประจำ") return "ลูกค้าปัจจุบัน";
+  if (group === "ลูกค้าใหม่/Winback") return "ลูกค้าใหม่";
+  if (group && group !== "ไม่ระบุ") return group;
+  return "ไม่ระบุ";
+};
+
+normalizeSavedVisitRow = function(row) {
+  const master = findMasterForSavedVisit(row) || {};
+  const visitDate = parseSavedVisitDate(row);
+  const bu = savedVisitBU(row) || master.bu || "";
+  return {
+    visitDate,
+    visitDateLabel: visitDate ? visitDate.toLocaleDateString("th-TH", { day:"numeric", month:"short", year:"2-digit" }) : "-",
+    jobType: cleanText(savedCell(row, "ประเภทงาน", 2)),
+    customer_id: cleanText(savedCell(row, "รหัสลูกค้า", 3) || master.customer_id),
+    customer_name: cleanText(savedCell(row, "ชื่อลูกค้า/ชื่อปั๊ม", 4) || master.customer_name),
+    bu,
+    buName: branchNameFromBU(bu) || bu || "-",
+    meter: cleanText(savedCell(row, "สายมิเตอร์", 6) || master.meter),
+    area: cleanText(savedCell(row, "พื้นที่", 7) || master.area),
+    visit_status: cleanText(savedCell(row, "สถานะเข้าพบ", 13) || "สำเร็จ"),
+    customer_group: visitDashboardGroup(row, master)
+  };
+};
+/* ===== END ULTRA STABLE ROUTE ENGINE 20260707-v3 ===== */
 
 document.getElementById("planForm").addEventListener("submit", saveForm);
 if (document.getElementById("searchBox")) document.getElementById("searchBox").addEventListener("input", renderTable);
