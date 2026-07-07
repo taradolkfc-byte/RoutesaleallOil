@@ -3225,6 +3225,280 @@ routeDisplayStops = function(list) {
 
 /* ===== END BEST ROUTE PLANNER MERGE ===== */
 
+
+/* ===== SAFE ROUTE PLANNER FIX 20260707 =====
+   แก้ระบบค้าง/โหลดนาน และคุมเงื่อนไขใหม่:
+   - ทุกแผนใช้ไม่เกิน 9 จุด
+   - โหมดปรับปรุงปั๊ม / ตารางซ่อม พยายามเติมจุดให้ได้ 7-9 จุด
+   - ระยะทางประมาณการไม่เกิน 350 กม. โดยใช้ชุดจุดเดียวกับ Map และ Google Maps
+   - ใช้กับทุกสาย ทุก BU และทุกเดือน โดยไม่ hard-code เฉพาะสาย 49
+*/
+function safeRoutePoint(row) {
+  return { lat: toNumber(row.lat), lng: toNumber(row.lng) };
+}
+
+function safeRouteRows(points) {
+  return uniqueRowsByIdName(points || []).filter(validCoord).map(p => ({ ...p }));
+}
+
+function safeRouteNoCoordRows(points) {
+  return uniqueRowsByIdName(points || []).filter(p => !validCoord(p)).map(p => ({ ...p }));
+}
+
+function safeRouteKey(route) {
+  return (route || []).map(r => `${norm(r.customer_id)}:${norm(r.customer_name)}:${cleanText(r.lat)}:${cleanText(r.lng)}:${cleanText(r.type)}`).join('|');
+}
+
+function safeAddCandidate(out, seen, route) {
+  const clean = safeRouteRows(route);
+  if (!clean.length) return;
+  const key = safeRouteKey(clean);
+  if (seen.has(key)) return;
+  seen.add(key);
+  out.push(clean);
+}
+
+function safeRouteCrossPenalty(start, order) {
+  if (typeof bestRouteCrossPenalty === "function") return bestRouteCrossPenalty(start, order);
+  return 0;
+}
+
+function safeRouteScore(start, order, requiredRows = [], options = {}) {
+  const valid = safeRouteRows(order);
+  if (!valid.length) return Infinity;
+
+  const required = safeRouteRows(requiredRows);
+  for (const req of required) {
+    if (!valid.some(r => isSameStop(r, req))) return 1000000;
+  }
+  if (options.pumpFirst && options.pumpRow && !isSameStop(valid[0], options.pumpRow)) return 1000000;
+
+  const approxKm = approxRoadDistanceKm(start, valid);
+  const overDistancePenalty = approxKm > MAX_ROUTE_DISTANCE_KM
+    ? 10000 + ((approxKm - MAX_ROUTE_DISTANCE_KM) * 80)
+    : 0;
+
+  const distance = routeDistanceFromStart(start, valid);
+  const turn = routeTurnPenalty(start, valid) * 1.7;
+  const backtrack = loopBacktrackPenalty(start, valid) * 1.15;
+  const cross = safeRouteCrossPenalty(start, valid);
+  const jump = safeRouteJumpPenalty(start, valid);
+
+  return distance + turn + backtrack + cross + jump + overDistancePenalty;
+}
+
+function safeRouteJumpPenalty(start, order) {
+  if (!order || order.length < 3) return 0;
+  const legs = [];
+  let current = { lat: start.lat, lng: start.lng };
+  order.forEach(p => {
+    legs.push(haversine(current, safeRoutePoint(p)));
+    current = safeRoutePoint(p);
+  });
+  legs.push(haversine(current, { lat: start.lat, lng: start.lng }));
+  const avg = legs.reduce((sum, d) => sum + d, 0) / Math.max(1, legs.length);
+  return legs.reduce((sum, d) => sum + (d > avg * 2.35 && d > 20 ? (d - avg * 2.35) * 2 : 0), 0);
+}
+
+function safeRouteCoreOrder(start, points) {
+  const valid = safeRouteRows(points);
+  if (valid.length <= 2) return valid;
+
+  const out = [];
+  const seen = new Set();
+  safeAddCandidate(out, seen, valid);
+  safeAddCandidate(out, seen, nearestNeighborOrder(start, valid));
+  safeAddCandidate(out, seen, farthestInsertionOrder(start, valid));
+
+  const center = {
+    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
+    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
+  };
+  const byCenter = [...valid].sort((a, b) => Math.atan2(toNumber(a.lat) - center.lat, toNumber(a.lng) - center.lng) - Math.atan2(toNumber(b.lat) - center.lat, toNumber(b.lng) - center.lng));
+  const byStart = [...valid].sort((a, b) => angleFromStart(start, a) - angleFromStart(start, b));
+  const byNear = [...valid].sort((a, b) => haversine(start, safeRoutePoint(a)) - haversine(start, safeRoutePoint(b)));
+
+  [byCenter, [...byCenter].reverse(), byStart, [...byStart].reverse(), byNear, [...byNear].reverse()].forEach(base => {
+    for (let i = 0; i < base.length; i++) {
+      const rotated = [...base.slice(i), ...base.slice(0, i)];
+      safeAddCandidate(out, seen, rotated);
+      safeAddCandidate(out, seen, pullPointsThatAreOnTheWay(start, rotated));
+      safeAddCandidate(out, seen, pushNearStartStopsToEnd(start, rotated));
+    }
+  });
+
+  // 2-opt เฉพาะไม่กี่เส้น เพื่อลดเส้นตัดกัน แต่ไม่ทำให้มือถือค้าง
+  out.slice(0, 18).forEach(route => {
+    const improved = twoOptClosedRoute(start, route);
+    safeAddCandidate(out, seen, improved);
+    safeAddCandidate(out, seen, pullPointsThatAreOnTheWay(start, improved));
+  });
+
+  return (out
+    .map(route => ({ route, score: safeRouteScore(start, route) }))
+    .sort((a, b) => a.score - b.score)[0] || { route: valid }).route;
+}
+
+function safeRouteOrder(start, points, requiredRows = [], options = {}) {
+  const valid = safeRouteRows(points);
+  const noCoord = safeRouteNoCoordRows(points);
+  if (valid.length <= 2) return [...valid, ...noCoord];
+
+  if (options.pumpFirst && options.pumpRow) {
+    const pump = valid.find(p => isSameStop(p, options.pumpRow)) || options.pumpRow;
+    const rest = valid.filter(p => !isSameStop(p, pump));
+    const pivot = validCoord(pump) ? safeRoutePoint(pump) : start;
+    const orderedRest = safeRouteCoreOrder(pivot, rest);
+    return [pump, ...orderedRest, ...noCoord];
+  }
+
+  const candidates = [];
+  const seen = new Set();
+  safeAddCandidate(candidates, seen, safeRouteCoreOrder(start, valid));
+  safeAddCandidate(candidates, seen, pullPointsThatAreOnTheWay(start, safeRouteCoreOrder(start, valid)));
+  safeAddCandidate(candidates, seen, applyRouteBusinessRules(safeRouteCoreOrder(start, valid)));
+
+  const best = (candidates.length ? candidates : [valid])
+    .map(route => ({ route, score: safeRouteScore(start, route, requiredRows, options) }))
+    .sort((a, b) => a.score - b.score)[0];
+
+  return [...(best ? best.route : valid), ...noCoord];
+}
+
+function safeRouteRemoveOptional(start, rows, requiredRows = []) {
+  const requiredKeys = requiredRouteKeySet(requiredRows);
+  const base = approxRoadDistanceKm(start, rows);
+  let best = { index: -1, saving: -Infinity };
+  rows.forEach((row, index) => {
+    if (!validCoord(row)) return;
+    if (requiredKeys.has(rowUniqueKey(row))) return;
+    const trial = rows.filter((_, i) => i !== index);
+    const saving = base - approxRoadDistanceKm(start, trial);
+    if (saving > best.saving) best = { index, saving };
+  });
+  return best.index;
+}
+
+function safeTrimRoute(start, orderedRows, requiredRows = [], minStops = 1) {
+  let rows = safeRouteRows(orderedRows);
+  const requiredCount = safeRouteRows(requiredRows).length;
+  const minAllowed = Math.max(requiredCount, Math.min(minStops, rows.length));
+
+  while (rows.length > MAX_ROUTE_CUSTOMER_STOPS) {
+    const idx = safeRouteRemoveOptional(start, rows, requiredRows);
+    if (idx < 0) break;
+    rows.splice(idx, 1);
+  }
+
+  while (rows.length > minAllowed && approxRoadDistanceKm(start, rows) > MAX_ROUTE_DISTANCE_KM) {
+    const idx = safeRouteRemoveOptional(start, rows, requiredRows);
+    if (idx < 0) break;
+    rows.splice(idx, 1);
+  }
+  return rows;
+}
+
+function safeCandidateRank(start, requiredRows, candidate, rankIndex) {
+  const required = safeRouteRows(requiredRows);
+  const anchor = required.length ? required[0] : start;
+  const toAnchor = validCoord(anchor) ? haversine(safeRoutePoint(anchor), safeRoutePoint(candidate)) : haversine(start, safeRoutePoint(candidate));
+  const toStart = haversine(start, safeRoutePoint(candidate));
+  return toAnchor + (toStart * 0.2) + (marketScore(candidate.status) * 3) + (rankIndex * 0.08);
+}
+
+function safeBuildRouteWithPool(start, requiredRows, candidateRows, options = {}) {
+  const required = safeRouteRows(requiredRows).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  const minTarget = Math.min(MAX_ROUTE_CUSTOMER_STOPS, Math.max(MIN_ROUTE_CUSTOMER_STOPS, required.length));
+  const pool = safeRouteRows(candidateRows)
+    .filter(c => !required.some(r => isSameStop(r, c)))
+    .map((c, i) => ({ ...c, __safeRank: safeCandidateRank(start, required, c, i) }))
+    .sort((a, b) => a.__safeRank - b.__safeRank)
+    .slice(0, Math.max(35, ROUTE_REPLACEMENT_POOL_LIMIT || 70));
+
+  let selected = [...required];
+
+  while (selected.length < MAX_ROUTE_CUSTOMER_STOPS) {
+    let bestAdd = null;
+    for (let i = 0; i < pool.length; i++) {
+      const candidate = pool[i];
+      if (selected.some(r => isSameStop(r, candidate))) continue;
+      const trialSeed = uniqueRowsByIdName([...selected, candidate]);
+      const trialOrder = safeRouteOrder(start, trialSeed, required, options).filter(validCoord);
+      const approxKm = approxRoadDistanceKm(start, trialOrder);
+      if (approxKm > MAX_ROUTE_DISTANCE_KM) continue;
+      const fillBonus = trialOrder.length < minTarget ? -35 * trialOrder.length : 0;
+      const score = safeRouteScore(start, trialOrder, required, options) + candidate.__safeRank + fillBonus;
+      if (!bestAdd || score < bestAdd.score) bestAdd = { candidate, score };
+    }
+    if (!bestAdd) break;
+    selected.push(bestAdd.candidate);
+  }
+
+  let ordered = safeRouteOrder(start, selected, required, options).filter(validCoord);
+  ordered = safeTrimRoute(start, ordered, required, Math.min(minTarget, ordered.length));
+  ordered = safeRouteOrder(start, ordered, required, options).filter(validCoord);
+  ordered = safeTrimRoute(start, ordered, required, Math.min(minTarget, ordered.length));
+  return ordered;
+}
+
+function safePumpPlanRoute(start, pumpRow, marketRows) {
+  const rankedMarkets = rankMarketCandidatesForTarget(marketRows || [], pumpRow, start);
+  return safeBuildRouteWithPool(start, [pumpRow], rankedMarkets, { pumpFirst: true, pumpRow });
+}
+
+// Override เฉพาะเครื่องยนต์วางแผน/เรียงเส้นทางแบบปลอดค้าง
+orderCircularRoute = function(start, points) {
+  return safeRouteOrder(start, points || []);
+};
+
+orderNormalMarketRoute = function(start, points) {
+  return safeRouteOrder(start, safeRouteRows(points).slice(0, MAX_ROUTE_CUSTOMER_STOPS));
+};
+
+orderStatusFilterRoute = function(start, points) {
+  return safeRouteOrder(start, safeRouteRows(points).slice(0, MAX_ROUTE_CUSTOMER_STOPS));
+};
+
+orderPumpFirstRoute = function(start, pumpRow, otherRows) {
+  if (!pumpRow) return safeRouteOrder(start, otherRows || []);
+  const rest = safeRouteRows(otherRows || []).filter(r => !isSameStop(r, pumpRow));
+  return safeRouteOrder(start, [pumpRow, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS), [pumpRow], { pumpFirst: true, pumpRow });
+};
+
+buildBestTargetRoute = function(start, requiredRows, candidateRows, orderBuilder) {
+  const pumpRow = (requiredRows || []).find(isPumpRow);
+  const options = pumpRow ? { pumpFirst: true, pumpRow } : {};
+  return safeBuildRouteWithPool(start, requiredRows || [], candidateRows || [], options);
+};
+
+trimOutOfLoopStops = function(start, orderedRows, requiredRows = []) {
+  const pumpRow = (requiredRows || []).find(isPumpRow);
+  const options = pumpRow ? { pumpFirst: true, pumpRow } : {};
+  const minTarget = Math.min(MAX_ROUTE_CUSTOMER_STOPS, Math.max(MIN_ROUTE_CUSTOMER_STOPS, safeRouteRows(requiredRows).length));
+  let rows = safeTrimRoute(start, orderedRows || [], requiredRows, Math.min(minTarget, safeRouteRows(orderedRows).length));
+  rows = safeRouteOrder(start, rows, requiredRows, options).filter(validCoord);
+  return safeTrimRoute(start, rows, requiredRows, Math.min(minTarget, rows.length));
+};
+
+routeDisplayStops = function(list) {
+  const sorted = sortRowsByPlannedStopNo(list || []).filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  const mode = getPlanSettings().mode;
+  if (mode === "pump") {
+    const pump = sorted.find(isPumpRow);
+    if (pump && !isSameStop(sorted[0], pump)) {
+      const rest = sorted.filter(r => !isSameStop(r, pump));
+      return [pump, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+    }
+  }
+  return sorted;
+};
+
+optimizeStopsForDisplay = function(list) {
+  return routeDisplayStops(list || []);
+};
+/* ===== END SAFE ROUTE PLANNER FIX 20260707 ===== */
+
+
 document.getElementById("planForm").addEventListener("submit", saveForm);
 if (document.getElementById("searchBox")) document.getElementById("searchBox").addEventListener("input", renderTable);
 if (document.getElementById("typeFilter")) document.getElementById("typeFilter").addEventListener("change", renderTable);
