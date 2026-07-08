@@ -2801,3 +2801,185 @@ function routeDisplayStops(list) {
   return sortRowsByPlannedStopNo(list || []).filter(validCoord).slice(0, routeCircleMaxStops());
 }
 
+
+/* =====================================================================
+   ROUTE ONLY HOTFIX 20260708-02
+   แก้เฉพาะ logic เส้นทางตามเงื่อนไขล่าสุด
+   1) ปรับปรุงปั๊ม = จุดที่ 1 เสมอ
+   2) ตารางซ่อม = จุดที่ 1 เสมอ
+   3) เพิ่มคะแนนคัดจุดให้ "วงกลมจริง" มากขึ้น ไม่ยืดเป็นวงรี
+   4) ระยะรวมโดยประมาณยังต้องไม่เกิน 350 กม.
+   ===================================================================== */
+
+function routeCircleShapeScore(start, ordered, requiredRows) {
+  const rows = (ordered || []).filter(validCoord);
+  if (!rows.length) return Infinity;
+
+  const approxKm = routeCircleApproxDistanceKm(start, rows);
+  const maxKm = routeCircleMaxDistanceKm();
+  const overDistancePenalty = approxKm > maxKm ? (approxKm - maxKm) * 400 : 0;
+
+  const center = routeCircleCenter(rows);
+  if (!center) return Infinity;
+
+  const meanLat = center.lat * Math.PI / 180;
+  const xs = rows.map(p => toNumber(p.lng) * Math.cos(meanLat) * 111.32);
+  const ys = rows.map(p => toNumber(p.lat) * 110.57);
+  const width = Math.max(...xs) - Math.min(...xs);
+  const height = Math.max(...ys) - Math.min(...ys);
+  const shortSide = Math.max(0.1, Math.min(width, height));
+  const longSide = Math.max(width, height);
+  const aspectRatio = longSide / shortSide;
+
+  // เดิมยอมให้ยืดมากไป รอบนี้บีบให้ใกล้วงกลมมากขึ้น
+  // ratio 1.00 = กลมมาก, ถ้าเกิน 1.15 จะเริ่มโดนลงโทษหนัก
+  const aspectPenalty = Math.max(0, aspectRatio - 1.15) * 240;
+
+  const radii = rows.map(p => haversine(center, { lat: toNumber(p.lat), lng: toNumber(p.lng) }));
+  const avgR = radii.reduce((sum, r) => sum + r, 0) / Math.max(1, radii.length);
+  const sdR = Math.sqrt(radii.reduce((sum, r) => sum + Math.pow(r - avgR, 2), 0) / Math.max(1, radii.length));
+  const radialCv = avgR > 0 ? sdR / avgR : 0;
+
+  // จุดที่ไกลหลุดวง/ใกล้ศูนย์กลางเกินไป ทำให้เป็นวงรีหรือเส้นยาว ให้ลดคะแนนแรงขึ้น
+  const radialPenalty = Math.max(0, radialCv - 0.30) * 210;
+
+  const maxGap = routeCircleMaxAngleGap(center, rows);
+  const idealGap = (Math.PI * 2) / Math.max(3, rows.length);
+  // ถ้ามุมว่างกว้าง แปลว่าจุดไปกองอยู่ด้านเดียว ไม่เป็นวงกลม
+  const gapPenalty = Math.max(0, maxGap - idealGap * 1.45) * 160;
+
+  const turnPenalty = typeof routeTurnPenalty === "function" ? routeTurnPenalty(start, rows) * 2.4 : 0;
+  const backtrackPenalty = typeof loopBacktrackPenalty === "function" ? loopBacktrackPenalty(start, rows) * 1.8 : 0;
+
+  const requiredKeys = new Set((requiredRows || []).filter(validCoord).map(routeCircleKey));
+  const rowKeys = new Set(rows.map(routeCircleKey));
+  let missingRequiredPenalty = 0;
+  requiredKeys.forEach(k => { if (!rowKeys.has(k)) missingRequiredPenalty += 100000; });
+
+  // จำนวนจุดยังสำคัญ แต่ไม่ให้ชนะรูปทรงวงกลม
+  const countBonus = rows.length * 1.2;
+
+  return approxKm + overDistancePenalty + aspectPenalty + radialPenalty + gapPenalty + turnPenalty + backtrackPenalty + missingRequiredPenalty - countBonus;
+}
+
+function routeCircleForceRequiredFirst(start, requiredRows, orderedRows) {
+  const required = routeCircleUniqueRows((requiredRows || []).filter(validCoord));
+  const ordered = routeCircleUniqueRows((orderedRows || []).filter(validCoord));
+  if (!required.length) return ordered;
+
+  let rest = ordered.filter(row => !required.some(req => routeCircleSameStop(req, row)));
+  const pivot = required[required.length - 1];
+  const pivotStart = { lat: toNumber(pivot.lat), lng: toNumber(pivot.lng) };
+
+  // หลังจุดบังคับ ให้เรียงจุดที่เหลือแบบวนรอบจากตำแหน่งจุดบังคับ เพื่อลดการย้อนกลับ
+  rest = routeCircleOrderStrict(pivotStart, rest).filter(validCoord);
+
+  let finalRoute = [...required, ...rest].slice(0, routeCircleMaxStops());
+
+  // ถ้าหลังบังคับจุดแรกแล้วเกิน 350 กม. ให้ตัดจุดเสริมที่ทำให้ยืดที่สุดออก แต่ห้ามตัดจุดบังคับ
+  while (finalRoute.length > required.length && routeCircleApproxDistanceKm(start, finalRoute) > routeCircleMaxDistanceKm()) {
+    const requiredKeys = new Set(required.map(routeCircleKey));
+    let removeIndex = -1;
+    let bestSaving = -Infinity;
+    const baseD = routeCircleApproxDistanceKm(start, finalRoute);
+    finalRoute.forEach((row, idx) => {
+      if (requiredKeys.has(routeCircleKey(row))) return;
+      const trialD = routeCircleApproxDistanceKm(start, finalRoute.filter((_, i) => i !== idx));
+      const saving = baseD - trialD;
+      if (saving > bestSaving) { bestSaving = saving; removeIndex = idx; }
+    });
+    if (removeIndex < 0) break;
+    finalRoute.splice(removeIndex, 1);
+  }
+
+  return finalRoute;
+}
+
+// Override: โหมดตามแผนปรับปรุงปั๊ม — จุดปรับปรุงปั๊มเป็นจุดที่ 1 เสมอ แล้วค่อยเลือกจุดออกตลาดที่ทำให้เส้นทางกลมที่สุด
+function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
+  const selectedBU = typeof getSelectedStartBU === "function" ? getSelectedStartBU() : "";
+  const selectedPumps = chooseOnePumpPerMeterCurrentMonth(pumpRows)
+    .filter(p => !selectedBU || routeCircleBUEquivalent(p.bu, selectedBU))
+    .filter(p => !(typeof isVisited === "function" && isVisited(p)));
+  const output = [];
+
+  selectedPumps.forEach(pump => {
+    const routeDate = pump.dateObj ? pump.dateObj.toLocaleDateString("th-TH", { day: "numeric", month: "long", year: "2-digit" }) : pump.dateRaw;
+    const routeId = `${pump.bu || "BU-?"} สาย ${pump.meterKey} วันที่ ${routeDate}`;
+    const start = typeof startForRoute === "function" ? startForRoute([pump]) : null;
+    const pool = routeCircleCandidatePool(marketRows, [pump], { start, meter: pump.meterKey || pump.meter, bu: pump.bu });
+    let ordered = buildCircleRouteWithFreeSelection(start, [pump], pool, { mode: "pump", meter: pump.meterKey || pump.meter, bu: pump.bu });
+    ordered = routeCircleForceRequiredFirst(start, [pump], ordered);
+
+    ordered.forEach((row, idx) => output.push({
+      ...row,
+      plan_day: 1,
+      plan_date: pump.dateObj || thaiNow(),
+      route_group: routeId,
+      stop_no: `${idx + 1}/${ordered.length}`,
+      start_name: start ? start.name : "-",
+      priorityLabel: idx === 0 && cleanText(row.type) === "ปรับปรุงปั๊ม" ? "1-ปรับปรุงปั๊ม" : row.priorityLabel
+    }));
+  });
+
+  const repairs = (repairRows || [])
+    .filter(r => inCurrentThaiMonth(r.dateObj))
+    .map(r => ({ ...r, plan_day: 1, plan_date: r.dateObj || thaiNow(), route_group: "ตารางซ่อมเดือนปัจจุบัน", stop_no: "-", start_name: "-" }));
+
+  return [...output, ...repairs];
+}
+
+// Override: โหมดตารางซ่อม — จุดซ่อมเป็นจุดที่ 1 เสมอ แล้วค่อยเลือกจุดออกตลาดที่ทำให้เส้นทางกลมที่สุด
+function buildRepairPlanRows(repairRows, marketRows, planDays) {
+  const selectedBU = typeof getSelectedStartBU === "function" ? getSelectedStartBU() : "";
+
+  const candidates = (repairRows || [])
+    .filter(r => inCurrentThaiMonth(r.dateObj))
+    .filter(r => !(typeof isVisited === "function" && isVisited(r)))
+    .map(r => {
+      const nearest = typeof nearestStartPointForRow === "function" ? nearestStartPointForRow(r) : null;
+      const buFromText = inferBUFromAnyText(r.customer_name, r.area, r.coordinator, r.meter, r.customer_id);
+      const bu = r.bu || buFromText || (nearest && nearest.bu) || "";
+      return { ...r, bu, __nearestStartName: nearest ? nearest.name : "", __nearestBU: bu };
+    })
+    .filter(r => !selectedBU || routeCircleBUEquivalent(r.__nearestBU || r.bu, selectedBU))
+    .sort((a, b) =>
+      dateSortValue(a.dateObj) - dateSortValue(b.dateObj) ||
+      cleanText(a.bu).localeCompare(cleanText(b.bu), "th") ||
+      cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), "th") ||
+      cleanText(a.customer_name).localeCompare(cleanText(b.customer_name), "th")
+    );
+
+  const output = [];
+
+  candidates.forEach((repair, repairIndex) => {
+    const start = typeof startForRoute === "function" ? startForRoute([repair]) : null;
+    const pool = routeCircleCandidatePool(marketRows, [repair], { start, meter: repair.meterKey || repair.meter, bu: repair.bu || repair.__nearestBU });
+    let ordered = buildCircleRouteWithFreeSelection(start, [repair], pool, { mode: "repair", meter: repair.meterKey || repair.meter, bu: repair.bu || repair.__nearestBU });
+    ordered = routeCircleForceRequiredFirst(start, [repair], ordered);
+
+    const routeDate = repair.dateObj
+      ? repair.dateObj.toLocaleDateString("th-TH", { day: "numeric", month: "long", year: "2-digit" })
+      : thaiMonthYearLabel();
+    const repairUniqueName = cleanText(repair.customer_name || `แถว ${repair.__repairSourceRow || repairIndex + 1}`);
+    const routeId = `ตารางซ่อม ${routeDate} ${repair.bu || selectedBU || "ทุก BU"} สาย ${repair.meterKey || "ไม่ระบุ"} • ${repairUniqueName}`;
+
+    ordered.forEach((row, idx) => output.push({
+      ...row,
+      plan_day: 1,
+      plan_date: repair.dateObj || thaiNow(),
+      route_group: routeId,
+      stop_no: `${idx + 1}/${ordered.length}`,
+      start_name: start ? start.name : "-",
+      priorityLabel: idx === 0 && cleanText(row.type) === "ซ่อม" ? (row.priorityLabel || "ซ่อม") : row.priorityLabel,
+      __repairIndex: repairIndex + 1
+    }));
+  });
+
+  return output;
+}
+
+// Safety: หน้าแผนที่ต้องแสดงตาม stop_no ที่ถูกสร้างแล้ว ไม่คำนวณลำดับใหม่ซ้ำ
+function routeDisplayStops(list) {
+  return sortRowsByPlannedStopNo(list || []).filter(validCoord).slice(0, routeCircleMaxStops());
+}
