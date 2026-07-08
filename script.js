@@ -2892,65 +2892,553 @@ function applyCoordinatorPhone() {
 
 
 
-
-
-/* ===== BEST ROUTE PLANNER IMPORT v10 20260708 =====
-   ใช้ชุดวางแผนเส้นทาง/เรียงลำดับจุดจากไฟล์แนบที่ยืนยันว่าเป็นชุดที่ดีที่สุด
-   โดยนำมาใช้เฉพาะส่วนวางแผนออกตลาด: โหมดวางแผนทั้งหมด + เลือกสถานะทั้งหมด
-   และคงเงื่อนไขระบบเดิม: หน้าเว็บ, Dropdown, ฟอร์มบันทึก, GPS, Dashboard, 7-9 จุด, ไม่เกิน 350 กม.
-   หมายเหตุ: ลบ override v8/v9 ที่ทำให้การเรียงจุดเพี้ยน/หน้าเว็บหนักออก เพื่อให้ engine วงกลมเดิมทำงานเต็มรูปแบบ
+/* ===== BEST ROUTE PLANNER IMPORT v11 20260708 =====
+   เป้าหมาย: ใช้เฉพาะเครื่องยนต์วางแผนเส้นทาง/เรียงจุดจากไฟล์ที่ผู้ใช้ยืนยันว่าดี
+   แก้เคสวิ่งข้ามจุดใกล้ทาง เช่น 3 → 4 ทั้งที่ควรแวะ 9/8 ก่อน
+   หลักใหม่: เลือกจุดด้วย marginal cost + เรียงจุดด้วย exact closed-route DP สำหรับไม่เกิน 9 จุด
+   เงื่อนไขหน้าเว็บ/Dropdown/Form/GPS/Dashboard คงเดิมทั้งหมด
 */
+const V11_ROUTE_POOL_LIMIT = 70;
+const V11_EXACT_LIMIT = 10;
+const V11_MAX_EXTRA_COST_KM = 45;
+const V11_NORMAL_TARGET_STOPS = 9;
+const V11_SOFT_ROAD_LIMIT_KM = MAX_ROUTE_DISTANCE_KM;
 
-function routePlannerV10ApplyFinalLimit(start, orderedRows, requiredRows = []) {
-  let rows = uniqueRowsByIdName(orderedRows || []).filter(validCoord);
-  rows = rows.slice(0, MAX_ROUTE_CUSTOMER_STOPS);
-  const requiredKeys = requiredRouteKeySet(requiredRows || []);
-
-  while (routeStopCount(rows) > PREFERRED_ROUTE_CUSTOMER_STOPS) {
-    const distanceOver = approxRoadDistanceKm(start, rows) > MAX_ROUTE_DISTANCE_KM;
-    const weak = optionalStopSavings(start, rows, requiredRows)[0];
-    const shouldCut = distanceOver || (weak && (weak.index >= PREFERRED_ROUTE_CUSTOMER_STOPS || weak.saving >= DETOUR_STOP_MIN_SAVING_KM));
-    if (!shouldCut) break;
-    if (!weak || weak.index < 0) break;
-    if (requiredKeys.has(rowUniqueKey(rows[weak.index]))) break;
-    rows.splice(weak.index, 1);
-  }
-
-  while (routeStopCount(rows) > Math.max(1, requiredKeys.size) && approxRoadDistanceKm(start, rows) > MAX_ROUTE_DISTANCE_KM) {
-    let removeIndex = -1;
-    for (let i = rows.length - 1; i >= 0; i--) {
-      if (!requiredKeys.has(rowUniqueKey(rows[i]))) { removeIndex = i; break; }
-    }
-    if (removeIndex < 0) break;
-    rows.splice(removeIndex, 1);
-  }
-  return rows;
+function v11Point(row) {
+  return { lat: toNumber(row.lat), lng: toNumber(row.lng) };
 }
 
-const __routePlannerV10OriginalBuildBestTargetRoute = buildBestTargetRoute;
-buildBestTargetRoute = function(start, requiredRows, candidateRows, orderBuilder) {
-  let ordered = __routePlannerV10OriginalBuildBestTargetRoute(start, requiredRows || [], candidateRows || [], orderBuilder);
-  ordered = routePlannerV10ApplyFinalLimit(start, ordered, requiredRows || []);
+function v11UniqueValid(rows) {
+  return uniqueRowsByIdName(rows || []).filter(validCoord).map(r => ({ ...r }));
+}
+
+function v11Distance(a, b) {
+  return haversine(a, b);
+}
+
+function v11RowDistance(a, b) {
+  return v11Distance(v11Point(a), v11Point(b));
+}
+
+function v11RouteKm(start, order) {
+  return routeDistanceFromStart(start, (order || []).filter(validCoord));
+}
+
+function v11ApproxRoadKm(start, order) {
+  return approxRoadDistanceKm(start, (order || []).filter(validCoord));
+}
+
+function v11RequiredKeys(requiredRows) {
+  return requiredRouteKeySet(requiredRows || []);
+}
+
+function v11Contains(rows, row) {
+  return (rows || []).some(r => isSameStop(r, row));
+}
+
+function v11CandidatePriority(row) {
+  if (!row) return 99;
+  if (cleanText(row.type) === 'ซ่อม') return 0;
+  if (cleanText(row.type) === 'ปรับปรุงปั๊ม') return 0;
+  return marketScore(row.status || '');
+}
+
+function v11CandidateRank(start, requiredRows, candidate) {
+  const requiredValid = (requiredRows || []).filter(validCoord);
+  const anchor = requiredValid[0] ? v11Point(requiredValid[0]) : start;
+  const sameMeter = requiredValid.some(r => normalizeMeter(r.meter || r.meterKey) && normalizeMeter(r.meter || r.meterKey) === normalizeMeter(candidate.meter || candidate.meterKey)) ? 0 : 1;
+  const sameBU = requiredValid.some(r => buEquivalent(r.bu, candidate.bu)) ? 0 : 1;
+  const dAnchor = validCoord(candidate) ? v11Distance(anchor, v11Point(candidate)) : 9999;
+  const dStart = validCoord(candidate) ? v11Distance(start, v11Point(candidate)) : 9999;
+  return (sameMeter * 220) + (sameBU * 120) + (v11CandidatePriority(candidate) * 7) + (dAnchor * 1.25) + (dStart * 0.20);
+}
+
+function v11Legs(start, route) {
+  const pts = [{ lat: start.lat, lng: start.lng }, ...(route || []).map(v11Point), { lat: start.lat, lng: start.lng }];
+  const legs = [];
+  for (let i = 0; i < pts.length - 1; i++) legs.push(v11Distance(pts[i], pts[i + 1]));
+  return legs;
+}
+
+function v11SkippedOnPathPenalty(start, route) {
+  // ถ้าเส้นจาก A ไป B ผ่านใกล้จุด C ที่ยังไม่ได้แวะ ให้ลงโทษหนัก
+  // ช่วยแก้เคส 3 → 4 ข้ามจุด 9/8 แล้วต้องย้อนเก็บทีหลัง
+  const r = (route || []).filter(validCoord);
+  if (r.length < 4) return 0;
+  let penalty = 0;
+  const pts = [{ lat: start.lat, lng: start.lng, __start: true }, ...r, { lat: start.lat, lng: start.lng, __start: true }];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+    const legKm = v11Distance(a.__start ? a : v11Point(a), b.__start ? b : v11Point(b));
+    if (legKm < 8) continue;
+    for (let k = i + 2; k < pts.length - 1; k++) {
+      const c = pts[k];
+      if (c.__start) continue;
+      const proj = pointSegmentProjection(a.__start ? a : v11Point(a), b.__start ? b : v11Point(b), c);
+      if (!proj) continue;
+      const detour = v11Distance(a.__start ? a : v11Point(a), v11Point(c)) + v11Distance(v11Point(c), b.__start ? b : v11Point(b)) - legKm;
+      const corridor = Math.max(2.2, Math.min(11, legKm * 0.20));
+      if (proj.t > 0.10 && proj.t < 0.92 && proj.distKm <= corridor && detour <= Math.max(5, legKm * 0.18)) {
+        penalty += 140;
+      }
+    }
+  }
+  return penalty;
+}
+
+function v11LongLegPenalty(start, route) {
+  const legs = v11Legs(start, route);
+  if (!legs.length) return 0;
+  const avg = legs.reduce((a, b) => a + b, 0) / legs.length;
+  let penalty = 0;
+  legs.forEach(d => {
+    const limit = Math.max(18, avg * 2.05);
+    if (d > limit) penalty += (d - limit) * 4.0;
+  });
+  return penalty;
+}
+
+function v11RouteShapeScore(start, route, requiredRows = [], options = {}) {
+  const valid = (route || []).filter(validCoord);
+  if (!valid.length) return Infinity;
+  const reqPenalty = bestRouteRequiredPenalty(valid, requiredRows || []);
+  if (reqPenalty >= 100000) return reqPenalty;
+  if (options.pumpFirst && options.pumpRow && !isSameStop(valid[0], options.pumpRow)) return 10000000;
+  const km = v11RouteKm(start, valid);
+  const approx = km * ROAD_DISTANCE_FACTOR;
+  const distanceLimitPenalty = approx > V11_SOFT_ROAD_LIMIT_KM ? (approx - V11_SOFT_ROAD_LIMIT_KM) * 3.0 : 0;
+  const turn = routeTurnPenalty(start, valid) * 2.4;
+  const back = loopBacktrackPenalty(start, valid) * 1.5;
+  const cross = bestRouteCrossPenalty(start, valid) * 1.7;
+  const jump = v11LongLegPenalty(start, valid);
+  const skip = v11SkippedOnPathPenalty(start, valid);
+  const wave = bestRouteDistanceWavePenalty(start, valid) * 1.3;
+  return km + distanceLimitPenalty + turn + back + cross + jump + skip + wave;
+}
+
+function v11ExactClosedOrder(start, rows, requiredRows = [], options = {}) {
+  const valid = v11UniqueValid(rows);
+  const noCoord = uniqueRowsByIdName(rows || []).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+  if (valid.length > V11_EXACT_LIMIT) return [...v11BestCandidateOrder(start, valid, requiredRows, options), ...noCoord];
+
+  let routeRows = [...valid];
+  let fixedFirst = null;
+  if (options.pumpFirst && options.pumpRow) {
+    fixedFirst = routeRows.find(r => isSameStop(r, options.pumpRow)) || options.pumpRow;
+    routeRows = routeRows.filter(r => !isSameStop(r, fixedFirst));
+  }
+
+  const n = routeRows.length;
+  const size = 1 << n;
+  const distStart = routeRows.map(r => v11Distance(start, v11Point(r)));
+  const distEnd = routeRows.map(r => v11Distance(v11Point(r), start));
+  const dist = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => i === j ? 0 : v11RowDistance(routeRows[i], routeRows[j])));
+  const startFrom = fixedFirst ? v11Point(fixedFirst) : start;
+  const distFromFixed = routeRows.map(r => v11Distance(startFrom, v11Point(r)));
+
+  const dp = Array.from({ length: size }, () => Array(n).fill(Infinity));
+  const parent = Array.from({ length: size }, () => Array(n).fill(-1));
+
+  if (n === 0) return fixedFirst ? [fixedFirst, ...noCoord] : noCoord;
+
+  for (let i = 0; i < n; i++) {
+    dp[1 << i][i] = fixedFirst ? distFromFixed[i] : distStart[i];
+  }
+
+  for (let mask = 1; mask < size; mask++) {
+    for (let last = 0; last < n; last++) {
+      const base = dp[mask][last];
+      if (!Number.isFinite(base)) continue;
+      for (let next = 0; next < n; next++) {
+        if (mask & (1 << next)) continue;
+        const nextMask = mask | (1 << next);
+        const value = base + dist[last][next];
+        if (value < dp[nextMask][next]) {
+          dp[nextMask][next] = value;
+          parent[nextMask][next] = last;
+        }
+      }
+    }
+  }
+
+  const full = size - 1;
+  let bestLast = 0;
+  let bestCost = Infinity;
+  for (let last = 0; last < n; last++) {
+    const cost = dp[full][last] + distEnd[last];
+    if (cost < bestCost) {
+      bestCost = cost;
+      bestLast = last;
+    }
+  }
+
+  const orderIdx = [];
+  let mask = full;
+  let cur = bestLast;
+  while (cur >= 0) {
+    orderIdx.push(cur);
+    const p = parent[mask][cur];
+    mask = mask & ~(1 << cur);
+    cur = p;
+  }
+  orderIdx.reverse();
+
+  let baseOrder = orderIdx.map(i => routeRows[i]);
+  if (fixedFirst) baseOrder = [fixedFirst, ...baseOrder];
+
+  // สร้างตัวเลือกปรับทิศ/ดึงจุดใกล้ทาง แล้วเลือกตามคะแนนที่ลงโทษการข้ามจุด
+  const cands = [];
+  const seen = new Set();
+  const add = (r) => bestRouteAddCandidate(cands, seen, r);
+  add(baseOrder);
+  if (!fixedFirst) add([...baseOrder].reverse());
+  add(pullPointsThatAreOnTheWay(start, baseOrder));
+  add(pushNearStartStopsToEnd(start, baseOrder));
+  add(pullPointsThatAreOnTheWay(start, pushNearStartStopsToEnd(start, baseOrder)));
+  if (!fixedFirst) {
+    const centerSweep = circularSweepClosedOrder(start, valid);
+    add(centerSweep);
+    add([...centerSweep].reverse());
+    add(pullPointsThatAreOnTheWay(start, centerSweep));
+  }
+  const best = cands.map(r => ({ route: r, score: v11RouteShapeScore(start, r, requiredRows, options) })).sort((a, b) => a.score - b.score)[0];
+  return [...((best && best.route) || baseOrder), ...noCoord];
+}
+
+function v11BestCandidateOrder(start, rows, requiredRows = [], options = {}) {
+  // fallback สำหรับเกิน 10 จุด ใช้ candidate จาก engine เดิม แต่เลือกด้วยคะแนน v11
+  const candidates = bestRouteSweepCandidates(start, rows).slice(0, 140);
+  if (options.pumpFirst && options.pumpRow) {
+    const pump = rows.find(r => isSameStop(r, options.pumpRow)) || options.pumpRow;
+    const rest = rows.filter(r => !isSameStop(r, pump));
+    candidates.length = 0;
+    bestRouteSweepCandidates(validCoord(pump) ? v11Point(pump) : start, rest).forEach(r => candidates.push([pump, ...r]));
+  }
+  const best = candidates.map(r => ({ route: r, score: v11RouteShapeScore(start, r, requiredRows, options) })).sort((a,b)=>a.score-b.score)[0];
+  return best ? best.route : orderCircularRoute(start, rows);
+}
+
+function v11TrimToRules(start, ordered, requiredRows = [], minStops = MIN_ROUTE_CUSTOMER_STOPS, maxStops = MAX_ROUTE_CUSTOMER_STOPS, options = {}) {
+  const requiredKeys = v11RequiredKeys(requiredRows);
+  let rows = v11UniqueValid(ordered);
+
+  while (rows.length > maxStops) {
+    const optional = v11WorstOptionalStops(start, rows, requiredRows, options);
+    if (!optional.length) break;
+    rows.splice(optional[0].index, 1);
+  }
+
+  while (rows.length > Math.max(requiredKeys.size, minStops) && v11ApproxRoadKm(start, rows) > MAX_ROUTE_DISTANCE_KM) {
+    const optional = v11WorstOptionalStops(start, rows, requiredRows, options);
+    if (!optional.length || optional[0].saving <= 0) break;
+    rows.splice(optional[0].index, 1);
+  }
+
+  // จุด 8-9 จะอยู่ได้เฉพาะถ้าไม่ได้ทำให้เส้นทางเสียหนัก
+  while (rows.length > Math.max(minStops, requiredKeys.size)) {
+    const optional = v11WorstOptionalStops(start, rows, requiredRows, options);
+    if (!optional.length) break;
+    const worst = optional[0];
+    const isTail = worst.index >= PREFERRED_ROUTE_CUSTOMER_STOPS;
+    if (!isTail && worst.saving < 14) break;
+    if (worst.saving < 8 && v11ApproxRoadKm(start, rows) <= MAX_ROUTE_DISTANCE_KM) break;
+    rows.splice(worst.index, 1);
+  }
+
+  return v11ExactClosedOrder(start, rows, requiredRows, options).filter(validCoord);
+}
+
+function v11WorstOptionalStops(start, rows, requiredRows = [], options = {}) {
+  const requiredKeys = v11RequiredKeys(requiredRows);
+  const baseScore = v11RouteShapeScore(start, rows, requiredRows, options);
+  return (rows || []).map((row, index) => {
+    if (!validCoord(row)) return null;
+    if (requiredKeys.has(rowUniqueKey(row))) return null;
+    const trial = rows.filter((_, i) => i !== index);
+    const trialOrdered = v11ExactClosedOrder(start, trial, requiredRows, options).filter(validCoord);
+    const saving = baseScore - v11RouteShapeScore(start, trialOrdered, requiredRows, options);
+    const tailBonus = index >= PREFERRED_ROUTE_CUSTOMER_STOPS ? 25 : 0;
+    return { row, index, saving, score: saving + tailBonus };
+  }).filter(Boolean).sort((a, b) => b.score - a.score);
+}
+
+function v11BuildRouteWithPool(start, requiredRows = [], candidateRows = [], options = {}, targetStops = MAX_ROUTE_CUSTOMER_STOPS, minStops = MIN_ROUTE_CUSTOMER_STOPS) {
+  const required = v11UniqueValid(requiredRows);
+  const pool = v11UniqueValid(candidateRows)
+    .filter(c => !required.some(r => isSameStop(r, c)))
+    .sort((a, b) => v11CandidateRank(start, required, a) - v11CandidateRank(start, required, b))
+    .slice(0, V11_ROUTE_POOL_LIMIT);
+
+  let selected = [...required];
+  const desiredMin = Math.min(targetStops, Math.max(minStops, required.length));
+
+  while (selected.length < desiredMin && selected.length < targetStops) {
+    let best = null;
+    for (const c of pool) {
+      if (v11Contains(selected, c)) continue;
+      const trialSeed = [...selected, c];
+      const ordered = v11ExactClosedOrder(start, trialSeed, required, options).filter(validCoord);
+      const score = v11RouteShapeScore(start, ordered, required, options) + v11CandidateRank(start, required, c) * 0.04;
+      if (!best || score < best.score) best = { c, score, ordered };
+    }
+    if (!best) break;
+    selected.push(best.c);
+  }
+
+  // เพิ่มจุดเสริมจนถึง 9 เฉพาะถ้าไม่ทำให้เกิดข้ามจุด/อ้อมเกิน
+  while (selected.length < targetStops) {
+    const currentOrder = v11ExactClosedOrder(start, selected, required, options).filter(validCoord);
+    const currentScore = v11RouteShapeScore(start, currentOrder, required, options);
+    let best = null;
+    for (const c of pool) {
+      if (v11Contains(selected, c)) continue;
+      const trialSeed = [...selected, c];
+      const ordered = v11ExactClosedOrder(start, trialSeed, required, options).filter(validCoord);
+      const road = v11ApproxRoadKm(start, ordered);
+      if (road > MAX_ROUTE_DISTANCE_KM) continue;
+      const score = v11RouteShapeScore(start, ordered, required, options);
+      const added = score - currentScore;
+      if (added > V11_MAX_EXTRA_COST_KM) continue;
+      if (!best || score < best.score) best = { c, score, ordered };
+    }
+    if (!best) break;
+    selected.push(best.c);
+  }
+
+  let ordered = v11ExactClosedOrder(start, selected, required, options).filter(validCoord);
+  return v11TrimToRules(start, ordered, required, Math.min(minStops, ordered.length), targetStops, options);
+}
+
+function v11RankMarketCandidatesForTarget(marketRows, target, start) {
+  const selectedBU = getSelectedStartBU();
+  const targetBU = target && target.bu ? target.bu : '';
+  const targetMeter = target ? normalizeMeter(target.meter || target.meterKey) : '';
+  return v11UniqueValid(marketRows || [])
+    .filter(m => !isVisited(m))
+    .filter(m => !target || !isSameStop(m, target))
+    .filter(m => !selectedBU || buEquivalent(m.bu, selectedBU))
+    .filter(m => !targetBU || buEquivalent(m.bu, targetBU))
+    .map(m => {
+      const sameMeter = targetMeter && normalizeMeter(m.meter || m.meterKey) === targetMeter ? 0 : 1;
+      const score = v11CandidateRank(start, target ? [target] : [], m) + sameMeter * 120;
+      return { ...m, __candidateScore: score };
+    })
+    .sort((a, b) => a.__candidateScore - b.__candidateScore)
+    .slice(0, V11_ROUTE_POOL_LIMIT);
+}
+
+function v11BuildDailyMarketChunk(start, list, targetCount = V11_NORMAL_TARGET_STOPS) {
+  const pool = v11UniqueValid(list || []).slice(0, V11_ROUTE_POOL_LIMIT);
+  if (!pool.length) return [];
+  const target = Math.min(targetCount, pool.length, MAX_ROUTE_CUSTOMER_STOPS);
+
+  // เริ่มจากลูกค้าความสำคัญสูง แต่ให้การเลือกจุดถัดไปใช้ marginal cost เพื่อได้กลุ่มพื้นที่เดียวกัน
+  let selected = [];
+  const seed = [...pool].sort((a, b) => {
+    const s = (v11CandidatePriority(a) - v11CandidatePriority(b)) || (haversine(start, v11Point(a)) - haversine(start, v11Point(b)));
+    return s;
+  })[0];
+  if (seed) selected.push(seed);
+
+  while (selected.length < target) {
+    const currentOrder = v11ExactClosedOrder(start, selected).filter(validCoord);
+    const currentScore = selected.length ? v11RouteShapeScore(start, currentOrder) : 0;
+    let best = null;
+    for (const c of pool) {
+      if (v11Contains(selected, c)) continue;
+      const ordered = v11ExactClosedOrder(start, [...selected, c]).filter(validCoord);
+      const score = v11RouteShapeScore(start, ordered) + v11CandidatePriority(c) * 1.8;
+      const road = v11ApproxRoadKm(start, ordered);
+      const overPenalty = road > MAX_ROUTE_DISTANCE_KM ? (road - MAX_ROUTE_DISTANCE_KM) * 4 : 0;
+      const marginal = score - currentScore + overPenalty;
+      if (!best || marginal < best.marginal) best = { c, marginal, ordered };
+    }
+    if (!best) break;
+    selected.push(best.c);
+  }
+
+  let ordered = v11ExactClosedOrder(start, selected).filter(validCoord);
+  ordered = v11TrimToRules(start, ordered, [], Math.min(ordered.length, target), target);
   return ordered;
+}
+
+// Override เฉพาะเครื่องยนต์วางแผนเส้นทาง/เรียงจุด
+rankMarketCandidatesForTarget = function(marketRows, target, start) {
+  return v11RankMarketCandidatesForTarget(marketRows, target, start || START_POINTS[0]);
 };
 
-const __routePlannerV10OriginalRouteDisplayStops = routeDisplayStops;
+orderCircularRoute = function(start, points) {
+  const valid = v11UniqueValid(points || []);
+  const noCoord = uniqueRowsByIdName(points || []).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+  return [...v11ExactClosedOrder(start, valid), ...noCoord];
+};
+
+orderNormalMarketRoute = function(start, points) {
+  const valid = v11UniqueValid(points || []).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  const noCoord = uniqueRowsByIdName(points || []).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+  return [...v11ExactClosedOrder(start, valid), ...noCoord];
+};
+
+orderStatusFilterRoute = function(start, points) {
+  const valid = v11UniqueValid(points || []).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  const noCoord = uniqueRowsByIdName(points || []).filter(p => !validCoord(p));
+  if (valid.length <= 2) return [...valid, ...noCoord];
+  return [...v11ExactClosedOrder(start, valid), ...noCoord];
+};
+
+orderPumpFirstRoute = function(start, pumpRow, otherRows) {
+  if (!pumpRow) return orderCircularRoute(start, otherRows || []);
+  const rest = v11UniqueValid(otherRows || []).filter(r => !isSameStop(r, pumpRow));
+  return v11ExactClosedOrder(start, [pumpRow, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS), [pumpRow], { pumpFirst: true, pumpRow });
+};
+
+buildBestTargetRoute = function(start, requiredRows, candidateRows, orderBuilder) {
+  const pumpRow = (requiredRows || []).find(isPumpRow);
+  const options = pumpRow ? { pumpFirst: true, pumpRow } : {};
+  return v11BuildRouteWithPool(start, requiredRows || [], candidateRows || [], options, MAX_ROUTE_CUSTOMER_STOPS, MIN_ROUTE_CUSTOMER_STOPS);
+};
+
+trimOutOfLoopStops = function(start, orderedRows, requiredRows = []) {
+  const pumpRow = (requiredRows || []).find(isPumpRow);
+  const options = pumpRow ? { pumpFirst: true, pumpRow } : {};
+  return v11TrimToRules(start, orderedRows || [], requiredRows || [], Math.min(PREFERRED_ROUTE_CUSTOMER_STOPS, routeStopCount(orderedRows || [])), MAX_ROUTE_CUSTOMER_STOPS, options);
+};
+
+takeByStatusForMeter = function(marketRows, target) {
+  const start = startForRoute([target, ...(marketRows || []).slice(0, 1)]);
+  return v11RankMarketCandidatesForTarget(marketRows, target, start);
+};
+
+buildPumpPlanRows = function(pumpRows, repairRows, marketRows) {
+  const selectedBU = getSelectedStartBU();
+  const selectedPumps = chooseOnePumpPerMeterCurrentMonth(pumpRows)
+    .filter(p => !selectedBU || buEquivalent(p.bu, selectedBU));
+  const output = [];
+
+  selectedPumps.forEach(pump => {
+    const routeDate = pump.dateObj ? pump.dateObj.toLocaleDateString('th-TH', { day: 'numeric', month: 'long', year: '2-digit' }) : pump.dateRaw;
+    const routeId = `${pump.bu || 'BU-?'} สาย ${pump.meterKey} วันที่ ${routeDate}`;
+    const start = startForRoute([pump]);
+    const rankedMarkets = v11RankMarketCandidatesForTarget(marketRows, pump, start);
+    const ordered = v11BuildRouteWithPool(start, [pump], rankedMarkets, { pumpFirst: true, pumpRow: pump }, MAX_ROUTE_CUSTOMER_STOPS, MIN_ROUTE_CUSTOMER_STOPS);
+    ordered.forEach((row, idx) => output.push({
+      ...row,
+      plan_day: 1,
+      plan_date: pump.dateObj || thaiNow(),
+      route_group: routeId,
+      stop_no: `${idx + 1}/${ordered.length}`,
+      start_name: start.name,
+      priorityLabel: idx === 0 && row.type === 'ปรับปรุงปั๊ม' ? '1-ปรับปรุงปั๊ม' : row.priorityLabel
+    }));
+  });
+
+  const repairs = repairRows
+    .filter(r => inCurrentThaiMonth(r.dateObj))
+    .map(r => ({ ...r, plan_day: 1, plan_date: r.dateObj || thaiNow(), route_group: 'ตารางซ่อมเดือนปัจจุบัน', stop_no: '-', start_name: '-' }));
+  return [...output, ...repairs];
+};
+
+buildRepairPlanRows = function(repairRows, marketRows, planDays) {
+  const selectedBU = getSelectedStartBU();
+  const candidates = repairRows
+    .filter(r => inCurrentThaiMonth(r.dateObj))
+    .filter(r => !isVisited(r))
+    .map(r => {
+      const nearest = nearestStartPointForRow(r);
+      const buFromText = inferBUFromAnyText(r.customer_name, r.area, r.coordinator, r.meter, r.customer_id);
+      const bu = r.bu || buFromText || nearest.bu || '';
+      return { ...r, bu, __nearestStartName: nearest.name, __nearestBU: bu };
+    })
+    .filter(r => !selectedBU || buEquivalent(r.__nearestBU, selectedBU))
+    .sort((a,b) => dateSortValue(a.dateObj) - dateSortValue(b.dateObj) || cleanText(a.bu).localeCompare(cleanText(b.bu), 'th') || cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), 'th'));
+
+  const output = [];
+  candidates.forEach((repair, repairIndex) => {
+    const start = startForRoute([repair]);
+    const rankedMarkets = v11RankMarketCandidatesForTarget(marketRows, repair, start);
+    const ordered = v11BuildRouteWithPool(start, [repair], rankedMarkets, {}, MAX_ROUTE_CUSTOMER_STOPS, MIN_ROUTE_CUSTOMER_STOPS);
+    const routeDate = repair.dateObj ? repair.dateObj.toLocaleDateString('th-TH', { day:'numeric', month:'long', year:'2-digit' }) : thaiMonthYearLabel();
+    const repairUniqueName = cleanText(repair.customer_name || `แถว ${repair.__repairSourceRow || repairIndex + 1}`);
+    const routeId = `ตารางซ่อม ${routeDate} ${repair.bu || selectedBU || 'ทุก BU'} สาย ${repair.meterKey || 'ไม่ระบุ'} • ${repairUniqueName}`;
+    ordered.forEach((row, idx) => output.push({
+      ...row,
+      plan_day: 1,
+      plan_date: repair.dateObj || thaiNow(),
+      route_group: routeId,
+      stop_no: `${idx + 1}/${ordered.length}`,
+      start_name: start.name,
+      priorityLabel: row.type === 'ซ่อม' ? (row.priorityLabel || 'ซ่อม') : row.priorityLabel,
+      __repairIndex: repairIndex + 1
+    }));
+  });
+  return output;
+};
+
+buildNormalPlanRows = function(marketRows, planDays) {
+  const today = thaiNow();
+  const selectedBU = getSelectedStartBU();
+  const selectedMarketStatus = getMarketStatusFilterValue();
+  const candidates = marketRows
+    .filter(r => !selectedBU || buEquivalent(r.bu, selectedBU))
+    .filter(r => marketStatusFilterMatch(r, selectedMarketStatus))
+    .filter(r => !isVisited(r))
+    .filter(validCoord)
+    .sort((a,b) => (marketScore(a.status) - marketScore(b.status)) || cleanText(a.bu).localeCompare(cleanText(b.bu), 'th') || cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), 'th'));
+
+  const groups = new Map();
+  candidates.forEach(r => {
+    const key = `${r.bu || 'ไม่ระบุ'}|${r.meterKey || 'ไม่ระบุ'}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  });
+
+  const output = [];
+  groups.forEach((list, key) => {
+    const [bu, meterKey] = key.split('|');
+    let remaining = [...list];
+    for (let dayIndex = 0; dayIndex < planDays; dayIndex++) {
+      if (!remaining.length) continue;
+      const planDate = addDaysTH(today, dayIndex);
+      const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
+      const start = startForRoute(remaining.slice(0, V11_ROUTE_POOL_LIMIT));
+      const ordered = v11BuildDailyMarketChunk(start, remaining, V11_NORMAL_TARGET_STOPS);
+      if (!ordered.length) continue;
+      ordered.forEach((row, idx) => output.push({
+        ...row,
+        plan_day: dayIndex + 1,
+        plan_date: planDate,
+        route_group: routeId,
+        stop_no: `${idx + 1}/${ordered.length}`,
+        start_name: start.name,
+        priorityLabel: row.priorityLabel || statusGroup(row.status)
+      }));
+      remaining = remaining.filter(r => !ordered.some(o => isSameStop(o, r)));
+    }
+  });
+  return output;
+};
+
+optimizeStopsForDisplay = function(list) {
+  return sortRowsByPlannedStopNo(list || []).filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+};
+
 routeDisplayStops = function(list) {
-  const base = __routePlannerV10OriginalRouteDisplayStops(list || []);
-  const start = getRouteStartForList(list || []);
+  const sorted = sortRowsByPlannedStopNo(list || []).filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
   const mode = getPlanSettings().mode;
   if (mode === 'pump') {
-    const pump = (base || []).find(isPumpRow);
-    return routePlannerV10ApplyFinalLimit(start, base || [], pump ? [pump] : []);
+    const pump = sorted.find(isPumpRow);
+    if (pump && !isSameStop(sorted[0], pump)) {
+      const rest = sorted.filter(r => !isSameStop(r, pump));
+      return [pump, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+    }
   }
-  if (mode === 'repair') {
-    const repair = (base || []).find(r => cleanText(r.type) === 'ซ่อม');
-    return routePlannerV10ApplyFinalLimit(start, base || [], repair ? [repair] : []);
-  }
-  return (base || []).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  return sorted;
 };
-/* ===== END BEST ROUTE PLANNER IMPORT v10 20260708 ===== */
-
+/* ===== END BEST ROUTE PLANNER IMPORT v11 ===== */
 
 
 document.getElementById("planForm").addEventListener("submit", saveForm);
@@ -2974,7 +3462,7 @@ if (document.getElementById("coordinatorSelect")) document.getElementById("coord
     el.addEventListener("blur", autoFillCustomerFromInput);
   }
 });
-setTimeout(loadData, 50);
+loadData();
 
 
 /* ===== Page switch: Page 1 planning / Page 2 dashboard ===== */
