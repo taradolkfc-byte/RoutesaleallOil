@@ -3172,6 +3172,299 @@ routeDisplayStops = function(list) {
 /* ===== END ULTRA STABLE ROUTE ENGINE v8 20260708 ===== */
 
 
+
+/* ===== PUMP LOOP ROUTE ENGINE v9 20260708 =====
+   เป้าหมาย: โหมด "ตามแผนปรับปรุงปั๊ม" ให้ได้เส้นทางแบบสาย 49
+   - ใช้จุดหลัก 7 จุดก่อน
+   - ไม่ฝืนใส่จุด 8-9 ถ้าทำให้หลุดวง/ต้องอ้อมกลับ
+   - เปลี่ยนจุดที่ทำให้ระยะเพิ่มผิดปกติด้วยจุดที่อยู่ในวงเส้นทางมากกว่า
+   - ยังรักษาหน้าเว็บให้เบา ไม่คำนวณหนักจนค้าง
+*/
+const PUMP_LOOP_TARGET_STOPS_V9 = 7;
+const PUMP_EXTRA_MAX_ADD_COST_KM_V9 = 5.5;
+const PUMP_BAD_STOP_SAVING_KM_V9 = 5.0;
+const PUMP_LOCAL_SEARCH_LIMIT_V9 = 34;
+const PUMP_LOCAL_SEARCH_ROUNDS_V9 = 5;
+const PUMP_SCORE_IMPROVE_KM_V9 = 0.65;
+
+function v9RowDistance(a, b) {
+  return haversine({ lat: toNumber(a.lat), lng: toNumber(a.lng) }, { lat: toNumber(b.lat), lng: toNumber(b.lng) });
+}
+
+function v9DistanceToClosestSelected(row, selected, start) {
+  const anchors = [{ lat: start.lat, lng: start.lng }, ...(selected || []).filter(validCoord).map(r => ({ lat: toNumber(r.lat), lng: toNumber(r.lng) }))];
+  if (!validCoord(row) || !anchors.length) return 9999;
+  return Math.min(...anchors.map(a => haversine(a, { lat: toNumber(row.lat), lng: toNumber(row.lng) })));
+}
+
+function v9RequiredIncluded(rows, requiredRows) {
+  return (requiredRows || []).every(req => !validCoord(req) || (rows || []).some(r => isSameStop(r, req)));
+}
+
+function v9MaxOptionalSaving(start, rows, requiredRows) {
+  const savings = optionalStopSavings(start, rows, requiredRows);
+  return savings.length ? savings[0].saving : 0;
+}
+
+function v9OutlierPenalty(start, rows, requiredRows = []) {
+  const route = stableUniqueValid(rows || []);
+  if (route.length < 4) return 0;
+  const requiredKeys = requiredRouteKeySet(requiredRows || []);
+  const base = approxRoadDistanceKm(start, route);
+  let penalty = 0;
+
+  // ถ้าตัดจุดใดจุดหนึ่งแล้วระยะลดลงมาก แสดงว่าจุดนั้นเป็นจุดอ้อม/นอกวง
+  route.forEach((row, idx) => {
+    if (requiredKeys.has(rowUniqueKey(row))) return;
+    const trial = route.filter((_, i) => i !== idx);
+    const saving = base - approxRoadDistanceKm(start, trial);
+    if (saving > PUMP_BAD_STOP_SAVING_KM_V9) penalty += (saving - PUMP_BAD_STOP_SAVING_KM_V9) * 3.4;
+    if (idx >= PUMP_LOOP_TARGET_STOPS_V9 && saving > 1.5) penalty += 35 + saving * 2.2;
+  });
+
+  // ลงโทษขาที่ยาวผิดปกติ เพราะมักเกิดจากจุดหลุดวง เช่น จุด 2/9 ในตัวอย่างสาย 65
+  let current = { lat: start.lat, lng: start.lng };
+  const legs = [];
+  route.forEach(r => {
+    const d = haversine(current, { lat: toNumber(r.lat), lng: toNumber(r.lng) });
+    legs.push(d);
+    current = { lat: toNumber(r.lat), lng: toNumber(r.lng) };
+  });
+  legs.push(haversine(current, { lat: start.lat, lng: start.lng }));
+  const avg = legs.reduce((s, d) => s + d, 0) / Math.max(1, legs.length);
+  const badLeg = Math.max(18, avg * 2.15);
+  legs.forEach(d => { if (d > badLeg) penalty += (d - badLeg) * 4.2; });
+
+  return penalty;
+}
+
+function v9LoopScore(start, rows, requiredRows = [], options = {}) {
+  const route = stableUniqueValid(rows || []);
+  if (!route.length || !v9RequiredIncluded(route, requiredRows)) return Infinity;
+  if (options.pumpFirst && options.pumpRow && !isSameStop(route[0], options.pumpRow)) return Infinity;
+  const distance = approxRoadDistanceKm(start, route);
+  const turn = routeTurnPenalty(start, route) * 1.9;
+  const back = loopBacktrackPenalty(start, route) * 1.35;
+  const outlier = v9OutlierPenalty(start, route, requiredRows);
+  const over = distance > MAX_ROUTE_DISTANCE_KM ? (distance - MAX_ROUTE_DISTANCE_KM) * 9 : 0;
+  return distance + turn + back + outlier + over;
+}
+
+function v9OrderLoop(start, points, options = {}) {
+  const all = stableUniqueValid(points || []);
+  const noCoord = uniqueRowsByIdName(points || []).filter(p => !validCoord(p));
+  if (all.length <= 2) return [...all, ...noCoord];
+
+  let fixedFirst = [];
+  let rest = [...all];
+  if (options.pumpFirst && options.pumpRow) {
+    const pump = rest.find(r => isSameStop(r, options.pumpRow)) || options.pumpRow;
+    fixedFirst = [pump];
+    rest = rest.filter(r => !isSameStop(r, pump));
+  }
+  if (rest.length <= 1) return [...fixedFirst, ...rest, ...noCoord];
+
+  const center = stableCentroid([...fixedFirst, ...rest]);
+  const asc = [...rest].sort((a,b) => stableAngle(center,a) - stableAngle(center,b));
+  const desc = [...asc].reverse();
+  const nearPumpOrStart = [...rest].sort((a,b) => {
+    const anchor = fixedFirst[0] || start;
+    return v9RowDistance(anchor, a) - v9RowDistance(anchor, b);
+  });
+  const farThenBack = [...nearPumpOrStart].reverse();
+  const bases = [asc, desc, nearPumpOrStart, farThenBack];
+  const candidates = [];
+  const seen = new Set();
+  const add = (arr) => {
+    const route = [...fixedFirst, ...arr];
+    const key = uniqueRouteCandidateKey(route);
+    if (!seen.has(key)) { seen.add(key); candidates.push(route); }
+  };
+
+  for (const base of bases) {
+    for (let i = 0; i < Math.min(base.length, 9); i++) add(stableRotate(base, i));
+  }
+
+  // แทรกจุดที่อยู่ระหว่างทางแบบจำกัดจำนวน candidate เพื่อให้ไม่หนักเครื่อง
+  candidates.slice(0, 12).forEach(route => {
+    if (fixedFirst.length) add([route[0], ...pullPointsThatAreOnTheWay(stablePoint(route[0]), route.slice(1))]);
+    else add(pullPointsThatAreOnTheWay(start, route));
+  });
+
+  const best = candidates
+    .map(route => ({ route, score: v9LoopScore(start, route, fixedFirst, options) }))
+    .sort((a,b) => a.score - b.score)[0];
+
+  return [...((best && best.route) || [...fixedFirst, ...asc]), ...noCoord];
+}
+
+function v9CandidateScore(start, requiredRows, selectedRows, row) {
+  const req = (requiredRows || []).find(validCoord) || null;
+  const reqPoint = req ? stablePoint(req) : start;
+  const sameMeter = req && normalizeMeter(row.meter || row.meterKey) === normalizeMeter(req.meter || req.meterKey) ? 0 : 1;
+  const sameBU = req && buEquivalent(row.bu, req.bu) ? 0 : 1;
+  const dReq = validCoord(row) ? haversine(reqPoint, stablePoint(row)) : 9999;
+  const dStart = validCoord(row) ? haversine(start, stablePoint(row)) : 9999;
+  const dCluster = v9DistanceToClosestSelected(row, selectedRows || requiredRows || [], start);
+  return sameMeter * 330 + sameBU * 190 + dReq * 0.85 + dCluster * 1.25 + dStart * 0.18 + marketScore(row.status) * 5;
+}
+
+function v9RankMarketCandidatesForTarget(marketRows, target, start) {
+  const selectedBU = getSelectedStartBU();
+  const targetBU = target && target.bu ? target.bu : '';
+  return stableUniqueValid(marketRows || [])
+    .filter(m => !isVisited(m))
+    .filter(m => !target || !isSameStop(m, target))
+    .filter(m => !selectedBU || buEquivalent(m.bu, selectedBU))
+    .filter(m => !targetBU || buEquivalent(m.bu, targetBU))
+    .map(m => ({ ...m, __candidateScore: v9CandidateScore(start || START_POINTS[0], target ? [target] : [], target ? [target] : [], m) }))
+    .sort((a,b) => a.__candidateScore - b.__candidateScore)
+    .slice(0, 55);
+}
+
+function v9BuildPumpLikeRoute(start, requiredRows, candidateRows, options = {}) {
+  const required = stableUniqueValid(requiredRows || []);
+  const requiredKeys = requiredRouteKeySet(required);
+  const pool = stableUniqueValid(candidateRows || [])
+    .filter(c => !required.some(r => isSameStop(r, c)))
+    .slice(0, PUMP_LOCAL_SEARCH_LIMIT_V9);
+
+  let selected = [...required];
+  const targetStops = Math.min(MAX_ROUTE_CUSTOMER_STOPS, Math.max(PUMP_LOOP_TARGET_STOPS_V9, required.length));
+
+  // 1) สร้างวงหลัก 7 จุดก่อน เลือกจากจุดที่ทำให้วงดี ไม่ใช่เลือกตามลำดับข้อมูลอย่างเดียว
+  while (selected.length < targetStops) {
+    let best = null;
+    for (const c of pool) {
+      if (selected.some(s => isSameStop(s, c))) continue;
+      const seed = uniqueRowsByIdName([...selected, c]);
+      const ordered = v9OrderLoop(start, seed, options).filter(validCoord);
+      const score = v9LoopScore(start, ordered, required, options) + v9CandidateScore(start, required, selected, c) * 0.06;
+      if (!best || score < best.score) best = { candidate: c, route: ordered, score };
+    }
+    if (!best) break;
+    selected.push(best.candidate);
+  }
+
+  let current = v9OrderLoop(start, selected, options).filter(validCoord);
+
+  // 2) เปลี่ยนจุดที่ทำให้ต้องอ้อม/หลุดวง เช่น จุด 2 หรือ 9 ด้วยจุดอื่นที่อยู่ในวงกว่า
+  let currentScore = v9LoopScore(start, current, required, options);
+  for (let round = 0; round < PUMP_LOCAL_SEARCH_ROUNDS_V9; round++) {
+    let best = null;
+    for (let removeIndex = 0; removeIndex < current.length; removeIndex++) {
+      const removeRow = current[removeIndex];
+      if (requiredKeys.has(rowUniqueKey(removeRow))) continue;
+      for (const c of pool) {
+        if (current.some(r => isSameStop(r, c))) continue;
+        const seed = current.map((r, idx) => idx === removeIndex ? c : r);
+        const ordered = v9OrderLoop(start, seed, options).filter(validCoord);
+        if (ordered.length !== current.length) continue;
+        if (!v9RequiredIncluded(ordered, required)) continue;
+        const score = v9LoopScore(start, ordered, required, options);
+        if (score + PUMP_SCORE_IMPROVE_KM_V9 < currentScore && (!best || score < best.score)) {
+          best = { route: ordered, score, removeIndex, candidate: c };
+        }
+      }
+    }
+    if (!best) break;
+    current = best.route;
+    currentScore = best.score;
+  }
+
+  // 3) จุด 8-9 เพิ่มเฉพาะถ้าอยู่ระหว่างทางจริง ๆ และไม่ทำให้ต้องอ้อม
+  while (current.length < MAX_ROUTE_CUSTOMER_STOPS) {
+    let bestExtra = null;
+    const baseScore = v9LoopScore(start, current, required, options);
+    for (const c of pool) {
+      if (current.some(r => isSameStop(r, c))) continue;
+      const ordered = v9OrderLoop(start, [...current, c], options).filter(validCoord);
+      if (ordered.length !== current.length + 1) continue;
+      if (approxRoadDistanceKm(start, ordered) > MAX_ROUTE_DISTANCE_KM) continue;
+      const score = v9LoopScore(start, ordered, required, options);
+      const addCost = score - baseScore;
+      const maxSaving = v9MaxOptionalSaving(start, ordered, required);
+      if (addCost > PUMP_EXTRA_MAX_ADD_COST_KM_V9 || maxSaving > PUMP_BAD_STOP_SAVING_KM_V9 + 2) continue;
+      if (!bestExtra || score < bestExtra.score) bestExtra = { route: ordered, score };
+    }
+    if (!bestExtra) break;
+    current = bestExtra.route;
+  }
+
+  // 4) ถ้ายังมีจุดที่อ้อมมาก ให้ตัดกลับเหลือวงหลัก 7 จุด ดีกว่าฝืนครบ 9 แล้วเปลืองทรัพยากร
+  while (current.length > PUMP_LOOP_TARGET_STOPS_V9) {
+    const maxSaving = v9MaxOptionalSaving(start, current, required);
+    const overDistance = approxRoadDistanceKm(start, current) > MAX_ROUTE_DISTANCE_KM;
+    if (!overDistance && maxSaving <= PUMP_BAD_STOP_SAVING_KM_V9 + 2) break;
+    current = stableRemoveWorstOptional(start, current, required);
+  }
+
+  current = v9OrderLoop(start, current, options).filter(validCoord);
+  return current.slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+}
+
+// Override เฉพาะส่วนวางเส้นทาง โดยเฉพาะโหมดตามแผนปรับปรุงปั๊ม ให้คุมรูปแบบเหมือนสาย 49
+rankMarketCandidatesForTarget = function(marketRows, target, start) {
+  return v9RankMarketCandidatesForTarget(marketRows, target, start || START_POINTS[0]);
+};
+
+orderCircularRoute = function(start, points) {
+  return v9OrderLoop(start, points || []);
+};
+
+orderNormalMarketRoute = function(start, points) {
+  const seed = stableUniqueValid(points || []).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  return v9OrderLoop(start, seed);
+};
+
+orderStatusFilterRoute = function(start, points) {
+  const seed = stableUniqueValid(points || []).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  return v9OrderLoop(start, seed);
+};
+
+orderPumpFirstRoute = function(start, pumpRow, otherRows) {
+  if (!pumpRow) return v9OrderLoop(start, otherRows || []);
+  return v9OrderLoop(start, [pumpRow, ...(otherRows || [])], { pumpFirst: true, pumpRow });
+};
+
+buildBestTargetRoute = function(start, requiredRows, candidateRows, orderBuilder) {
+  const pumpRow = (requiredRows || []).find(isPumpRow);
+  const options = pumpRow ? { pumpFirst: true, pumpRow } : {};
+  if (pumpRow) return v9BuildPumpLikeRoute(start, requiredRows || [], candidateRows || [], options);
+
+  // ตารางซ่อมยังใช้ engine เบาเดิม แต่เพิ่มการคัดจุดนอกวงแบบ v9 เล็กน้อย
+  const route = stableBuildWithPool(start, requiredRows || [], candidateRows || [], options);
+  return stablePruneRoute(start, v9OrderLoop(start, route, options), requiredRows || []);
+};
+
+trimOutOfLoopStops = function(start, orderedRows, requiredRows = []) {
+  const pumpRow = (requiredRows || []).find(isPumpRow);
+  if (pumpRow) {
+    let route = v9OrderLoop(start, orderedRows || [], { pumpFirst: true, pumpRow }).filter(validCoord);
+    while (route.length > PUMP_LOOP_TARGET_STOPS_V9 && (v9MaxOptionalSaving(start, route, requiredRows) > PUMP_BAD_STOP_SAVING_KM_V9 + 2 || approxRoadDistanceKm(start, route) > MAX_ROUTE_DISTANCE_KM)) {
+      route = stableRemoveWorstOptional(start, route, requiredRows);
+    }
+    return route;
+  }
+  return stablePruneRoute(start, orderedRows || [], requiredRows || []);
+};
+
+routeDisplayStops = function(list) {
+  const sorted = sortRowsByPlannedStopNo(list || []).filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  const mode = getPlanSettings().mode;
+  const start = getRouteStartForList(list || []);
+  if (mode === 'pump') {
+    const pump = sorted.find(isPumpRow);
+    if (pump) return trimOutOfLoopStops(start, sorted, [pump]).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  }
+  if (mode === 'repair') {
+    const repair = sorted.find(r => cleanText(r.type) === 'ซ่อม');
+    return stablePruneRoute(start, sorted, repair ? [repair] : []).slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  }
+  return sorted;
+};
+/* ===== END PUMP LOOP ROUTE ENGINE v9 20260708 ===== */
+
 document.getElementById("planForm").addEventListener("submit", saveForm);
 if (document.getElementById("searchBox")) document.getElementById("searchBox").addEventListener("input", renderTable);
 if (document.getElementById("typeFilter")) document.getElementById("typeFilter").addEventListener("change", renderTable);
