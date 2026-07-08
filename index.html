@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ระบบวางแผนออกตลาด KCE</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="style.css?v=20260708-best-route-final-v13" />
+  <link rel="stylesheet" href="style.css?v=20260623-mobile-hide-dashboard-final" />
 </head>
 <body>
   <header class="app-header">
@@ -13,268 +13,205 @@
       <h1>ระบบวางแผนออกตลาด KCE</h1>
       <p>แสดงแผนเฉพาะเดือนปัจจุบัน • ตัดจุดที่ออกตลาดแล้ว • เลือกจุดเริ่มต้นที่ใกล้ทั้งเส้นทางที่สุด</p>
     </div>
+    <button id="reloadBtn" type="button">รีเฟรชข้อมูล</button>
   </header>
 
-  <nav class="page-tabs desktop-only" aria-label="สลับหน้า">
-    <button id="btnPage1" class="page-tab active" type="button">วางแผนออกตลาด</button>
-    <button id="btnPage2" class="page-tab" type="button">Dashboard ย้อนหลัง</button>
-  </nav>
+  <section class="summary-grid">
+    <div class="summary-card"><span>ทั้งหมดที่แสดง</span><strong id="sumAll">0</strong></div>
+    <div class="summary-card urgent"><span>ปรับปรุงปั๊ม</span><strong id="sumPump">0</strong></div>
+    <div class="summary-card repair"><span>ตารางซ่อม</span><strong id="sumRepair">0</strong></div>
+    <div class="summary-card market"><span>พื้นที่เซลล์</span><strong id="sumMarket">0</strong></div>
+  </section>
 
-  <main id="page1" class="app-page page-active">
-    <section class="summary-grid">
-      <div class="summary-card"><span>ทั้งหมดที่แสดง</span><strong id="sumAll">0</strong></div>
-      <div class="summary-card urgent"><span>ปรับปรุงปั๊ม</span><strong id="sumPump">0</strong></div>
-      <div class="summary-card repair"><span>ตารางซ่อม</span><strong id="sumRepair">0</strong></div>
-      <div class="summary-card market"><span>พื้นที่เซลล์</span><strong id="sumMarket">0</strong></div>
-    </section>
-
-    <section class="route-card">
-      <div class="route-top">
-        <div>
-          <h2>แผนเส้นทางแบบวงกลม</h2>
-          <p>คลิกการ์ดแผนแต่ละสายเพื่อดูรายละเอียดและแผนที่ทันที</p>
-          <p class="month-note">เดือนที่แสดง: <strong id="currentMonthLabel">-</strong></p>
-          <div class="plan-controls">
-            <label>จุดเริ่ม
-              <select id="startPointInput">
-                <option value="อัตโนมัติ">อัตโนมัติ</option>
-                <option value="สามทองบริการ">สามทองบริการ</option>
-                <option value="เค.ซี.ปิโตรเลียม2006">เค.ซี.ปิโตรเลียม2006</option>
-                <option value="เค.ซี.จี.ปิโตรเลียม">เค.ซี.จี.ปิโตรเลียม</option>
-                <option value="เค.ซี. กรีน เอ็นเนอร์จี">เค.ซี. กรีน เอ็นเนอร์จี</option>
-              </select>
-            </label>
-            <label>โหมดวางแผน
-              <select id="planMode">
-                <option value="pump">ตามแผนปรับปรุงปั๊ม</option>
-                <option value="normal">วันปกติ / ออกตลาดทั่วไป</option>
-                <option value="repair">ตารางซ่อม</option>
-              </select>
-            </label>
-            <label>เลือกสถานะ
-              <select id="marketStatusFilter">
-                <option value="">อัตโนมัติ</option>
-                <option value="lost">ลูกค้าหาย</option>
-                <option value="risky">ลูกค้าเสี่ยงหาย</option>
-                <option value="active">ลูกค้าปัจจุบัน</option>
-                <option value="winback">ลูกค้าใหม่</option>
-                <option value="dormant">ลูกค้าหายเกิน60วัน</option>
-              </select>
-            </label>
-            <label>วางแผนล่วงหน้า
-              <select id="planDays">
-                <option value="1">1 วัน</option>
-                <option value="2">2 วัน</option>
-                <option value="3">3 วัน</option>
-                <option value="4">4 วัน</option>
-                <option value="5">5 วัน</option>
-                <option value="6">6 วัน</option>
-                <option value="7">7 วัน</option>
-              </select>
-            </label>
-          </div>
+  <section class="route-card">
+    <div class="route-top">
+      <div>
+        <h2>แผนเส้นทางแบบวงกลม</h2>
+        <p>คลิกการ์ดแผนแต่ละสายเพื่อดูรายละเอียดและแผนที่ทันที</p>
+        <p class="month-note">เดือนที่แสดง: <strong id="currentMonthLabel">-</strong></p>
+        <div class="plan-controls">
+          <label>จุดเริ่ม
+            <select id="startPointInput">
+              <option value="อัตโนมัติ">อัตโนมัติ</option>
+              <option value="สามทองบริการ">สามทองบริการ</option>
+              <option value="เค.ซี.ปิโตรเลียม2006">เค.ซี.ปิโตรเลียม2006</option>
+              <option value="เค.ซี.จี.ปิโตรเลียม">เค.ซี.จี.ปิโตรเลียม</option>
+              <option value="เค.ซี. กรีน เอ็นเนอร์จี">เค.ซี. กรีน เอ็นเนอร์จี</option>
+            </select>
+          </label>
+          <label>โหมดวางแผน
+            <select id="planMode">
+              <option value="pump">ตามแผนปรับปรุงปั๊ม</option>
+              <option value="normal">วันปกติ / ออกตลาดทั่วไป</option>
+              <option value="repair">ตารางซ่อม</option>
+            </select>
+          </label>
+          <label>เลือกสถานะ
+            <select id="marketStatusFilter">
+              <option value="">อัตโนมัติ</option>
+              <option value="lost">ลูกค้าหาย</option>
+              <option value="risky">ลูกค้าเสี่ยงหาย</option>
+              <option value="active">ลูกค้าปัจจุบัน</option>
+              <option value="winback">ลูกค้าใหม่</option>
+              <option value="dormant">ลูกค้าหายเกิน60วัน</option>
+            </select>
+          </label>
+          <label>วางแผนล่วงหน้า
+            <select id="planDays">
+              <option value="1">1 วัน</option>
+              <option value="2">2 วัน</option>
+              <option value="3">3 วัน</option>
+              <option value="4">4 วัน</option>
+              <option value="5">5 วัน</option>
+              <option value="6">6 วัน</option>
+              <option value="7">7 วัน</option>
+            </select>
+          </label>
         </div>
-        <label class="check-inline">
-          <input id="showAllToggle" type="checkbox" />
-          แสดงข้อมูลทั้งหมดในตารางด้านล่าง
-        </label>
       </div>
+      <label class="check-inline">
+        <input id="showAllToggle" type="checkbox" />
+        แสดงข้อมูลทั้งหมดในตารางด้านล่าง
+      </label>
+    </div>
 
-      <div id="routeSummary" class="route-summary"></div>
-      <div id="routeDetail" class="route-detail">คลิกการ์ดแผนเส้นทางด้านบน เพื่อดูรายละเอียดและแผนที่</div>
-      <div id="routeMap" class="route-map"></div>
-    </section>
+    <div id="routeSummary" class="route-summary"></div>
+    <div id="routeDetail" class="route-detail">คลิกการ์ดแผนเส้นทางด้านบน เพื่อดูรายละเอียดและแผนที่</div>
+    <div id="routeMap" class="route-map"></div>
+  </section>
 
-    <section class="form-card">
-      <h2>บันทึกข้อมูลการออกตลาด</h2>
-      <form id="planForm">
-        <label>วันที่ออกตลาด<input name="visit_date" type="date" required /></label>
-        <label>ประเภทงาน
-          <select name="job_type">
-            <option value="ออกเยี่ยมลูกค้า">ออกเยี่ยมลูกค้า</option>
-            <option value="ลูกค้าใหม่/มุ่งหวัง">ลูกค้าใหม่/มุ่งหวัง</option>
-            <option value="ปรับปรุงปั๊ม">ปรับปรุงปั๊ม</option>
-            <option value="ซ่อม">ซ่อม</option>
-          </select>
-        </label>
-        <label>รหัสลูกค้า<input name="customer_id" placeholder="เช่น C001" /></label>
-        <label>ชื่อลูกค้า / ชื่อปั๊ม<input name="customer_name" placeholder="กรอกชื่อลูกค้า" required /></label>
-        <label>BU / สังกัด
-          <input name="bu" list="buList" placeholder="พิมพ์หรือเลือก เช่น ST, KN, MUK" />
-          <datalist id="buList">
-            <option value="ST"></option>
-            <option value="KN"></option>
-            <option value="MUK"></option>
-            <option value="WNN"></option>
-            <option value="KCG"></option>
-          </datalist>
-        </label>
-        <label>สายมิเตอร์
-          <input name="meter" list="meterList" placeholder="พิมพ์หรือเลือก เช่น MT-57 / TR-64" />
-          <datalist id="meterList">
-            <option value="MT-49"></option><option value="MT-55"></option><option value="MT-57"></option><option value="MT-58"></option>
-            <option value="MT-60"></option><option value="MT-61"></option><option value="MT-65"></option><option value="MT-67"></option>
-            <option value="MT-71"></option><option value="MT-72"></option><option value="TR-64"></option><option value="TR-68"></option><option value="TR-70"></option><option value="TR-73"></option>
-          </datalist>
-        </label>
-        <label>พื้นที่<input name="area" placeholder="ต./อ./จ." /></label>
-        <label>ผู้ประสานงาน
-        <select name="coordinator" id="coordinatorSelect">
-          <option value="">เลือกผู้ประสานงาน</option>
-          <option value="น้าฮ้อย">น้าฮ้อย</option>
+  <section class="form-card">
+    <h2>บันทึกข้อมูลการออกตลาด</h2>
+    <form id="planForm">
+      <label>วันที่ออกตลาด<input name="visit_date" type="date" required /></label>
+      <label>ประเภทงาน
+        <select name="job_type">
+          <option value="ออกเยี่ยมลูกค้า">ออกเยี่ยมลูกค้า</option>
+          <option value="ลูกค้าใหม่/มุ่งหวัง">ลูกค้าใหม่/มุ่งหวัง</option>
+          <option value="ปรับปรุงปั๊ม">ปรับปรุงปั๊ม</option>
+          <option value="ซ่อม">ซ่อม</option>
         </select>
       </label>
-        <label>เบอร์โทร<input name="phone" placeholder="เบอร์โทร" /></label>
-        <label>ละติจูด<input name="lat" placeholder="ละ" /></label>
-        <label>ลองจิจูด<input name="lng" placeholder="ลอง" /></label>
-        <label>สถานะเข้าพบ
-          <select name="visit_status">
-            <option value="สำเร็จ">สำเร็จ</option>
-            <option value="ไม่พบลูกค้า">ไม่พบลูกค้า</option>
-            <option value="ปิดร้าน">ปิดร้าน</option>
-            <option value="เลิกกิจการ">เลิกกิจการ</option>
+      <label>รหัสลูกค้า<input name="customer_id" placeholder="เช่น C001" /></label>
+      <label>ชื่อลูกค้า / ชื่อปั๊ม<input name="customer_name" placeholder="กรอกชื่อลูกค้า" required /></label>
+      <label>BU / สังกัด
+        <input name="bu" list="buList" placeholder="พิมพ์หรือเลือก เช่น ST, KN, MUK" />
+        <datalist id="buList">
+          <option value="ST"></option>
+          <option value="KN"></option>
+          <option value="MUK"></option>
+          <option value="WNN"></option>
+          <option value="KCG"></option>
+        </datalist>
+      </label>
+      <label>สายมิเตอร์
+        <input name="meter" list="meterList" placeholder="พิมพ์หรือเลือก เช่น MT-57 / TR-64" />
+        <datalist id="meterList">
+          <option value="MT-49"></option><option value="MT-55"></option><option value="MT-57"></option><option value="MT-58"></option>
+          <option value="MT-60"></option><option value="MT-61"></option><option value="MT-65"></option><option value="MT-67"></option>
+          <option value="MT-71"></option><option value="MT-72"></option><option value="TR-64"></option><option value="TR-68"></option><option value="TR-70"></option><option value="TR-73"></option>
+        </datalist>
+      </label>
+      <label>พื้นที่<input name="area" placeholder="ต./อ./จ." /></label>
+      <label>ผู้ประสานงาน<input name="coordinator" placeholder="ชื่อผู้ประสานงาน" /></label>
+      <label>เบอร์โทร<input name="phone" placeholder="เบอร์โทร" /></label>
+      <label>ละติจูด<input name="lat" placeholder="ละ" /></label>
+      <label>ลองจิจูด<input name="lng" placeholder="ลอง" /></label>
+      <label>สถานะเข้าพบ
+        <select name="visit_status">
+          <option value="สำเร็จ">สำเร็จ</option>
+          <option value="ไม่พบลูกค้า">ไม่พบลูกค้า</option>
+          <option value="ปิดร้าน">ปิดร้าน</option>
+          <option value="เลิกกิจการ">เลิกกิจการ</option>
+        </select>
+      </label>
+      <button id="checkinBtn" class="checkin-btn" type="button">เช็คอิน GPS</button>
+      <label class="wide">หมายเหตุ<textarea name="note" placeholder="หมายเหตุเพิ่มเติม"></textarea></label>
+      <button class="submit-btn" type="submit">บันทึกลงชีต “เก็บข้อมูล”</button>
+    </form>
+    <p id="saveStatus" class="save-status"></p>
+  </section>
+
+  <section class="visit-dashboard" id="visitDashboardSection">
+    <div class="dashboard-head">
+      <div>
+        <h2>Dashboard การออกตลาดย้อนหลัง</h2>
+        <p>สรุปข้อมูลจากชีต “เก็บข้อมูล” ตามช่วงวันที่และ BU/สังกัดที่เลือก</p>
+      </div>
+      <div class="dashboard-controls">
+        <label>ดูย้อนหลัง
+          <select id="dashboardDays">
+            <option value="1">1 วันย้อนหลัง</option>
+            <option value="7" selected>7 วันย้อนหลัง</option>
+            <option value="15">15 วันย้อนหลัง</option>
+            <option value="30">30 วันย้อนหลัง</option>
           </select>
         </label>
-        <button id="reloadBtn" class="reload-form-btn" type="button">รีเฟรชข้อมูล</button>
-      <button id="checkinBtn" class="checkin-btn" type="button">เช็คอิน GPS</button>
-        <label class="wide">หมายเหตุ<textarea name="note" placeholder="หมายเหตุเพิ่มเติม"></textarea></label>
-        <button class="submit-btn" type="submit">บันทึกลงชีต “เก็บข้อมูล”</button>
-      </form>
-      <p id="saveStatus" class="save-status"></p>
-    </section>
-  </main>
+        <label>BU / สังกัด
+          <select id="dashboardBU">
+            <option value="">ทุก BU</option>
+            <option value="ST">สามทองบริการ</option>
+            <option value="KN">เค.ซี.ปิโตรเลียม2006</option>
+            <option value="MUK">เค.ซี.จี.ปิโตรเลียม</option>
+            <option value="WNN">เค.ซี. กรีน เอ็นเนอร์จี</option>
+          </select>
+        </label>
+      </div>
+    </div>
 
-  <main id="page2" class="app-page dashboard-page" hidden>
-    <section class="visit-dashboard dashboard-page-redesign" id="visitDashboardSection">
-      <div class="dashboard-head dashboard-head-wide">
-        <div>
-          <h2>Dashboard การออกตลาดย้อนหลัง</h2>
-          <p>สรุปข้อมูลจากชีต “เก็บข้อมูล” ตามช่วงวันที่และ BU/สังกัดที่เลือก</p>
-        </div>
-        <div class="dashboard-controls">
-          <label>ดูย้อนหลัง
-            <select id="dashboardDays">
-              <option value="1">1 วันย้อนหลัง</option>
-              <option value="7" selected>7 วันย้อนหลัง</option>
-              <option value="15">15 วันย้อนหลัง</option>
-              <option value="30">30 วันย้อนหลัง</option>
-            </select>
-          </label>
-          <label>BU / สังกัด
-            <select id="dashboardBU">
-              <option value="">ทุก BU</option>
-              <option value="ST">สามทองบริการ</option>
-              <option value="KN">เค.ซี.ปิโตรเลียม2006</option>
-              <option value="MUK">เค.ซี.จี.ปิโตรเลียม</option>
-              <option value="WNN">เค.ซี. กรีน เอ็นเนอร์จี</option>
-            </select>
-          </label>
+    <div class="dashboard-main-layout">
+      <div class="dashboard-left-panel">
+        <h3>รายชื่อลูกค้าที่ออกตลาด</h3>
+        <p id="dashboardListNote">แสดงรายชื่อล่าสุดตามเงื่อนไขที่เลือก</p>
+        <div class="dashboard-table-wrap">
+          <table class="dashboard-table">
+            <thead>
+              <tr>
+                <th>ลำดับ</th>
+                <th>วันที่ออกตลาด</th>
+                <th>ชื่อลูกค้า/ชื่อปั๊ม</th>
+                <th>กลุ่มลูกค้า</th>
+                <th>สถานะเข้าพบ</th>
+              </tr>
+            </thead>
+            <tbody id="dashboardBody"><tr><td colspan="5" class="loading">กำลังโหลด Dashboard...</td></tr></tbody>
+          </table>
         </div>
       </div>
 
-      <div class="dashboard-kpi-grid">
-        <div class="dashboard-card total"><span>ไปทั้งหมด</span><strong id="dashTotal">0</strong><small>จุด</small></div>
-        <div class="dashboard-card success"><span>อัตราเข้าพบสำเร็จ</span><strong id="dashSuccess">0%</strong><small id="dashSuccessText">0/0 จุด</small></div>
-        <div class="dashboard-card"><span>ออกเยี่ยมลูกค้า</span><strong id="dashJobVisit">0</strong><small>จุด</small></div>
-        <div class="dashboard-card"><span>ลูกค้าใหม่/มุ่งหวัง</span><strong id="dashJobLead">0</strong><small>จุด</small></div>
-        <div class="dashboard-card"><span>ปรับปรุงปั๊ม</span><strong id="dashJobPump">0</strong><small>จุด</small></div>
-        <div class="dashboard-card"><span>ซ่อม</span><strong id="dashJobRepair">0</strong><small>จุด</small></div>
-      </div>
+      <div class="dashboard-right-panel">
+        <div class="dashboard-grid">
+          <div class="dashboard-card total"><span>ไปทั้งหมด</span><strong id="dashTotal">0</strong><small>จุด</small></div>
+          <div class="dashboard-card success"><span>อัตราเข้าพบสำเร็จ</span><strong id="dashSuccess">0%</strong><small id="dashSuccessText">0/0 จุด</small></div>
+          <div class="dashboard-card"><span>ลูกค้าหาย</span><strong id="dashLost">0</strong><small>จุด</small></div>
+          <div class="dashboard-card"><span>ลูกค้าหายเกิน 60 วัน</span><strong id="dashDormant">0</strong><small>จุด</small></div>
+          <div class="dashboard-card"><span>ลูกค้าเสี่ยงหาย</span><strong id="dashRisky">0</strong><small>จุด</small></div>
+          <div class="dashboard-card"><span>ลูกค้าปัจจุบัน</span><strong id="dashActive">0</strong><small>จุด</small></div>
+          <div class="dashboard-card"><span>ลูกค้าใหม่</span><strong id="dashNew">0</strong><small>จุด</small></div>
+        </div>
 
-      <div class="dashboard-board-grid">
-        <div class="chart-card dashboard-board-card">
-          <div class="board-title-row">
-            <div>
-              <h3>Dashboard 1 : สรุปตามประเภทงาน</h3>
-              <p>อ้างอิงประเภทงานจากการเช็คอิน / บันทึกลงชีต “เก็บข้อมูล”</p>
+        <div class="dashboard-chart-grid">
+          <div class="chart-card">
+            <h3>สรุปตามกลุ่มลูกค้า</h3>
+            <div class="donut-wrap">
+              <div id="dashDonut" class="dashboard-donut"><span id="dashDonutCenter">0<br>จุด</span></div>
+              <div id="dashLegend" class="dashboard-legend"></div>
             </div>
           </div>
-          <div class="dashboard-mini-cards job-mini-cards">
-            <div class="mini-card blue"><span>ออกเยี่ยมลูกค้า</span><strong id="dashJobVisitMini">0</strong><small>จุด</small></div>
-            <div class="mini-card green"><span>ลูกค้าใหม่/มุ่งหวัง</span><strong id="dashJobLeadMini">0</strong><small>จุด</small></div>
-            <div class="mini-card orange"><span>ปรับปรุงปั๊ม</span><strong id="dashJobPumpMini">0</strong><small>จุด</small></div>
-            <div class="mini-card red"><span>ซ่อม</span><strong id="dashJobRepairMini">0</strong><small>จุด</small></div>
-          </div>
-          <div class="dashboard-chart-grid two-charts">
-            <div class="chart-inner">
-              <h4>สัดส่วนประเภทงาน</h4>
-              <div class="donut-wrap compact">
-                <div id="dashJobDonut" class="dashboard-donut"><span id="dashJobDonutCenter">0<br>จุด</span></div>
-                <div id="dashJobLegend" class="dashboard-legend"></div>
-              </div>
-            </div>
-            <div class="chart-inner">
-              <h4>จำนวนตามประเภทงาน</h4>
-              <div id="dashJobBars" class="status-bars"></div>
-            </div>
+          <div class="chart-card">
+            <h3>สรุปสถานะเข้าพบ</h3>
+            <div id="dashStatusBars" class="status-bars"></div>
           </div>
         </div>
 
-        <div class="chart-card dashboard-board-card">
-          <div class="board-title-row">
-            <div>
-              <h3>Dashboard 2 : สรุปสถานะลูกค้า</h3>
-              <p>อ้างอิงสถานะจากข้อมูลลูกค้าที่ตรงกับรหัสลูกค้า / ชื่อลูกค้าที่บันทึก</p>
-            </div>
-          </div>
-          <div class="dashboard-mini-cards customer-mini-cards">
-            <div class="mini-card orange"><span>ลูกค้าหาย</span><strong id="dashLost">0</strong><small>จุด</small></div>
-            <div class="mini-card red"><span>ลูกค้าเสี่ยงหาย</span><strong id="dashRisky">0</strong><small>จุด</small></div>
-            <div class="mini-card green"><span>ลูกค้าปัจจุบัน</span><strong id="dashActive">0</strong><small>จุด</small></div>
-            <div class="mini-card blue"><span>ลูกค้าใหม่</span><strong id="dashNew">0</strong><small>จุด</small></div>
-            <div class="mini-card purple"><span>ลูกค้าหายเกิน60วัน</span><strong id="dashDormant">0</strong><small>จุด</small></div>
-          </div>
-          <div class="dashboard-chart-grid two-charts">
-            <div class="chart-inner">
-              <h4>สัดส่วนสถานะลูกค้า</h4>
-              <div class="donut-wrap compact">
-                <div id="dashDonut" class="dashboard-donut"><span id="dashDonutCenter">0<br>จุด</span></div>
-                <div id="dashLegend" class="dashboard-legend"></div>
-              </div>
-            </div>
-            <div class="chart-inner">
-              <h4>จำนวนตามสถานะลูกค้า</h4>
-              <div id="dashCustomerBars" class="status-bars"></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="chart-card dashboard-board-card visit-status-card">
-          <h3>สรุปสถานะเข้าพบ</h3>
-          <p>ใช้ตรวจว่าเข้าพบสำเร็จ / ไม่พบลูกค้า / ปิดร้าน / เลิกกิจการ</p>
-          <div id="dashStatusBars" class="status-bars"></div>
+        <div class="dashboard-summary-strip" id="dashboardSummaryStrip">
+          แผนที่วางไว้ 0 จุด • เข้าพบสำเร็จ 0 จุด • อัตราสำเร็จ 0%
         </div>
       </div>
-
-      <div class="dashboard-summary-strip" id="dashboardSummaryStrip">
-        แผนที่วางไว้ 0 จุด • เข้าพบสำเร็จ 0 จุด • อัตราสำเร็จ 0%
-      </div>
-
-      <div class="dashboard-list-bottom">
-        <div class="dashboard-left-panel dashboard-list-full">
-          <h3>รายชื่อลูกค้าที่ออกตลาด</h3>
-          <p id="dashboardListNote">แสดงรายชื่อล่าสุดตามเงื่อนไขที่เลือก</p>
-          <div class="dashboard-table-wrap">
-            <table class="dashboard-table">
-              <thead>
-                <tr>
-                  <th>ลำดับ</th>
-                  <th>วันที่ออกตลาด</th>
-                  <th>ชื่อลูกค้า/ชื่อปั๊ม</th>
-                  <th>ประเภทงาน</th>
-                  <th>สถานะลูกค้า</th>
-                  <th>สถานะเข้าพบ</th>
-                </tr>
-              </thead>
-              <tbody id="dashboardBody"><tr><td colspan="6" class="loading">กำลังโหลด Dashboard...</td></tr></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </section>
-  </main>
+    </div>
+  </section>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="script.js?v=20260708-best-route-final-v13"></script>
+  <script src="script.js?v=20260623-mobile-hide-dashboard-final"></script>
 </body>
 </html>
