@@ -1183,6 +1183,344 @@ function orderPumpFirstRoute(start, pumpRow, otherRows) {
   const orderedRest = orderCircularRoute(pivot, rest);
   return [pumpRow, ...orderedRest];
 }
+
+
+/* ===== Loop-first route planner v2: เลือกจุดจากพิกัดก่อน แล้วค่อยเรียงเส้นทาง ===== */
+function requiredRouteKeySet(requiredRows) {
+  const set = new Set();
+  (requiredRows || []).forEach(r => set.add(rowUniqueKey(r)));
+  return set;
+}
+
+function coordPoint(row) {
+  return { lat: toNumber(row.lat), lng: toNumber(row.lng) };
+}
+
+function routeCentroid(rows) {
+  const valid = (rows || []).filter(validCoord);
+  if (!valid.length) return { lat: 0, lng: 0 };
+  return {
+    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
+    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
+  };
+}
+
+function geoBBoxKm(rows) {
+  const valid = (rows || []).filter(validCoord);
+  if (!valid.length) return { width: 0, height: 0, diag: 0 };
+  const lats = valid.map(p => toNumber(p.lat));
+  const lngs = valid.map(p => toNumber(p.lng));
+  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
+  const midLat = (minLat + maxLat) / 2;
+  const width = haversine({ lat: midLat, lng: minLng }, { lat: midLat, lng: maxLng });
+  const height = haversine({ lat: minLat, lng: minLng }, { lat: maxLat, lng: minLng });
+  return { width, height, diag: Math.hypot(width, height) };
+}
+
+function angleAround(center, row) {
+  return Math.atan2(toNumber(row.lat) - center.lat, toNumber(row.lng) - center.lng);
+}
+
+function angleStatsForRows(center, rows) {
+  const angles = (rows || []).filter(validCoord).map(p => angleAround(center, p)).sort((a, b) => a - b);
+  if (angles.length <= 2) return { coverage: 0, maxGap: Math.PI * 2, gaps: [] };
+  const gaps = [];
+  for (let i = 0; i < angles.length; i++) {
+    const next = i === angles.length - 1 ? angles[0] + Math.PI * 2 : angles[i + 1];
+    gaps.push(next - angles[i]);
+  }
+  const maxGap = Math.max(...gaps);
+  return { coverage: Math.PI * 2 - maxGap, maxGap, gaps };
+}
+
+function elongationRatio(rows) {
+  const valid = (rows || []).filter(validCoord);
+  if (valid.length < 3) return 1;
+  const center = routeCentroid(valid);
+  const latScale = 111;
+  const lngScale = 111 * Math.cos(center.lat * Math.PI / 180);
+  const pts = valid.map(p => ({
+    x: (toNumber(p.lng) - center.lng) * lngScale,
+    y: (toNumber(p.lat) - center.lat) * latScale
+  }));
+  let xx = 0, yy = 0, xy = 0;
+  pts.forEach(p => { xx += p.x * p.x; yy += p.y * p.y; xy += p.x * p.y; });
+  xx /= pts.length; yy /= pts.length; xy /= pts.length;
+  const trace = xx + yy;
+  const det = xx * yy - xy * xy;
+  const disc = Math.max(0, trace * trace - 4 * det);
+  const l1 = (trace + Math.sqrt(disc)) / 2;
+  const l2 = (trace - Math.sqrt(disc)) / 2;
+  if (l2 <= 0.000001) return 99;
+  return Math.sqrt(l1 / l2);
+}
+
+function routeLegsKm(start, order) {
+  const pts = [start, ...(order || []).filter(validCoord).map(coordPoint), start];
+  const legs = [];
+  for (let i = 0; i < pts.length - 1; i++) legs.push(haversine(pts[i], pts[i + 1]));
+  return legs;
+}
+
+function routeSpikePenalty(start, order, requiredRows = []) {
+  const rows = (order || []).filter(validCoord);
+  if (rows.length < 4) return 0;
+  const requiredKeys = requiredRouteKeySet(requiredRows);
+  const base = routeDistanceFromStart(start, rows);
+  const legs = routeLegsKm(start, rows);
+  const avgLeg = legs.reduce((a, b) => a + b, 0) / Math.max(1, legs.length);
+  let penalty = 0;
+
+  rows.forEach((row, idx) => {
+    if (requiredKeys.has(rowUniqueKey(row))) return;
+    const without = rows.filter((_, i) => i !== idx);
+    const saving = base - routeDistanceFromStart(start, without);
+    if (saving > Math.max(10, avgLeg * 0.75)) penalty += (saving - Math.max(10, avgLeg * 0.75)) * 4.5;
+  });
+
+  legs.forEach(leg => {
+    if (leg > Math.max(25, avgLeg * 2.15)) penalty += (leg - Math.max(25, avgLeg * 2.15)) * 3.5;
+  });
+  return penalty;
+}
+
+function routeLoopShapePenalty(start, rows, requiredRows = []) {
+  const valid = (rows || []).filter(validCoord);
+  if (valid.length < 4) return 1000;
+  const center = routeCentroid(valid);
+  const stats = angleStatsForRows(center, valid);
+  const elong = elongationRatio(valid);
+  const bbox = geoBBoxKm(valid);
+  const roadKm = approxRoadDistanceKm(start, valid);
+  const maxGapDeg = stats.maxGap * 180 / Math.PI;
+  const coverageDeg = stats.coverage * 180 / Math.PI;
+
+  let penalty = 0;
+  if (coverageDeg < 210) penalty += (210 - coverageDeg) * 2.2;
+  if (maxGapDeg > 165) penalty += (maxGapDeg - 165) * 2.6;
+  if (elong > 2.05) penalty += (elong - 2.05) * 75;
+  if (bbox.diag > 0) {
+    const shortSide = Math.max(1, Math.min(bbox.width, bbox.height));
+    const longSide = Math.max(bbox.width, bbox.height);
+    if (longSide / shortSide > 2.35) penalty += ((longSide / shortSide) - 2.35) * 60;
+  }
+  if (roadKm > MAX_ROUTE_DISTANCE_KM) penalty += (roadKm - MAX_ROUTE_DISTANCE_KM) * 20;
+  penalty += routeTurnPenalty(start, valid) * 2.1;
+  penalty += loopBacktrackPenalty(start, valid) * 1.15;
+  penalty += routeSpikePenalty(start, valid, requiredRows);
+  return penalty;
+}
+
+function routeSelectionScore(start, rows, requiredRows = []) {
+  const valid = (rows || []).filter(validCoord);
+  const count = routeStopCount(valid);
+  const roadKm = approxRoadDistanceKm(start, valid);
+  const countPenalty = count < MIN_ROUTE_CUSTOMER_STOPS ? (MIN_ROUTE_CUSTOMER_STOPS - count) * 800 : 0;
+  return roadKm + countPenalty + routeLoopShapePenalty(start, valid, requiredRows);
+}
+
+function candidateBaseScore(row) {
+  return (Number(row.__candidateScore) || 0) + (marketScore(row.status) * 8);
+}
+
+function routeKeyForSet(rows) {
+  return (rows || []).map(rowUniqueKey).sort().join("|");
+}
+
+function candidateCenters(start, requiredRows, pool) {
+  const centers = [];
+  const add = (c) => {
+    if (c && Number.isFinite(Number(c.lat)) && Number.isFinite(Number(c.lng))) centers.push({ lat: Number(c.lat), lng: Number(c.lng) });
+  };
+  (requiredRows || []).filter(validCoord).forEach(r => add(coordPoint(r)));
+  add(start);
+  add(routeCentroid([...(requiredRows || []), ...pool.slice(0, 12)]));
+  add(routeCentroid(pool.slice(0, 20)));
+  const seen = new Set();
+  return centers.filter(c => {
+    const key = `${c.lat.toFixed(5)},${c.lng.toFixed(5)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function buildAngularSectorSets(start, requiredRows, pool, targetStops) {
+  const required = uniqueRowsByIdName(requiredRows || []).filter(validCoord);
+  const need = Math.max(0, targetStops - required.length);
+  if (need <= 0) return [required];
+  const cleanPool = uniqueRowsByIdName(pool || [])
+    .filter(validCoord)
+    .filter(p => !required.some(r => isSameStop(r, p)))
+    .slice(0, 90);
+  const sets = [];
+  const centers = candidateCenters(start, required, cleanPool);
+  const offsets = [0, 0.5, 1, 1.5, 2];
+
+  centers.forEach(center => {
+    offsets.forEach(offset => {
+      const sectors = Array.from({ length: need }, () => []);
+      cleanPool.forEach(p => {
+        const angle = (angleAround(center, p) + Math.PI * 2 + (offset * Math.PI * 2 / Math.max(1, need))) % (Math.PI * 2);
+        const sector = Math.min(need - 1, Math.floor(angle / (Math.PI * 2 / need)));
+        const dCenter = haversine(center, coordPoint(p));
+        const dStart = haversine(start, coordPoint(p));
+        sectors[sector].push({ p, score: candidateBaseScore(p) + dCenter * 0.75 + dStart * 0.10 });
+      });
+      sectors.forEach(sec => sec.sort((a, b) => a.score - b.score));
+
+      for (let variant = 0; variant < 4; variant++) {
+        const selected = [...required];
+        for (let i = 0; i < sectors.length && selected.length < targetStops; i++) {
+          const sec = sectors[(i + variant) % sectors.length];
+          const hit = sec.find(x => !selected.some(s => isSameStop(s, x.p)));
+          if (hit) selected.push(hit.p);
+        }
+        for (const p of cleanPool) {
+          if (selected.length >= targetStops) break;
+          if (!selected.some(s => isSameStop(s, p))) selected.push(p);
+        }
+        if (selected.length >= Math.min(MIN_ROUTE_CUSTOMER_STOPS, targetStops)) sets.push(selected);
+      }
+    });
+  });
+
+  // Greedy set: เพิ่มทีละจุดโดยเลือกตัวที่ทำให้รูปทรงวงกลมดีขึ้นที่สุด
+  let greedy = [...required];
+  while (greedy.length < targetStops) {
+    let best = null;
+    cleanPool.forEach(p => {
+      if (greedy.some(s => isSameStop(s, p))) return;
+      const trial = [...greedy, p];
+      const score = routeSelectionScore(start, trial, required) + candidateBaseScore(p) * 0.05;
+      if (!best || score < best.score) best = { p, score };
+    });
+    if (!best) break;
+    greedy.push(best.p);
+  }
+  if (greedy.length >= Math.min(MIN_ROUTE_CUSTOMER_STOPS, targetStops)) sets.push(greedy);
+
+  const seen = new Set();
+  return sets.filter(set => {
+    const key = routeKeyForSet(set);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function orderLoopFromSet(start, rows, requiredRows = [], forceFirstRequired = false) {
+  const required = (requiredRows || []).filter(validCoord);
+  const valid = uniqueRowsByIdName(rows || []).filter(validCoord);
+  if (!valid.length) return [];
+
+  if (forceFirstRequired && required.length) {
+    const first = valid.find(v => required.some(r => isSameStop(r, v))) || required[0];
+    const rest = valid.filter(v => !isSameStop(v, first));
+    const pivot = coordPoint(first);
+    let restOrder = orderCircularRoute(pivot, rest);
+    restOrder = pullPointsThatAreOnTheWay(pivot, restOrder);
+    return [first, ...restOrder];
+  }
+
+  const center = routeCentroid(valid);
+  const asc = [...valid].sort((a, b) => angleAround(center, a) - angleAround(center, b));
+  const desc = [...asc].reverse();
+  const candidates = [];
+  [asc, desc].forEach(base => {
+    for (let i = 0; i < base.length; i++) {
+      const rotated = [...base.slice(i), ...base.slice(0, i)];
+      candidates.push(rotated);
+      candidates.push(pullPointsThatAreOnTheWay(start, rotated));
+    }
+  });
+  const unique = [];
+  const seen = new Set();
+  candidates.forEach(c => {
+    const key = uniqueRouteCandidateKey(c);
+    if (!seen.has(key)) { seen.add(key); unique.push(c); }
+  });
+  return unique.sort((a, b) => routeSelectionScore(start, a, requiredRows) - routeSelectionScore(start, b, requiredRows))[0] || orderCircularRoute(start, valid);
+}
+
+function replaceSpikesWithBetterPoints(start, orderedRows, requiredRows, pool, targetStops, forceFirstRequired = false) {
+  const requiredKeys = requiredRouteKeySet(requiredRows);
+  let current = orderLoopFromSet(start, orderedRows, requiredRows, forceFirstRequired).slice(0, targetStops);
+  let currentScore = routeSelectionScore(start, current, requiredRows);
+  const cleanPool = uniqueRowsByIdName(pool || [])
+    .filter(validCoord)
+    .filter(p => !requiredKeys.has(rowUniqueKey(p)))
+    .slice(0, 100);
+
+  for (let round = 0; round < 4; round++) {
+    let best = null;
+    for (let i = current.length - 1; i >= 0; i--) {
+      if (requiredKeys.has(rowUniqueKey(current[i]))) continue;
+      for (const cand of cleanPool) {
+        if (current.some(r => isSameStop(r, cand))) continue;
+        const seed = current.map((r, idx) => idx === i ? cand : r);
+        const ordered = orderLoopFromSet(start, seed, requiredRows, forceFirstRequired).slice(0, targetStops);
+        if (routeStopCount(ordered) !== routeStopCount(current)) continue;
+        const km = approxRoadDistanceKm(start, ordered);
+        if (km > MAX_ROUTE_DISTANCE_KM) continue;
+        const score = routeSelectionScore(start, ordered, requiredRows);
+        if (score + 1 < currentScore && (!best || score < best.score)) best = { ordered, score };
+      }
+    }
+    if (!best) break;
+    current = best.ordered;
+    currentScore = best.score;
+  }
+  return current;
+}
+
+function buildCircularMarketPlanRoute(start, requiredRows, candidateRows, targetStops = TARGET_CORE_ROUTE_STOPS, forceFirstRequired = false) {
+  const required = uniqueRowsByIdName(requiredRows || []).filter(validCoord);
+  const cleanPool = uniqueRowsByIdName(candidateRows || [])
+    .filter(validCoord)
+    .filter(p => !required.some(r => isSameStop(r, p)))
+    .sort((a, b) => candidateBaseScore(a) - candidateBaseScore(b))
+    .slice(0, 110);
+
+  const sets = buildAngularSectorSets(start, required, cleanPool, targetStops);
+  let best = null;
+  sets.forEach(set => {
+    const ordered = orderLoopFromSet(start, set, required, forceFirstRequired).slice(0, targetStops);
+    if (routeStopCount(ordered) < Math.min(MIN_ROUTE_CUSTOMER_STOPS, targetStops)) return;
+    const km = approxRoadDistanceKm(start, ordered);
+    if (km > MAX_ROUTE_DISTANCE_KM) return;
+    const score = routeSelectionScore(start, ordered, required);
+    if (!best || score < best.score) best = { ordered, score };
+  });
+
+  let ordered = best ? best.ordered : limitRouteByStopsAndDistance(
+    start,
+    required,
+    cleanPool,
+    rows => orderLoopFromSet(start, rows, required, forceFirstRequired),
+    targetStops
+  );
+
+  ordered = replaceSpikesWithBetterPoints(start, ordered, required, cleanPool, targetStops, forceFirstRequired);
+
+  // ถ้ายังเกิน 350 กม. ให้ลดจุดที่ไม่ใช่งานหลักก่อน แต่ไม่ต่ำกว่า 7 จุดถ้าทำได้
+  while (routeStopCount(ordered) > MIN_ROUTE_CUSTOMER_STOPS && approxRoadDistanceKm(start, ordered) > MAX_ROUTE_DISTANCE_KM) {
+    const requiredKeys = requiredRouteKeySet(required);
+    let removeIndex = -1;
+    let bestSaving = -Infinity;
+    const base = approxRoadDistanceKm(start, ordered);
+    ordered.forEach((row, idx) => {
+      if (requiredKeys.has(rowUniqueKey(row))) return;
+      const trial = ordered.filter((_, i) => i !== idx);
+      const saving = base - approxRoadDistanceKm(start, trial);
+      if (saving > bestSaving) { bestSaving = saving; removeIndex = idx; }
+    });
+    if (removeIndex < 0) break;
+    ordered.splice(removeIndex, 1);
+  }
+  return ordered;
+}
 function takeByStatusForMeter(marketRows, pump) {
   const start = startForRoute([pump, ...(marketRows || []).slice(0, 1)]);
   return rankMarketCandidatesForTarget(marketRows, pump, start).slice(0, 60);
@@ -1198,16 +1536,12 @@ function buildPumpPlanRows(pumpRows, repairRows, marketRows) {
     const routeId = `${pump.bu || "BU-?"} สาย ${pump.meterKey} วันที่ ${routeDate}`;
     const start = startForRoute([pump]);
     const rankedMarkets = rankMarketCandidatesForTarget(marketRows, pump, start);
-    const ordered = limitRouteByStopsAndDistance(
+    const ordered = buildCircularMarketPlanRoute(
       start,
       [pump],
       rankedMarkets,
-      rows => {
-        const pivotPump = rows.find(isPumpRow) || pump;
-        const rest = removeSameStop(rows, pivotPump);
-        return orderPumpFirstRoute(start, pivotPump, rest);
-      },
-      TARGET_CORE_ROUTE_STOPS
+      TARGET_CORE_ROUTE_STOPS,
+      true
     );
 
     ordered.forEach((row, idx) => output.push({
@@ -1591,12 +1925,19 @@ function buildNormalPlanRows(marketRows, planDays) {
       const planDate = addDaysTH(today, dayIndex);
       const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
       const start = startForRoute(chunk);
+      const circularSeed = buildCircularMarketPlanRoute(
+        start,
+        [],
+        chunk,
+        MAX_ROUTE_CUSTOMER_STOPS,
+        false
+      );
       const orderedBase = hasMarketStatusFilterSelected()
-        ? orderStatusFilterRoute(start, chunk)
-        : orderNormalMarketRoute(start, chunk);
+        ? orderStatusFilterRoute(start, circularSeed)
+        : orderNormalMarketRoute(start, circularSeed);
       const ordered = hasMarketStatusFilterSelected()
         ? orderedBase
-        : applyNormalRouteFieldFeedback(start, orderedBase, chunk);
+        : applyNormalRouteFieldFeedback(start, orderedBase, circularSeed);
       ordered.forEach((row, idx) => output.push({
         ...row,
         plan_day: dayIndex + 1,
@@ -1656,12 +1997,12 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
   candidates.forEach((repair, repairIndex) => {
     const start = startForRoute([repair]);
     const rankedMarkets = rankMarketCandidatesForTarget(marketRows, repair, start);
-    const ordered = limitRouteByStopsAndDistance(
+    const ordered = buildCircularMarketPlanRoute(
       start,
       [repair],
       rankedMarkets,
-      rows => orderCircularRoute(start, rows),
-      TARGET_CORE_ROUTE_STOPS
+      TARGET_CORE_ROUTE_STOPS,
+      false
     );
     const routeDate = repair.dateObj
       ? repair.dateObj.toLocaleDateString("th-TH", { day:"numeric", month:"long", year:"2-digit" })
