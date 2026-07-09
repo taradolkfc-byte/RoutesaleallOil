@@ -1285,6 +1285,76 @@ function routeSpikePenalty(start, order, requiredRows = []) {
   return penalty;
 }
 
+
+function candidateDepotSidePenalty(start, requiredRows = [], row) {
+  // ใช้กับโหมดที่มี “จุดงานหลัก” เช่น ปรับปรุงปั๊ม/ตารางซ่อม
+  // ถ้าลูกค้าอยู่ฝั่งเดียวกับจุดเริ่มมากเกินไป มักกลายเป็นจุดแหย่ก่อนกลับฐาน
+  // จึงลดโอกาสเลือกจุดลักษณะนี้ หากยังมีจุดอื่นที่อยู่ในวงหลักให้เลือกแทน
+  const required = (requiredRows || []).filter(validCoord);
+  if (!start || !validCoord(row) || !required.length) return 0;
+  const ref = routeCentroid(required);
+  const reqToDepot = haversine(ref, start);
+  if (!Number.isFinite(reqToDepot) || reqToDepot < 8) return 0;
+
+  const dStart = haversine(start, coordPoint(row));
+  const dReq = haversine(ref, coordPoint(row));
+  const depotAngle = Math.atan2(Number(start.lat) - ref.lat, Number(start.lng) - ref.lng);
+  const rowAngle = angleAround(ref, row);
+  const towardDepot = angularDiff(rowAngle, depotAngle);
+  const depotSide = towardDepot < 0.95 && dStart < dReq * 0.95 && dReq > 8;
+  if (!depotSide) return 0;
+
+  let penalty = 140;
+  penalty += (0.95 - towardDepot) * 70;
+  penalty += Math.max(0, (dReq * 0.95) - dStart) * 3;
+  // ถ้าใกล้ฐานมากเมื่อเทียบกับจุดงานหลัก ให้มองเป็นจุดก่อนกลับฐาน ไม่ใช่จุดในวงหลัก
+  if (dStart < reqToDepot * 0.55) penalty += 120;
+  return penalty;
+}
+
+function routeDepotSideSpurPenalty(start, order, requiredRows = []) {
+  const rows = (order || []).filter(validCoord);
+  const required = (requiredRows || []).filter(validCoord);
+  if (!start || rows.length < 4 || !required.length) return 0;
+  const requiredKeys = requiredRouteKeySet(requiredRows);
+  const ref = routeCentroid(required);
+  const reqToDepot = haversine(ref, start);
+  if (!Number.isFinite(reqToDepot) || reqToDepot < 8) return 0;
+
+  let penalty = 0;
+  let depotSideCount = 0;
+  const legs = routeLegsKm(start, rows);
+  const avgLeg = legs.reduce((a, b) => a + b, 0) / Math.max(1, legs.length);
+
+  rows.forEach((row, idx) => {
+    if (requiredKeys.has(rowUniqueKey(row))) return;
+    const singlePenalty = candidateDepotSidePenalty(start, required, row);
+    if (singlePenalty > 0) {
+      depotSideCount += 1;
+      penalty += singlePenalty;
+      // จุดฝั่งฐานที่ไปเก็บช่วงท้าย คืออาการ “แหย่ไปเก็บจุด 6-7 ก่อนกลับจุดเริ่ม”
+      if (idx >= rows.length - 3) penalty += 180;
+    }
+
+    const prev = idx === 0 ? start : coordPoint(rows[idx - 1]);
+    const next = idx === rows.length - 1 ? start : coordPoint(rows[idx + 1]);
+    const detour = haversine(prev, coordPoint(row)) + haversine(coordPoint(row), next) - haversine(prev, next);
+    if (detour > Math.max(3.5, avgLeg * 0.30)) penalty += (detour - Math.max(3.5, avgLeg * 0.30)) * 22;
+
+    // ถ้าจุดนี้อยู่ท้ายแผน และการแวะจุดนี้ก่อนกลับฐานทำให้อ้อมมาก ให้ลงโทษเพิ่ม
+    if (idx >= rows.length - 3) {
+      const directBack = haversine(prev, start);
+      const viaThisBack = haversine(prev, coordPoint(row)) + haversine(coordPoint(row), start);
+      const extraBack = viaThisBack - directBack;
+      if (extraBack > 2.5) penalty += extraBack * 28;
+    }
+  });
+
+  // อนุญาตให้มีจุดฝั่งฐานได้บ้าง แต่ไม่ให้มีหลายจุดจนกลายเป็นแขนแหย่ก่อนกลับฐาน
+  if (depotSideCount > 1) penalty += (depotSideCount - 1) * 260;
+  return penalty;
+}
+
 function routeLoopShapePenalty(start, rows, requiredRows = []) {
   const valid = (rows || []).filter(validCoord);
   if (valid.length < 4) return 1000;
@@ -1309,6 +1379,7 @@ function routeLoopShapePenalty(start, rows, requiredRows = []) {
   penalty += routeTurnPenalty(start, valid) * 2.1;
   penalty += loopBacktrackPenalty(start, valid) * 1.15;
   penalty += routeSpikePenalty(start, valid, requiredRows);
+  penalty += routeDepotSideSpurPenalty(start, valid, requiredRows);
   return penalty;
 }
 
@@ -1366,7 +1437,7 @@ function buildAngularSectorSets(start, requiredRows, pool, targetStops) {
         const sector = Math.min(need - 1, Math.floor(angle / (Math.PI * 2 / need)));
         const dCenter = haversine(center, coordPoint(p));
         const dStart = haversine(start, coordPoint(p));
-        sectors[sector].push({ p, score: candidateBaseScore(p) + dCenter * 0.75 + dStart * 0.10 });
+        sectors[sector].push({ p, score: candidateBaseScore(p) + candidateDepotSidePenalty(start, required, p) + dCenter * 0.75 + dStart * 0.10 });
       });
       sectors.forEach(sec => sec.sort((a, b) => a.score - b.score));
 
@@ -1393,7 +1464,7 @@ function buildAngularSectorSets(start, requiredRows, pool, targetStops) {
     cleanPool.forEach(p => {
       if (greedy.some(s => isSameStop(s, p))) return;
       const trial = [...greedy, p];
-      const score = routeSelectionScore(start, trial, required) + candidateBaseScore(p) * 0.05;
+      const score = routeSelectionScore(start, trial, required) + candidateBaseScore(p) * 0.05 + candidateDepotSidePenalty(start, required, p) * 0.40;
       if (!best || score < best.score) best = { p, score };
     });
     if (!best) break;
@@ -1451,6 +1522,7 @@ function replaceSpikesWithBetterPoints(start, orderedRows, requiredRows, pool, t
   const cleanPool = uniqueRowsByIdName(pool || [])
     .filter(validCoord)
     .filter(p => !requiredKeys.has(rowUniqueKey(p)))
+    .sort((a, b) => (candidateBaseScore(a) + candidateDepotSidePenalty(start, requiredRows, a)) - (candidateBaseScore(b) + candidateDepotSidePenalty(start, requiredRows, b)))
     .slice(0, 100);
 
   for (let round = 0; round < 4; round++) {
@@ -1465,7 +1537,7 @@ function replaceSpikesWithBetterPoints(start, orderedRows, requiredRows, pool, t
         const km = approxRoadDistanceKm(start, ordered);
         if (km > MAX_ROUTE_DISTANCE_KM) continue;
         const score = routeSelectionScore(start, ordered, requiredRows);
-        if (score + 1 < currentScore && (!best || score < best.score)) best = { ordered, score };
+        if (score + 0.2 < currentScore && (!best || score < best.score)) best = { ordered, score };
       }
     }
     if (!best) break;
@@ -1480,7 +1552,7 @@ function buildCircularMarketPlanRoute(start, requiredRows, candidateRows, target
   const cleanPool = uniqueRowsByIdName(candidateRows || [])
     .filter(validCoord)
     .filter(p => !required.some(r => isSameStop(r, p)))
-    .sort((a, b) => candidateBaseScore(a) - candidateBaseScore(b))
+    .sort((a, b) => (candidateBaseScore(a) + candidateDepotSidePenalty(start, required, a)) - (candidateBaseScore(b) + candidateDepotSidePenalty(start, required, b)))
     .slice(0, 110);
 
   const sets = buildAngularSectorSets(start, required, cleanPool, targetStops);
