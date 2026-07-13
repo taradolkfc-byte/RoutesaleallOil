@@ -1286,6 +1286,98 @@ function routeSpikePenalty(start, order, requiredRows = []) {
 }
 
 
+function revisitPassedPointPenalty(start, order) {
+  // จับอาการ “วิ่งย้อนผ่านจุดที่เพิ่งเก็บแล้ว” เช่น 2 → 3 แล้วต้องย้อนผ่าน 2 เพื่อไปเก็บ 4-7
+  // ใช้พิกัดเป็นตัววัดก่อนเรียกเส้นทางถนนจริง: ถ้าเส้นช่วงใหม่พาดผ่านจุดที่เคยเก็บแล้ว ให้ลงโทษสูง
+  const rows = (order || []).filter(validCoord);
+  if (rows.length < 4) return 0;
+  let penalty = 0;
+  const pts = rows.map(coordPoint);
+
+  for (let segStartIndex = 1; segStartIndex < pts.length - 1; segStartIndex++) {
+    const a = pts[segStartIndex];
+    const b = pts[segStartIndex + 1];
+    const segLen = haversine(a, b);
+    if (!Number.isFinite(segLen) || segLen < 1.5) continue;
+
+    for (let prevIndex = 0; prevIndex < segStartIndex; prevIndex++) {
+      const prev = pts[prevIndex];
+      const proj = pointSegmentProjection(a, b, prev);
+      if (!proj) continue;
+
+      const detour = haversine(a, prev) + haversine(prev, b) - segLen;
+      const corridorKm = Math.max(1.2, Math.min(7.5, segLen * 0.18));
+      const isBetween = proj.t > 0.10 && proj.t < 0.90;
+      const nearOldStop = proj.distKm <= corridorKm;
+      const likelyPassBack = detour <= Math.max(2.2, segLen * 0.16);
+
+      if (isBetween && nearOldStop && likelyPassBack) {
+        // ยิ่งย้อนผ่านจุดที่เพิ่งเก็บไม่นาน ยิ่งควรลงโทษมาก เพราะมักเกิดจากการเรียงลำดับผิดฝั่ง
+        const recentWeight = Math.max(1, 4 - (segStartIndex - prevIndex));
+        penalty += 260 * recentWeight + (corridorKm - proj.distKm) * 35 + Math.max(0, segLen - 10) * 5;
+      }
+    }
+  }
+  return penalty;
+}
+
+function anchoredServiceLoopOrder(start, serviceRow, restRows, requiredRows = []) {
+  // สำหรับ “ตามแผนปรับปรุงปั๊ม” และ “ตารางซ่อม”:
+  // ล็อกจุดบริการเป็นจุดที่ 1 แล้วหาเส้นทางหลังจากนั้นแบบวงกลมจริง
+  // ไม่เลือกแบบที่ 2→3 แล้วต้องย้อนผ่าน 2 กลับไปเก็บกลุ่ม 4→5→6→7
+  const service = serviceRow;
+  const rest = uniqueRowsByIdName(restRows || []).filter(validCoord).filter(r => !isSameStop(r, service));
+  if (!service || !validCoord(service)) return orderCircularRoute(start, rest);
+  if (rest.length <= 2) return [service, ...rest];
+
+  const candidates = [];
+  const addRest = (route) => {
+    if (!route || route.length !== rest.length) return;
+    const cleaned = uniqueRowsByIdName(route).filter(validCoord);
+    if (cleaned.length !== rest.length) return;
+    candidates.push([service, ...cleaned]);
+    const pulled = pullPointsThatAreOnTheWay(coordPoint(service), cleaned);
+    if (pulled.length === rest.length) candidates.push([service, ...pulled]);
+  };
+
+  const centers = [
+    routeCentroid([service, ...rest]),
+    routeCentroid(rest),
+    coordPoint(service),
+    start
+  ];
+  const seenCenter = new Set();
+  centers.filter(c => c && Number.isFinite(Number(c.lat)) && Number.isFinite(Number(c.lng))).forEach(center => {
+    const centerKey = `${Number(center.lat).toFixed(5)},${Number(center.lng).toFixed(5)}`;
+    if (seenCenter.has(centerKey)) return;
+    seenCenter.add(centerKey);
+    const asc = [...rest].sort((a, b) => angleAround(center, a) - angleAround(center, b));
+    const desc = [...asc].reverse();
+    [asc, desc].forEach(base => {
+      for (let i = 0; i < base.length; i++) {
+        addRest([...base.slice(i), ...base.slice(0, i)]);
+      }
+    });
+  });
+
+  addRest(nearestNeighborOrder(coordPoint(service), rest));
+  addRest(farthestInsertionOrder(coordPoint(service), rest));
+  addRest([...rest].sort((a, b) => haversine(coordPoint(service), coordPoint(a)) - haversine(coordPoint(service), coordPoint(b))));
+  addRest([...rest].sort((a, b) => haversine(coordPoint(service), coordPoint(b)) - haversine(coordPoint(service), coordPoint(a))));
+
+  const seen = new Set();
+  const unique = candidates.filter(route => {
+    const key = uniqueRouteCandidateKey(route);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  return (unique.length ? unique : [[service, ...rest]])
+    .sort((a, b) => routeSelectionScore(start, a, requiredRows) - routeSelectionScore(start, b, requiredRows))[0];
+}
+
+
 function candidateDepotSidePenalty(start, requiredRows = [], row) {
   // ใช้กับโหมดที่มี “จุดงานหลัก” เช่น ปรับปรุงปั๊ม/ตารางซ่อม
   // ถ้าลูกค้าอยู่ฝั่งเดียวกับจุดเริ่มมากเกินไป มักกลายเป็นจุดแหย่ก่อนกลับฐาน
@@ -1379,6 +1471,7 @@ function routeLoopShapePenalty(start, rows, requiredRows = []) {
   penalty += routeTurnPenalty(start, valid) * 2.1;
   penalty += loopBacktrackPenalty(start, valid) * 1.15;
   penalty += routeSpikePenalty(start, valid, requiredRows);
+  penalty += revisitPassedPointPenalty(start, valid) * 1.7;
   penalty += routeDepotSideSpurPenalty(start, valid, requiredRows);
   return penalty;
 }
@@ -1489,10 +1582,7 @@ function orderLoopFromSet(start, rows, requiredRows = [], forceFirstRequired = f
   if (forceFirstRequired && required.length) {
     const first = valid.find(v => required.some(r => isSameStop(r, v))) || required[0];
     const rest = valid.filter(v => !isSameStop(v, first));
-    const pivot = coordPoint(first);
-    let restOrder = orderCircularRoute(pivot, rest);
-    restOrder = pullPointsThatAreOnTheWay(pivot, restOrder);
-    return [first, ...restOrder];
+    return anchoredServiceLoopOrder(start, first, rest, requiredRows);
   }
 
   const center = routeCentroid(valid);
@@ -2074,7 +2164,7 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
       [repair],
       rankedMarkets,
       TARGET_CORE_ROUTE_STOPS,
-      true
+      false
     );
     const routeDate = repair.dateObj
       ? repair.dateObj.toLocaleDateString("th-TH", { day:"numeric", month:"long", year:"2-digit" })
@@ -2189,16 +2279,14 @@ function routeDisplayStops(list) {
   // สำคัญ: ใช้ลำดับที่คำนวณไว้ตอนสร้างแผนแล้ว ไม่คำนวณซ้ำในหน้า Map
   // เพื่อให้การ์ดแผน / ตาราง / Map / Google Maps ตรงกัน และไม่เพิ่มจุดเกิน 9 จุด
   const sorted = sortRowsByPlannedStopNo(list).filter(validCoord);
-  const mode = getPlanSettings().mode;
 
-  // โหมดปรับปรุงปั๊ม และ ตารางซ่อม:
-  // จุดรับบริการหลักต้องเป็นจุดที่ 1 เสมอ แล้วจุดออกตลาดเริ่มเป็นจุดที่ 2 ต่อจากนั้น
-  // ใช้ logic เดียวกันกับสาย 65 ที่ยืนยันว่าออกแบบดีแล้ว
-  if (mode === "pump" || mode === "repair") {
-    const mainStop = sorted.find(r => mode === "pump" ? isPumpRow(r) : cleanText(r && r.type) === "ซ่อม");
-    if (mainStop) {
-      const rest = removeSameStop(sorted, mainStop);
-      return [mainStop, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  // โหมดปรับปรุงปั๊ม: บังคับให้จุดปรับปรุงปั๊มเป็นจุดที่ 1 ใน Map/Google Maps เสมอ
+  // และจุดอื่น ๆ ยังคงไม่เกิน 8 จุด รวมทั้งหมดไม่เกิน 9 จุด
+  if (getPlanSettings().mode === "pump") {
+    const pump = sorted.find(isPumpRow);
+    if (pump) {
+      const rest = removeSameStop(sorted, pump);
+      return [pump, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
     }
   }
 
