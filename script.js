@@ -1440,7 +1440,171 @@ function anchoredServiceLoopOrder(start, serviceRow, restRows, requiredRows = []
   });
 
   return (unique.length ? unique : [[service, ...rest]])
-    .sort((a, b) => routeSelectionScore(start, a, requiredRows) - routeSelectionScore(start, b, requiredRows))[0];
+    .sort((a, b) => serviceRouteScore(start, a, service) - serviceRouteScore(start, b, service))[0];
+}
+
+
+function directionalStepAngle(fromAngle, toAngle, direction) {
+  const full = Math.PI * 2;
+  if (direction >= 0) return (toAngle - fromAngle + full) % full;
+  return (fromAngle - toAngle + full) % full;
+}
+
+function serviceAngularSmoothPenalty(serviceRow, route) {
+  // โหมดปรับปรุงปั๊ม/ตารางซ่อมต้องไม่เป็น “1→2→3 แล้วตัดย้อนกลับไปเก็บอีกฝั่ง”
+  // วัดจากมุมรอบจุดบริการ ถ้ากระโดดข้ามฝั่งแรง ๆ กลางทางจะให้คะแนนแย่ลง
+  const service = validCoord(serviceRow) ? serviceRow : (route || [])[0];
+  const rest = (route || []).slice(1).filter(validCoord);
+  if (!service || !validCoord(service) || rest.length < 3) return 0;
+  const angles = rest.map(p => angleAround(service, p));
+  let gapPenalty = 0;
+  for (let i = 1; i < angles.length; i++) {
+    const gap = angularDiff(angles[i - 1], angles[i]);
+    if (gap > 1.85) gapPenalty += (gap - 1.85) * 190;
+    if (gap > 2.45) gapPenalty += 260;
+  }
+
+  // เช็กทิศทางรวมทั้งตามเข็ม/ทวนเข็ม แล้วลงโทษถ้าลำดับสลับซ้ายขวาหลายครั้ง
+  let cwBackward = 0, ccwBackward = 0;
+  for (let i = 1; i < angles.length; i++) {
+    const cw = directionalStepAngle(angles[i - 1], angles[i], 1);
+    const ccw = directionalStepAngle(angles[i - 1], angles[i], -1);
+    if (cw > Math.PI) cwBackward += cw - Math.PI;
+    if (ccw > Math.PI) ccwBackward += ccw - Math.PI;
+  }
+  return gapPenalty + Math.min(cwBackward, ccwBackward) * 85;
+}
+
+function serviceRouteScore(start, route, serviceRow) {
+  const required = serviceRow ? [serviceRow] : [];
+  return routeSelectionScore(start, route, required)
+    + serviceAngularSmoothPenalty(serviceRow, route) * 1.35
+    + revisitPassedPointPenalty(start, route) * 1.65;
+}
+
+function buildDirectionalServiceChain(serviceRow, pool, targetOptionalCount, seed, direction) {
+  const service = serviceRow;
+  const selected = [];
+  const available = uniqueRowsByIdName(pool || [])
+    .filter(validCoord)
+    .filter(p => !isSameStop(p, service));
+  const first = seed && available.find(p => isSameStop(p, seed));
+  if (!first) return [];
+  selected.push(first);
+
+  while (selected.length < targetOptionalCount) {
+    const current = selected[selected.length - 1];
+    const currentAngle = angleAround(service, current);
+    let best = null;
+    for (const p of available) {
+      if (selected.some(s => isSameStop(s, p))) continue;
+      const nextAngle = angleAround(service, p);
+      const step = directionalStepAngle(currentAngle, nextAngle, direction);
+      const jump = angularDiff(currentAngle, nextAngle);
+      const dCurrent = haversine(coordPoint(current), coordPoint(p));
+      const dService = haversine(coordPoint(service), coordPoint(p));
+      const dStartLike = candidateBaseScore(p) * 0.025;
+      let score = dCurrent * 1.15 + step * 9 + jump * 13 + dService * 0.08 + dStartLike;
+      if (step < 0.04) score += 25;
+      if (jump > 1.85) score += (jump - 1.85) * 180;
+      if (jump > 2.45) score += 260;
+      if (!best || score < best.score) best = { p, score };
+    }
+    if (!best) break;
+    selected.push(best.p);
+  }
+  return selected;
+}
+
+function buildServiceAngularRoutes(start, serviceRow, pool, targetStops) {
+  const service = serviceRow;
+  const optionalCount = Math.max(0, targetStops - 1);
+  const cleanPool = uniqueRowsByIdName(pool || [])
+    .filter(validCoord)
+    .filter(p => !isSameStop(p, service))
+    .sort((a, b) => (candidateBaseScore(a) + candidateDepotSidePenalty(start, [service], a)) - (candidateBaseScore(b) + candidateDepotSidePenalty(start, [service], b)))
+    .slice(0, 44);
+  const routes = [];
+  const add = (optional) => {
+    const rest = uniqueRowsByIdName(optional || []).filter(validCoord).filter(p => !isSameStop(p, service)).slice(0, optionalCount);
+    if (rest.length === optionalCount) routes.push([service, ...rest]);
+  };
+
+  // 1) สร้างเส้นทางจาก “หัววง” หลายจุด แล้วไล่ต่อในฝั่งเดียวกันก่อน ลดเคส 2→3 แล้วย้อนกลับไป 4-7
+  cleanPool.slice(0, 18).forEach(seed => {
+    add(buildDirectionalServiceChain(service, cleanPool, optionalCount, seed, 1));
+    add(buildDirectionalServiceChain(service, cleanPool, optionalCount, seed, -1));
+  });
+
+  // 2) สร้าง route แบบกวาดมุมรอบ service และ centroid แต่จำกัดจำนวนเพื่อไม่ให้ค้าง
+  [coordPoint(service), routeCentroid([service, ...cleanPool.slice(0, 18)]), start].forEach(center => {
+    if (!center || !Number.isFinite(Number(center.lat)) || !Number.isFinite(Number(center.lng))) return;
+    const asc = [...cleanPool].sort((a, b) => angleAround(center, a) - angleAround(center, b));
+    const desc = [...asc].reverse();
+    [asc, desc].forEach(base => {
+      for (let i = 0; i < Math.min(base.length, 14); i++) {
+        add([...base.slice(i), ...base.slice(0, i)]);
+      }
+    });
+  });
+
+  // 3) ชุดสำรอง: จุดคะแนนดีที่สุดและจุดใกล้ต่อเนื่องจาก service
+  add(cleanPool);
+  add(nearestNeighborOrder(coordPoint(service), cleanPool).slice(0, optionalCount));
+
+  const seen = new Set();
+  return routes.filter(route => {
+    const key = uniqueRouteCandidateKey(route);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 80);
+}
+
+function buildServiceAnchoredPlanRoute(start, requiredRows, candidateRows, targetStops = TARGET_CORE_ROUTE_STOPS) {
+  const service = uniqueRowsByIdName(requiredRows || []).filter(validCoord)[0];
+  if (!service) return buildCircularMarketPlanRoute(start, requiredRows, candidateRows, targetStops, false);
+
+  const required = [service];
+  const cleanPool = uniqueRowsByIdName(candidateRows || [])
+    .filter(validCoord)
+    .filter(p => !isSameStop(p, service))
+    .sort((a, b) => (candidateBaseScore(a) + candidateDepotSidePenalty(start, required, a)) - (candidateBaseScore(b) + candidateDepotSidePenalty(start, required, b)))
+    .slice(0, 52);
+
+  const routeCandidates = [];
+  const addRoute = (route) => {
+    const cleaned = uniqueRowsByIdName(route || []).filter(validCoord);
+    if (!cleaned.length || !isSameStop(cleaned[0], service)) return;
+    if (routeStopCount(cleaned) < Math.min(MIN_ROUTE_CUSTOMER_STOPS, targetStops)) return;
+    routeCandidates.push(cleaned.slice(0, targetStops));
+  };
+
+  // candidate จากชุดเลือกจุดแบบ sector เดิม เพื่อรักษารูปวงกลม
+  buildAngularSectorSets(start, required, cleanPool, targetStops).forEach(set => {
+    addRoute(anchoredServiceLoopOrder(start, service, set.filter(p => !isSameStop(p, service)), required));
+  });
+
+  // candidate ใหม่: ล็อก service เป็น 1 แล้วเรียง/เลือกจุดในฝั่งต่อเนื่องก่อน
+  buildServiceAngularRoutes(start, service, cleanPool, targetStops).forEach(addRoute);
+
+  const unique = [];
+  const seen = new Set();
+  routeCandidates.forEach(route => {
+    const key = uniqueRouteCandidateKey(route);
+    if (!seen.has(key)) { seen.add(key); unique.push(route); }
+  });
+
+  let valid = unique.filter(route => approxRoadDistanceKm(start, route) <= MAX_ROUTE_DISTANCE_KM);
+  if (!valid.length) valid = unique;
+  if (!valid.length) return [service, ...cleanPool.slice(0, Math.max(0, targetStops - 1))];
+
+  let best = valid.sort((a, b) => serviceRouteScore(start, a, service) - serviceRouteScore(start, b, service))[0];
+
+  // ลองเปลี่ยนจุดที่ทำให้เกิดแขนยื่น/ย้อนผ่าน 1 จุด แต่จำกัดรอบเพื่อให้ยังโหลดเร็ว
+  best = replaceSpikesWithBetterPoints(start, best, required, cleanPool, targetStops, true);
+  if (!isSameStop(best[0], service)) best = [service, ...best.filter(p => !isSameStop(p, service))].slice(0, targetStops);
+  return best;
 }
 
 
@@ -1726,6 +1890,7 @@ function replaceSpikesWithBetterPoints(start, orderedRows, requiredRows, pool, t
 
 
 function buildCircularMarketPlanRoute(start, requiredRows, candidateRows, targetStops = TARGET_CORE_ROUTE_STOPS, forceFirstRequired = false) {
+  if (forceFirstRequired) return buildServiceAnchoredPlanRoute(start, requiredRows, candidateRows, targetStops);
   const required = uniqueRowsByIdName(requiredRows || []).filter(validCoord);
   const cleanPool = uniqueRowsByIdName(candidateRows || [])
     .filter(validCoord)
@@ -2248,7 +2413,7 @@ function buildRepairPlanRows(repairRows, marketRows) {
       [repair],
       rankedMarkets,
       TARGET_CORE_ROUTE_STOPS,
-      false
+      true
     );
     const routeDate = repair.dateObj
       ? repair.dateObj.toLocaleDateString("th-TH", { day:"numeric", month:"long", year:"2-digit" })
@@ -2390,13 +2555,14 @@ function routeDisplayStops(list) {
   // เพื่อให้การ์ดแผน / ตาราง / Map / Google Maps ตรงกัน และไม่เพิ่มจุดเกิน 9 จุด
   const sorted = sortRowsByPlannedStopNo(list).filter(validCoord);
 
-  // โหมดปรับปรุงปั๊ม: บังคับให้จุดปรับปรุงปั๊มเป็นจุดที่ 1 ใน Map/Google Maps เสมอ
-  // และจุดอื่น ๆ ยังคงไม่เกิน 8 จุด รวมทั้งหมดไม่เกิน 9 จุด
-  if (getPlanSettings().mode === "pump") {
-    const pump = sorted.find(isPumpRow);
-    if (pump) {
-      const rest = removeSameStop(sorted, pump);
-      return [pump, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  // โหมดปรับปรุงปั๊ม/ตารางซ่อม: บังคับให้จุดรับบริการเป็นจุดที่ 1 ใน Map/Google Maps เสมอ
+  // และจุดอื่น ๆ ใช้ลำดับเดียวกับตารางแผน
+  const mode = getPlanSettings().mode;
+  if (mode === "pump" || mode === "repair") {
+    const focus = sorted.find(isFocusStop);
+    if (focus) {
+      const rest = removeSameStop(sorted, focus);
+      return [focus, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
     }
   }
 
