@@ -739,7 +739,7 @@ function haversine(a, b) {
   const dLng = (Number(b.lng) - Number(a.lng)) * Math.PI / 180;
   const x = Math.sin(dLat/2)**2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng/2)**2;
   const km = R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
-  if (DISTANCE_MEMORY_CACHE.size < 120000) DISTANCE_MEMORY_CACHE.set(key, km);
+  if (DISTANCE_MEMORY_CACHE.size < 25000) DISTANCE_MEMORY_CACHE.set(key, km);
   return km;
 }
 
@@ -1542,18 +1542,33 @@ function routeLoopShapePenalty(start, rows, requiredRows = []) {
   return penalty;
 }
 
+function fastCircularRouteScore(start, route, requiredRows = []) {
+  const valid = (route || []).filter(validCoord);
+  if (!valid.length) return 999999;
+  const km = approxRoadDistanceKm(start, valid);
+  const countPenalty = valid.length < MIN_ROUTE_CUSTOMER_STOPS ? (MIN_ROUTE_CUSTOMER_STOPS - valid.length) * 700 : 0;
+  const center = routeCentroid(valid);
+  const stats = angleStatsForRows(center, valid);
+  const coverageDeg = stats.coverage * 180 / Math.PI;
+  const maxGapDeg = stats.maxGap * 180 / Math.PI;
+  const elong = elongationRatio(valid);
+  let shapePenalty = 0;
+  if (coverageDeg < 205) shapePenalty += (205 - coverageDeg) * 1.7;
+  if (maxGapDeg > 170) shapePenalty += (maxGapDeg - 170) * 1.9;
+  if (elong > 2.25) shapePenalty += (elong - 2.25) * 48;
+  if (km > MAX_ROUTE_DISTANCE_KM) shapePenalty += (km - MAX_ROUTE_DISTANCE_KM) * 18;
+  return km + countPenalty + shapePenalty + routeTurnPenalty(start, valid) * 1.35 + loopBacktrackPenalty(start, valid) * 0.75 + revisitPassedPointPenalty(start, valid) * 1.2 + routeDepotSideSpurPenalty(start, valid, requiredRows) * 0.75;
+}
+
 function routeSelectionScore(start, rows, requiredRows = []) {
   const valid = (rows || []).filter(validCoord);
   const scoreKey = `${coordCacheKey(start)}::${uniqueRouteCandidateKey(valid)}::${routeKeyForSet(requiredRows || [])}`;
   if (ROUTE_SCORE_MEMORY_CACHE.has(scoreKey)) return ROUTE_SCORE_MEMORY_CACHE.get(scoreKey);
-
-  const count = routeStopCount(valid);
-  const roadKm = approxRoadDistanceKm(start, valid);
-  const countPenalty = count < MIN_ROUTE_CUSTOMER_STOPS ? (MIN_ROUTE_CUSTOMER_STOPS - count) * 800 : 0;
-  const score = roadKm + countPenalty + routeLoopShapePenalty(start, valid, requiredRows);
-  if (ROUTE_SCORE_MEMORY_CACHE.size < 80000) ROUTE_SCORE_MEMORY_CACHE.set(scoreKey, score);
+  const score = fastCircularRouteScore(start, valid, requiredRows);
+  if (ROUTE_SCORE_MEMORY_CACHE.size < 12000) ROUTE_SCORE_MEMORY_CACHE.set(scoreKey, score);
   return score;
 }
+
 
 
 function candidateBaseScore(row) {
@@ -1586,13 +1601,16 @@ function buildAngularSectorSets(start, requiredRows, pool, targetStops) {
   const required = uniqueRowsByIdName(requiredRows || []).filter(validCoord);
   const need = Math.max(0, targetStops - required.length);
   if (need <= 0) return [required];
+
   const cleanPool = uniqueRowsByIdName(pool || [])
     .filter(validCoord)
     .filter(p => !required.some(r => isSameStop(r, p)))
-    .slice(0, 90);
+    .sort((a, b) => (candidateBaseScore(a) + candidateDepotSidePenalty(start, required, a)) - (candidateBaseScore(b) + candidateDepotSidePenalty(start, required, b)))
+    .slice(0, 42);
+
   const sets = [];
-  const centers = candidateCenters(start, required, cleanPool);
-  const offsets = [0, 0.5, 1, 1.5, 2];
+  const centers = candidateCenters(start, required, cleanPool).slice(0, 3);
+  const offsets = [0, 0.5];
 
   centers.forEach(center => {
     offsets.forEach(offset => {
@@ -1601,41 +1619,31 @@ function buildAngularSectorSets(start, requiredRows, pool, targetStops) {
         const angle = (angleAround(center, p) + Math.PI * 2 + (offset * Math.PI * 2 / Math.max(1, need))) % (Math.PI * 2);
         const sector = Math.min(need - 1, Math.floor(angle / (Math.PI * 2 / need)));
         const dCenter = haversine(center, coordPoint(p));
-        const dStart = haversine(start, coordPoint(p));
-        sectors[sector].push({ p, score: candidateBaseScore(p) + candidateDepotSidePenalty(start, required, p) + dCenter * 0.75 + dStart * 0.10 });
+        const score = candidateBaseScore(p) + candidateDepotSidePenalty(start, required, p) * 0.75 + dCenter * 0.70;
+        sectors[sector].push({ p, score });
       });
       sectors.forEach(sec => sec.sort((a, b) => a.score - b.score));
 
-      for (let variant = 0; variant < 4; variant++) {
-        const selected = [...required];
-        for (let i = 0; i < sectors.length && selected.length < targetStops; i++) {
-          const sec = sectors[(i + variant) % sectors.length];
-          const hit = sec.find(x => !selected.some(s => isSameStop(s, x.p)));
-          if (hit) selected.push(hit.p);
-        }
-        for (const p of cleanPool) {
-          if (selected.length >= targetStops) break;
-          if (!selected.some(s => isSameStop(s, p))) selected.push(p);
-        }
-        if (selected.length >= Math.min(MIN_ROUTE_CUSTOMER_STOPS, targetStops)) sets.push(selected);
+      const selected = [...required];
+      for (let i = 0; i < sectors.length && selected.length < targetStops; i++) {
+        const hit = sectors[i].find(x => !selected.some(s => isSameStop(s, x.p)));
+        if (hit) selected.push(hit.p);
       }
+      for (const p of cleanPool) {
+        if (selected.length >= targetStops) break;
+        if (!selected.some(s => isSameStop(s, p))) selected.push(p);
+      }
+      if (selected.length >= Math.min(MIN_ROUTE_CUSTOMER_STOPS, targetStops)) sets.push(selected);
     });
   });
 
-  // Greedy set: เพิ่มทีละจุดโดยเลือกตัวที่ทำให้รูปทรงวงกลมดีขึ้นที่สุด
-  let greedy = [...required];
-  while (greedy.length < targetStops) {
-    let best = null;
-    cleanPool.forEach(p => {
-      if (greedy.some(s => isSameStop(s, p))) return;
-      const trial = [...greedy, p];
-      const score = routeSelectionScore(start, trial, required) + candidateBaseScore(p) * 0.05 + candidateDepotSidePenalty(start, required, p) * 0.40;
-      if (!best || score < best.score) best = { p, score };
-    });
-    if (!best) break;
-    greedy.push(best.p);
+  // ชุดสำรองแบบคะแนนดีที่สุด เพื่อกันกรณีข้อมูลบางสายกระจุกตัวจนแบ่ง sector ไม่ครบ
+  const bestOnly = [...required];
+  for (const p of cleanPool) {
+    if (bestOnly.length >= targetStops) break;
+    if (!bestOnly.some(s => isSameStop(s, p))) bestOnly.push(p);
   }
-  if (greedy.length >= Math.min(MIN_ROUTE_CUSTOMER_STOPS, targetStops)) sets.push(greedy);
+  if (bestOnly.length >= Math.min(MIN_ROUTE_CUSTOMER_STOPS, targetStops)) sets.push(bestOnly);
 
   const seen = new Set();
   return sets.filter(set => {
@@ -1643,8 +1651,9 @@ function buildAngularSectorSets(start, requiredRows, pool, targetStops) {
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
-  });
+  }).slice(0, 8);
 }
+
 
 function orderLoopFromSet(start, rows, requiredRows = [], forceFirstRequired = false) {
   const required = (requiredRows || []).filter(validCoord);
@@ -1665,17 +1674,20 @@ function orderLoopFromSet(start, rows, requiredRows = [], forceFirstRequired = f
     for (let i = 0; i < base.length; i++) {
       const rotated = [...base.slice(i), ...base.slice(0, i)];
       candidates.push(rotated);
-      candidates.push(pullPointsThatAreOnTheWay(start, rotated));
     }
   });
-  const unique = [];
+  candidates.push(nearestNeighborOrder(start, valid));
+
   const seen = new Set();
-  candidates.forEach(c => {
+  const unique = candidates.filter(c => {
     const key = uniqueRouteCandidateKey(c);
-    if (!seen.has(key)) { seen.add(key); unique.push(c); }
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
   return unique.sort((a, b) => routeSelectionScore(start, a, requiredRows) - routeSelectionScore(start, b, requiredRows))[0] || orderCircularRoute(start, valid);
 }
+
 
 function replaceSpikesWithBetterPoints(start, orderedRows, requiredRows, pool, targetStops, forceFirstRequired = false) {
   const requiredKeys = requiredRouteKeySet(requiredRows);
@@ -1684,30 +1696,34 @@ function replaceSpikesWithBetterPoints(start, orderedRows, requiredRows, pool, t
   const cleanPool = uniqueRowsByIdName(pool || [])
     .filter(validCoord)
     .filter(p => !requiredKeys.has(rowUniqueKey(p)))
+    .filter(p => !current.some(r => isSameStop(r, p)))
     .sort((a, b) => (candidateBaseScore(a) + candidateDepotSidePenalty(start, requiredRows, a)) - (candidateBaseScore(b) + candidateDepotSidePenalty(start, requiredRows, b)))
-    .slice(0, 100);
+    .slice(0, 24);
 
-  for (let round = 0; round < 4; round++) {
-    let best = null;
-    for (let i = current.length - 1; i >= 0; i--) {
-      if (requiredKeys.has(rowUniqueKey(current[i]))) continue;
-      for (const cand of cleanPool) {
-        if (current.some(r => isSameStop(r, cand))) continue;
-        const seed = current.map((r, idx) => idx === i ? cand : r);
-        const ordered = orderLoopFromSet(start, seed, requiredRows, forceFirstRequired).slice(0, targetStops);
-        if (routeStopCount(ordered) !== routeStopCount(current)) continue;
-        const km = approxRoadDistanceKm(start, ordered);
-        if (km > MAX_ROUTE_DISTANCE_KM) continue;
-        const score = routeSelectionScore(start, ordered, requiredRows);
-        if (score + 0.2 < currentScore && (!best || score < best.score)) best = { ordered, score };
-      }
-    }
-    if (!best) break;
-    current = best.ordered;
-    currentScore = best.score;
+  // เปลี่ยนเฉพาะจุด optional ที่ทำให้เส้นทางแย่ที่สุด 1 รอบ เพื่อไม่ให้ Browser ค้าง
+  let worstIndex = -1;
+  let worstSaving = -Infinity;
+  const baseKm = approxRoadDistanceKm(start, current);
+  current.forEach((row, idx) => {
+    if (requiredKeys.has(rowUniqueKey(row))) return;
+    const trial = current.filter((_, i) => i !== idx);
+    const saving = baseKm - approxRoadDistanceKm(start, trial);
+    if (saving > worstSaving) { worstSaving = saving; worstIndex = idx; }
+  });
+  if (worstIndex < 0) return current;
+
+  let best = null;
+  for (const cand of cleanPool) {
+    const seed = current.map((r, idx) => idx === worstIndex ? cand : r);
+    const ordered = orderLoopFromSet(start, seed, requiredRows, forceFirstRequired).slice(0, targetStops);
+    if (routeStopCount(ordered) !== routeStopCount(current)) continue;
+    if (approxRoadDistanceKm(start, ordered) > MAX_ROUTE_DISTANCE_KM) continue;
+    const score = routeSelectionScore(start, ordered, requiredRows);
+    if (score + 0.5 < currentScore && (!best || score < best.score)) best = { ordered, score };
   }
-  return current;
+  return best ? best.ordered : current;
 }
+
 
 function buildCircularMarketPlanRoute(start, requiredRows, candidateRows, targetStops = TARGET_CORE_ROUTE_STOPS, forceFirstRequired = false) {
   const required = uniqueRowsByIdName(requiredRows || []).filter(validCoord);
@@ -1715,15 +1731,14 @@ function buildCircularMarketPlanRoute(start, requiredRows, candidateRows, target
     .filter(validCoord)
     .filter(p => !required.some(r => isSameStop(r, p)))
     .sort((a, b) => (candidateBaseScore(a) + candidateDepotSidePenalty(start, required, a)) - (candidateBaseScore(b) + candidateDepotSidePenalty(start, required, b)))
-    .slice(0, 110);
+    .slice(0, 48);
 
   const sets = buildAngularSectorSets(start, required, cleanPool, targetStops);
   let best = null;
   sets.forEach(set => {
     const ordered = orderLoopFromSet(start, set, required, forceFirstRequired).slice(0, targetStops);
     if (routeStopCount(ordered) < Math.min(MIN_ROUTE_CUSTOMER_STOPS, targetStops)) return;
-    const km = approxRoadDistanceKm(start, ordered);
-    if (km > MAX_ROUTE_DISTANCE_KM) return;
+    if (approxRoadDistanceKm(start, ordered) > MAX_ROUTE_DISTANCE_KM) return;
     const score = routeSelectionScore(start, ordered, required);
     if (!best || score < best.score) best = { ordered, score };
   });
@@ -1738,7 +1753,6 @@ function buildCircularMarketPlanRoute(start, requiredRows, candidateRows, target
 
   ordered = replaceSpikesWithBetterPoints(start, ordered, required, cleanPool, targetStops, forceFirstRequired);
 
-  // ถ้ายังเกิน 350 กม. ให้ลดจุดที่ไม่ใช่งานหลักก่อน แต่ไม่ต่ำกว่า 7 จุดถ้าทำได้
   while (routeStopCount(ordered) > MIN_ROUTE_CUSTOMER_STOPS && approxRoadDistanceKm(start, ordered) > MAX_ROUTE_DISTANCE_KM) {
     const requiredKeys = requiredRouteKeySet(required);
     let removeIndex = -1;
@@ -1755,6 +1769,7 @@ function buildCircularMarketPlanRoute(start, requiredRows, candidateRows, target
   }
   return ordered;
 }
+
 function takeByStatusForMeter(marketRows, pump) {
   const start = startForRoute([pump, ...(marketRows || []).slice(0, 1)]);
   return rankMarketCandidatesForTarget(marketRows, pump, start).slice(0, 60);
@@ -2495,20 +2510,18 @@ function detailAreaHtml(row, index) {
   return `<span class="geo-area" data-lat="${escapeHtml(row.lat)}" data-lng="${escapeHtml(row.lng)}">กำลังค้นหาพื้นที่...</span>`;
 }
 async function hydrateDetailAreas() {
-  const nodes = Array.from(document.querySelectorAll(".geo-area"));
-  if (!nodes.length) return;
   runWhenIdle(async () => {
+    const nodes = Array.from(document.querySelectorAll(".geo-area"));
     for (const node of nodes) {
-      if (!node.isConnected) continue;
       const lat = node.dataset.lat;
       const lng = node.dataset.lng;
       if (!lat || !lng) continue;
       const area = await reverseGeocode(lat, lng);
-      if (node.isConnected) node.textContent = area || "ไม่พบข้อมูลพื้นที่";
-      await new Promise(resolve => setTimeout(resolve, 20));
+      node.textContent = area || "ไม่พบข้อมูลพื้นที่";
     }
   });
 }
+
 
 function makeNumberIcon(number, variant = "normal") {
   const cls = variant === "focus" ? "route-number-icon route-focus-icon" : "route-number-icon";
