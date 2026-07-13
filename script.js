@@ -57,7 +57,6 @@ function applySelectedRouteToForm(form) {
 }
 
 const CHECKIN_RADIUS_METER = 100;
-const MAX_PLAN_DAYS = 7;
 const MAX_STOPS_PER_DAY = 16;
 // จำกัดจำนวนจุดที่ส่งเข้า Map และ Google Maps ให้ตรงกัน ไม่เกิน 9 จุด ตามเงื่อนไขใช้งานจริง
 const MAX_ROUTE_CUSTOMER_STOPS = 9;
@@ -82,6 +81,49 @@ let visitedSet = { ids: new Set(), names: new Set() };
 let customerMasterRows = [];
 let savedVisitRowsRaw = [];
 let savedHeaderMap = {};
+
+/* ===== Fast load optimization 20260713 =====
+   คงเงื่อนไขเส้นทางเดิม แต่ลดงานซ้ำระหว่างโหลด/เปลี่ยนตัวกรอง
+   - cache ข้อมูลชีตในหน่วยความจำระยะสั้น
+   - cache ระยะทาง/คะแนนเส้นทางที่คำนวณซ้ำบ่อย
+   - defer Dashboard/พื้นที่ reverse geocode ที่ไม่จำเป็นกับหน้าแรก
+*/
+const SHEET_MEMORY_CACHE_MS = 120000;
+const SHEET_MEMORY_CACHE = new Map();
+const DISTANCE_MEMORY_CACHE = new Map();
+const ROUTE_SCORE_MEMORY_CACHE = new Map();
+let isLoadingData = false;
+let pendingLoadRequest = false;
+let lastSalesRowsCache = [];
+
+function resetRouteComputeCache() {
+  DISTANCE_MEMORY_CACHE.clear();
+  ROUTE_SCORE_MEMORY_CACHE.clear();
+}
+
+function cloneSheetRows(rows) {
+  return Array.isArray(rows) ? rows.map(r => Array.isArray(r) ? [...r] : r) : rows;
+}
+
+function coordCacheKey(point) {
+  const lat = Number(point && point.lat);
+  const lng = Number(point && point.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return "invalid";
+  return `${lat.toFixed(8)},${lng.toFixed(8)}`;
+}
+
+function isDashboardPageVisible() {
+  const page2 = document.getElementById("page2");
+  return !!page2 && !page2.hidden;
+}
+
+function runWhenIdle(fn) {
+  if (window.requestIdleCallback) {
+    window.requestIdleCallback(fn, { timeout: 1500 });
+  } else {
+    setTimeout(fn, 60);
+  }
+}
 
 function cleanText(v) { return String(v ?? "").trim(); }
 function norm(v) { return cleanText(v).toLowerCase().replace(/\s+/g, " "); }
@@ -114,9 +156,16 @@ function cellByHeaders_(row, map, names, fallbackIndex) {
 }
 
 
-async function fetchSheetByIndex(sheetName, optional = false) {
-  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}&cachebust=${Date.now()}`;
-  const res = await fetch(url, { cache: "no-store" });
+async function fetchSheetByIndex(sheetName, optional = false, forceFresh = false) {
+  const cacheKey = `sheet:${sheetName}`;
+  const cached = SHEET_MEMORY_CACHE.get(cacheKey);
+  if (!forceFresh && cached && (Date.now() - cached.ts) < SHEET_MEMORY_CACHE_MS) {
+    return cloneSheetRows(cached.rows);
+  }
+
+  const cacheParam = forceFresh ? `&cachebust=${Date.now()}` : "";
+  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}${cacheParam}`;
+  const res = await fetch(url, { cache: forceFresh ? "no-store" : "default" });
   if (!res.ok) {
     if (optional) return [];
     throw new Error(`โหลดชีต ${sheetName} ไม่ได้`);
@@ -124,7 +173,9 @@ async function fetchSheetByIndex(sheetName, optional = false) {
   const text = await res.text();
   const jsonText = text.substring(text.indexOf("{"), text.lastIndexOf("}") + 1);
   const json = JSON.parse(jsonText);
-  return json.table.rows.map(r => (r.c || []).map(c => c ? (c.f || c.v || "") : ""));
+  const rows = json.table.rows.map(r => (r.c || []).map(c => c ? (c.f || c.v || "") : ""));
+  SHEET_MEMORY_CACHE.set(cacheKey, { ts: Date.now(), rows: cloneSheetRows(rows) });
+  return rows;
 }
 
 
@@ -182,26 +233,36 @@ function parseSavedGvizTable(json) {
   return [headers, ...rows];
 }
 
-async function fetchSavedGvizByQuery(queryPart) {
-  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&${queryPart}&headers=1&cachebust=${Date.now()}`;
-  const res = await fetch(url, { cache: "no-store" });
+async function fetchSavedGvizByQuery(queryPart, forceFresh = false) {
+  const cacheKey = `saved:${queryPart}`;
+  const cached = SHEET_MEMORY_CACHE.get(cacheKey);
+  if (!forceFresh && cached && (Date.now() - cached.ts) < SHEET_MEMORY_CACHE_MS) {
+    return cloneSheetRows(cached.rows);
+  }
+
+  const cacheParam = forceFresh ? `&cachebust=${Date.now()}` : "";
+  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&${queryPart}&headers=1${cacheParam}`;
+  const res = await fetch(url, { cache: forceFresh ? "no-store" : "default" });
   if (!res.ok) throw new Error(`โหลดชีตเก็บข้อมูลไม่ได้ (${res.status})`);
   const text = await res.text();
   const jsonText = text.substring(text.indexOf("{"), text.lastIndexOf("}") + 1);
   const json = JSON.parse(jsonText);
-  return parseSavedGvizTable(json);
+  const rows = parseSavedGvizTable(json);
+  SHEET_MEMORY_CACHE.set(cacheKey, { ts: Date.now(), rows: cloneSheetRows(rows) });
+  return rows;
 }
 
-async function fetchSavedSheetRowsRobust() {
+
+async function fetchSavedSheetRowsRobust(forceFresh = false) {
   // วิธีหลัก: อ่านด้วยชื่อชีต "เก็บข้อมูล"
   try {
-    const rows = await fetchSavedGvizByQuery(`sheet=${encodeURIComponent(SHEET_NAMES.saved)}`);
+    const rows = await fetchSavedGvizByQuery(`sheet=${encodeURIComponent(SHEET_NAMES.saved)}`, forceFresh);
     if (rows && rows.length > 1) return rows;
   } catch (err) {}
 
   // วิธีสำรอง: อ่านด้วย gid ของชีต “เก็บข้อมูล” ตาม URL ที่ใช้งานจริง
   try {
-    const rows = await fetchSavedGvizByQuery(`gid=352387367`);
+    const rows = await fetchSavedGvizByQuery(`gid=352387367`, forceFresh);
     if (rows && rows.length > 1) return rows;
   } catch (err) {}
 
@@ -308,12 +369,9 @@ function thaiDateLabel(d) {
 }
 function getPlanSettings() {
   const modeEl = document.getElementById("planMode");
-  const daysEl = document.getElementById("planDays");
   const mode = modeEl ? modeEl.value : "pump";
-  let days = daysEl ? Number(daysEl.value) : 1;
-  if (!Number.isFinite(days)) days = 1;
-  days = Math.max(1, Math.min(MAX_PLAN_DAYS, days));
-  return { mode, days };
+  // ยกเลิกการคำนวณ/เลือกวันล่วงหน้า: ระบบวางแผนเฉพาะวันปัจจุบันเท่านั้น
+  return { mode, days: 1 };
 }
 
 function getSelectedStartPointName() {
@@ -669,14 +727,22 @@ function chooseOnePumpPerMeterCurrentMonth(pumpRows) {
 }
 
 function haversine(a, b) {
+  const aKey = coordCacheKey(a);
+  const bKey = coordCacheKey(b);
+  const key = aKey <= bKey ? `${aKey}|${bKey}` : `${bKey}|${aKey}`;
+  if (DISTANCE_MEMORY_CACHE.has(key)) return DISTANCE_MEMORY_CACHE.get(key);
+
   const R = 6371;
   const lat1 = Number(a.lat) * Math.PI / 180;
   const lat2 = Number(b.lat) * Math.PI / 180;
   const dLat = (Number(b.lat) - Number(a.lat)) * Math.PI / 180;
   const dLng = (Number(b.lng) - Number(a.lng)) * Math.PI / 180;
   const x = Math.sin(dLat/2)**2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng/2)**2;
-  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
+  const km = R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
+  if (DISTANCE_MEMORY_CACHE.size < 120000) DISTANCE_MEMORY_CACHE.set(key, km);
+  return km;
 }
+
 function bestStartForRoute(points) {
   const valid = points.filter(validCoord);
   if (!valid.length) return START_POINTS[0];
@@ -1478,11 +1544,17 @@ function routeLoopShapePenalty(start, rows, requiredRows = []) {
 
 function routeSelectionScore(start, rows, requiredRows = []) {
   const valid = (rows || []).filter(validCoord);
+  const scoreKey = `${coordCacheKey(start)}::${uniqueRouteCandidateKey(valid)}::${routeKeyForSet(requiredRows || [])}`;
+  if (ROUTE_SCORE_MEMORY_CACHE.has(scoreKey)) return ROUTE_SCORE_MEMORY_CACHE.get(scoreKey);
+
   const count = routeStopCount(valid);
   const roadKm = approxRoadDistanceKm(start, valid);
   const countPenalty = count < MIN_ROUTE_CUSTOMER_STOPS ? (MIN_ROUTE_CUSTOMER_STOPS - count) * 800 : 0;
-  return roadKm + countPenalty + routeLoopShapePenalty(start, valid, requiredRows);
+  const score = roadKm + countPenalty + routeLoopShapePenalty(start, valid, requiredRows);
+  if (ROUTE_SCORE_MEMORY_CACHE.size < 80000) ROUTE_SCORE_MEMORY_CACHE.set(scoreKey, score);
+  return score;
 }
+
 
 function candidateBaseScore(row) {
   return (Number(row.__candidateScore) || 0) + (marketScore(row.status) * 8);
@@ -2057,7 +2129,7 @@ function applyNormalRouteFieldFeedback(start, order, sourcePoints) {
   return improveTargetNormalLoopRoute(start, order, sourcePoints);
 }
 
-function buildNormalPlanRows(marketRows, planDays) {
+function buildNormalPlanRows(marketRows) {
   const today = thaiNow();
   const selectedBU = getSelectedStartBU();
   const selectedMarketStatus = getMarketStatusFilterValue();
@@ -2079,37 +2151,34 @@ function buildNormalPlanRows(marketRows, planDays) {
   const output = [];
   groups.forEach((list, key) => {
     const [bu, meterKey] = key.split("|");
-    const maxItems = Math.min(list.length, planDays * MAX_STOPS_PER_DAY);
-    const usable = list.slice(0, maxItems);
-    for (let dayIndex = 0; dayIndex < planDays; dayIndex++) {
-      const chunk = usable.slice(dayIndex * MAX_STOPS_PER_DAY, (dayIndex + 1) * MAX_STOPS_PER_DAY);
-      if (!chunk.length) continue;
-      const planDate = addDaysTH(today, dayIndex);
-      const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
-      const start = startForRoute(chunk);
-      const circularSeed = buildCircularMarketPlanRoute(
-        start,
-        [],
-        chunk,
-        MAX_ROUTE_CUSTOMER_STOPS,
-        false
-      );
-      const orderedBase = hasMarketStatusFilterSelected()
-        ? orderStatusFilterRoute(start, circularSeed)
-        : orderNormalMarketRoute(start, circularSeed);
-      const ordered = hasMarketStatusFilterSelected()
-        ? orderedBase
-        : applyNormalRouteFieldFeedback(start, orderedBase, circularSeed);
-      ordered.forEach((row, idx) => output.push({
-        ...row,
-        plan_day: dayIndex + 1,
-        plan_date: planDate,
-        route_group: routeId,
-        stop_no: `${idx + 1}/${ordered.length}`,
-        start_name: start.name,
-        priorityLabel: row.priorityLabel || statusGroup(row.status)
-      }));
-    }
+    // ยกเลิกวันล่วงหน้า: คำนวณเฉพาะชุดแรกของวันปัจจุบัน ไม่วน loop หลายวัน
+    const chunk = list.slice(0, MAX_STOPS_PER_DAY);
+    if (!chunk.length) return;
+    const planDate = today;
+    const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
+    const start = startForRoute(chunk);
+    const circularSeed = buildCircularMarketPlanRoute(
+      start,
+      [],
+      chunk,
+      MAX_ROUTE_CUSTOMER_STOPS,
+      false
+    );
+    const orderedBase = hasMarketStatusFilterSelected()
+      ? orderStatusFilterRoute(start, circularSeed)
+      : orderNormalMarketRoute(start, circularSeed);
+    const ordered = hasMarketStatusFilterSelected()
+      ? orderedBase
+      : applyNormalRouteFieldFeedback(start, orderedBase, circularSeed);
+    ordered.forEach((row, idx) => output.push({
+      ...row,
+      plan_day: 1,
+      plan_date: planDate,
+      route_group: routeId,
+      stop_no: `${idx + 1}/${ordered.length}`,
+      start_name: start.name,
+      priorityLabel: row.priorityLabel || statusGroup(row.status)
+    }));
   });
   return output;
 }
@@ -2133,7 +2202,7 @@ function uniqueRowsByIdName(rows) {
   return out;
 }
 
-function buildRepairPlanRows(repairRows, marketRows, planDays) {
+function buildRepairPlanRows(repairRows, marketRows) {
   const selectedBU = getSelectedStartBU();
 
   // ตารางซ่อม: แสดงทุกจุดซ่อมของเดือนปัจจุบันที่ยังไม่ใช่ "แล้วเสร็จ"
@@ -2189,25 +2258,34 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
 
 
 function buildPlannedRows(pumpRows, repairRows, marketRows) {
-  const { mode, days } = getPlanSettings();
-  if (mode === "normal") return buildNormalPlanRows(marketRows, days);
-  if (mode === "repair") return buildRepairPlanRows(repairRows, marketRows, days);
+  const { mode } = getPlanSettings();
+  if (mode === "normal") return buildNormalPlanRows(marketRows);
+  if (mode === "repair") return buildRepairPlanRows(repairRows, marketRows);
   return buildPumpPlanRows(pumpRows, repairRows, marketRows);
 }
 
-async function loadData() {
+async function loadData(forceFresh = false) {
+  if (isLoadingData) {
+    pendingLoadRequest = forceFresh || pendingLoadRequest;
+    return;
+  }
+  isLoadingData = true;
+  resetRouteComputeCache();
+
   const tbody = document.getElementById("resultBody");
   if (tbody) tbody.innerHTML = `<tr><td colspan="18" class="loading">กำลังโหลดข้อมูล...</td></tr>`;
   const dashBody = document.getElementById("dashboardBody");
-  if (dashBody) dashBody.innerHTML = `<tr><td colspan="9" class="loading">กำลังโหลด Dashboard...</td></tr>`;
+  if (dashBody && isDashboardPageVisible()) dashBody.innerHTML = `<tr><td colspan="9" class="loading">กำลังโหลด Dashboard...</td></tr>`;
   try {
     document.getElementById("currentMonthLabel").textContent = thaiMonthYearLabel();
-    const [pumpRowsRaw, repairRowsRaw, marketRowsRaw, salesRows, savedRows] = await Promise.all([
-      fetchSheetByIndex(SHEET_NAMES.pump),
-      fetchSheetByIndex(SHEET_NAMES.repair),
-      fetchSheetByIndex(SHEET_NAMES.market),
-      fetchSheetByIndex(SHEET_NAMES.sales),
-      fetchSavedSheetRowsRobust()
+
+    // โหลดเฉพาะชีตที่จำเป็นต่อการสร้างแผนก่อน เพื่อให้หน้าแผนขึ้นเร็วขึ้น
+    // sales_litre ไม่ได้มีผลต่อเส้นทาง จึงใช้ cache เดิมและโหลดเสริมภายหลัง
+    const [pumpRowsRaw, repairRowsRaw, marketRowsRaw, savedRows] = await Promise.all([
+      fetchSheetByIndex(SHEET_NAMES.pump, false, forceFresh),
+      fetchSheetByIndex(SHEET_NAMES.repair, false, forceFresh),
+      fetchSheetByIndex(SHEET_NAMES.market, false, forceFresh),
+      fetchSavedSheetRowsRobust(forceFresh)
     ]);
     savedVisitRowsRaw = savedRows || [];
     savedHeaderMap = buildSavedHeaderMap(savedVisitRowsRaw);
@@ -2219,12 +2297,21 @@ async function loadData() {
 
     customerMasterRows = buildCustomerMasterRows(pumpRows, repairRows, marketRows);
 
+    const salesRows = lastSalesRowsCache || [];
     rawRows = enrichSales([...pumpRows, ...repairRows, ...marketRows], salesRows)
       .sort((a,b) => (a.sourceRank - b.sourceRank) || dateSortValue(a.dateObj) - dateSortValue(b.dateObj));
     plannedRows = enrichSales(buildPlannedRows(pumpRows, repairRows, marketRows), salesRows);
     selectedRouteKey = "";
     routeCollapsedToSelected = false;
     renderTable();
+
+    // โหลดรายงานยอดขายทีหลังแบบไม่บล็อกหน้าแผน เพราะไม่มีผลต่อการคัดจุด/เรียงเส้นทาง
+    runWhenIdle(async () => {
+      try {
+        const salesRowsLater = await fetchSheetByIndex(SHEET_NAMES.sales, true, forceFresh);
+        if (salesRowsLater && salesRowsLater.length) lastSalesRowsCache = salesRowsLater;
+      } catch (err) {}
+    });
   } catch (err) {
     const routeBox = document.getElementById("routeSummary");
     const routeDetail = document.getElementById("routeDetail");
@@ -2232,8 +2319,16 @@ async function loadData() {
     if (routeDetail) routeDetail.innerHTML = `โหลดข้อมูลไม่สำเร็จ กรุณาตรวจสอบสิทธิ์ Google Sheet / ชื่อชีต / อินเทอร์เน็ต แล้วกดรีเฟรชข้อมูล`;
     if (tbody) tbody.innerHTML = `<tr><td colspan="18" class="loading">เกิดข้อผิดพลาด: ${escapeHtml(err.message)}</td></tr>`;
     if (dashBody) dashBody.innerHTML = `<tr><td colspan="9" class="loading">เกิดข้อผิดพลาด: ${escapeHtml(err.message)}</td></tr>`;
+  } finally {
+    isLoadingData = false;
+    if (pendingLoadRequest) {
+      const shouldForce = pendingLoadRequest;
+      pendingLoadRequest = false;
+      setTimeout(() => loadData(shouldForce), 80);
+    }
   }
 }
+
 
 function escapeHtml(str) {
   return cleanText(str).replace(/[&<>'"]/g, m => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[m]));
@@ -2401,14 +2496,20 @@ function detailAreaHtml(row, index) {
 }
 async function hydrateDetailAreas() {
   const nodes = Array.from(document.querySelectorAll(".geo-area"));
-  for (const node of nodes) {
-    const lat = node.dataset.lat;
-    const lng = node.dataset.lng;
-    if (!lat || !lng) continue;
-    const area = await reverseGeocode(lat, lng);
-    node.textContent = area || "ไม่พบข้อมูลพื้นที่";
-  }
+  if (!nodes.length) return;
+  runWhenIdle(async () => {
+    for (const node of nodes) {
+      if (!node.isConnected) continue;
+      const lat = node.dataset.lat;
+      const lng = node.dataset.lng;
+      if (!lat || !lng) continue;
+      const area = await reverseGeocode(lat, lng);
+      if (node.isConnected) node.textContent = area || "ไม่พบข้อมูลพื้นที่";
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  });
 }
+
 function makeNumberIcon(number, variant = "normal") {
   const cls = variant === "focus" ? "route-number-icon route-focus-icon" : "route-number-icon";
   return L.divIcon({
@@ -2805,7 +2906,7 @@ function dashboardGroupClass(group) {
 function renderTable() {
   const tbody = document.getElementById("resultBody");
   renderRouteSummary(plannedRows);
-  renderVisitDashboard();
+  if (isDashboardPageVisible()) renderVisitDashboard();
   if (!tbody) {
     const rows = plannedRows || [];
     document.getElementById("sumAll").textContent = rows.length;
@@ -2970,7 +3071,7 @@ async function saveForm(e) {
     status.textContent = "บันทึกข้อมูลเรียบร้อยแล้ว: ถ้าสถานะเป็น “สำเร็จ” ระบบจะตัดจุดนี้ออกจากแผน แต่ถ้าไม่สำเร็จจะนำกลับมาวางแผนใหม่";
     status.style.color = "#166534";
     e.target.reset();
-    setTimeout(loadData, 900);
+    setTimeout(() => loadData(true), 900);
   } catch (err) {
     status.textContent = `บันทึกไม่สำเร็จ: ${err.message}`;
     status.style.color = "#dc2626";
@@ -3205,7 +3306,7 @@ function resetVisitFormOnly() {
 
 function reloadDataAndResetForm() {
   resetVisitFormOnly();
-  loadData();
+  loadData(true);
 }
 
 function applyCoordinatorPhone() {
@@ -3225,7 +3326,6 @@ if (document.getElementById("dashboardDays")) document.getElementById("dashboard
 if (document.getElementById("dashboardBU")) document.getElementById("dashboardBU").addEventListener("change", renderVisitDashboard);
 if (document.getElementById("startPointInput")) document.getElementById("startPointInput").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
 if (document.getElementById("planMode")) document.getElementById("planMode").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
-if (document.getElementById("planDays")) document.getElementById("planDays").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
 if (document.getElementById("marketStatusFilter")) document.getElementById("marketStatusFilter").addEventListener("change", () => { routeCollapsedToSelected = false; loadData(); });
 document.getElementById("reloadBtn").addEventListener("click", reloadDataAndResetForm);
 document.getElementById("checkinBtn").addEventListener("click", checkInGps);
