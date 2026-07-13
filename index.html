@@ -4,8 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ระบบวางแผนออกตลาด KCE</title>
+  <link rel="preconnect" href="https://docs.google.com" />
+  <link rel="preconnect" href="https://script.google.com" />
+  <link rel="preconnect" href="https://unpkg.com" />
+  <link rel="preconnect" href="https://router.project-osrm.org" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="style.css?v=20260713-service-loop-v3" />
+  <link rel="stylesheet" href="style.css?v=20260713-no-advance-days-v1" />
 </head>
 <body>
   <header class="app-header">
@@ -59,17 +63,6 @@
                 <option value="active">ลูกค้าปัจจุบัน</option>
                 <option value="winback">ลูกค้าใหม่</option>
                 <option value="dormant">ลูกค้าหายเกิน60วัน</option>
-              </select>
-            </label>
-            <label>วางแผนล่วงหน้า
-              <select id="planDays">
-                <option value="1">1 วัน</option>
-                <option value="2">2 วัน</option>
-                <option value="3">3 วัน</option>
-                <option value="4">4 วัน</option>
-                <option value="5">5 วัน</option>
-                <option value="6">6 วัน</option>
-                <option value="7">7 วัน</option>
               </select>
             </label>
           </div>
@@ -275,6 +268,6 @@
   </main>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="script.js?v=20260713-service-loop-v3"></script>
+  <script src="script.js?v=20260713-no-advance-days-v1"></script>
 </body>
 </html>
