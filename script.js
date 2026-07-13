@@ -1,7 +1,7 @@
 const SHEET_ID = "1NIsXwTi6tKmYtX8DoTUqvG4mxW-5Y5YVJB0EfmQMCvY";
 
 // URL Apps Script ของคุณ
-const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxu0zeUAfHU1YBI0KJRTFC97xRTsPvXPx8cbw-8iXKqzHomAy0T48reAcQouaS0Ob1A/exec";
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxLDIGniwUc2lNzG0ten-T4f7UMJ_RyA9dMYg1rphu9ZuVWicfiFOPpfdO_HyRNCTJ5/exec";
 
 const SHEET_NAMES = {
   pump: "ตารางปรับปรุงปั๊ม",
@@ -2074,7 +2074,7 @@ function buildRepairPlanRows(repairRows, marketRows, planDays) {
       [repair],
       rankedMarkets,
       TARGET_CORE_ROUTE_STOPS,
-      false
+      true
     );
     const routeDate = repair.dateObj
       ? repair.dateObj.toLocaleDateString("th-TH", { day:"numeric", month:"long", year:"2-digit" })
@@ -2189,14 +2189,16 @@ function routeDisplayStops(list) {
   // สำคัญ: ใช้ลำดับที่คำนวณไว้ตอนสร้างแผนแล้ว ไม่คำนวณซ้ำในหน้า Map
   // เพื่อให้การ์ดแผน / ตาราง / Map / Google Maps ตรงกัน และไม่เพิ่มจุดเกิน 9 จุด
   const sorted = sortRowsByPlannedStopNo(list).filter(validCoord);
+  const mode = getPlanSettings().mode;
 
-  // โหมดปรับปรุงปั๊ม: บังคับให้จุดปรับปรุงปั๊มเป็นจุดที่ 1 ใน Map/Google Maps เสมอ
-  // และจุดอื่น ๆ ยังคงไม่เกิน 8 จุด รวมทั้งหมดไม่เกิน 9 จุด
-  if (getPlanSettings().mode === "pump") {
-    const pump = sorted.find(isPumpRow);
-    if (pump) {
-      const rest = removeSameStop(sorted, pump);
-      return [pump, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
+  // โหมดปรับปรุงปั๊ม และ ตารางซ่อม:
+  // จุดรับบริการหลักต้องเป็นจุดที่ 1 เสมอ แล้วจุดออกตลาดเริ่มเป็นจุดที่ 2 ต่อจากนั้น
+  // ใช้ logic เดียวกันกับสาย 65 ที่ยืนยันว่าออกแบบดีแล้ว
+  if (mode === "pump" || mode === "repair") {
+    const mainStop = sorted.find(r => mode === "pump" ? isPumpRow(r) : cleanText(r && r.type) === "ซ่อม");
+    if (mainStop) {
+      const rest = removeSameStop(sorted, mainStop);
+      return [mainStop, ...rest].slice(0, MAX_ROUTE_CUSTOMER_STOPS);
     }
   }
 
