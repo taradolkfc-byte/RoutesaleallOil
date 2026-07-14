@@ -1974,32 +1974,83 @@ function findBestReplacementForSlot(start, routeRows, pool, prevIndex, nextIndex
 
 function buildWNN58TemplateRoute(start, list, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
   // WNN สาย 58: ปรับแบบเบาเฉพาะสายนี้ตาม feedback ล่าสุด
-  // คงลำดับเดิมที่ดี: 1→2→3 และ 5→6→7, ตัดจุดเดิมลำดับ 4 และ 8 แล้วหาจุดที่อยู่บนวงมาแทน
+  // ฐานเดิมยังคงแนวที่โหลดเร็วและไม่ค้าง: ใช้แผนเริ่มต้น → ตัดจุดแหย่เดิม → เติมจุดใหม่แบบ slot-by-slot
+  // เพิ่มรอบนี้: หลังจากได้แผนชุดปัจจุบันแล้ว ให้ตัด “จุดลำดับ 3” ออกและหาจุดใหม่ที่อยู่ระหว่างจุด 2 → 4 มากกว่าเดิม
+  // และปรับจุดช่วง 4 → 5 แบบเบา ถ้าพบจุดที่ลดการอ้อมเข้าอำเภออากาศอำนวยได้ดีกว่า
   const pool = uniqueRowsByIdName(list || []).filter(validCoord);
   if (pool.length <= targetStops) return orderNormalMarketRoute(start, pool).slice(0, targetStops);
 
   const base = buildNormalInitialRoute(start, pool, targetStops).slice(0, targetStops);
   if (base.length < targetStops) return base;
 
-  const removeIndexes = new Set([3, 7]); // 0-based: จุดที่ 4 และ 8
+  // คง logic จากเวอร์ชันก่อนที่ผู้ใช้บอกว่าดีขึ้นแล้ว: ตัดจุดเดิมลำดับ 4 และ 8 ของ base route ออกก่อน
+  const removeIndexes = new Set([3, 7]); // 0-based: จุดที่ 4 และ 8 ของ base route
   let route = base.filter((_, idx) => !removeIndexes.has(idx));
   const removed = base.filter((_, idx) => removeIndexes.has(idx));
-  const used = [...route, ...removed];
-  const candidatePool = pool
+  let used = [...route, ...removed];
+  let candidatePool = pool
     .filter(p => !used.some(s => isSameStop(s, p)))
     .sort((a, b) => normalPointPickScore(start, routeCentroid(route), a) - normalPointPickScore(start, routeCentroid(route), b));
 
   const replacement4 = findBestReplacementForSlot(start, route, candidatePool, 2, 3, [...route]);
   if (replacement4) route.splice(3, 0, replacement4);
 
-  const replacement8 = findBestReplacementForSlot(start, route, candidatePool, 6, 7, [...route, replacement4].filter(Boolean));
+  candidatePool = pool
+    .filter(p => ![...route, ...removed].some(s => isSameStop(s, p)))
+    .sort((a, b) => normalPointPickScore(start, routeCentroid(route), a) - normalPointPickScore(start, routeCentroid(route), b));
+
+  const replacement8 = findBestReplacementForSlot(start, route, candidatePool, 6, 7, [...route]);
   if (replacement8) route.splice(7, 0, replacement8);
 
   // ถ้ายังไม่ครบ 9 จุด เติมด้วยจุดที่ fit กับช่องก่อนกลับฐานมากที่สุด แต่ไม่ลอง combination หนัก
   while (route.length < targetStops) {
+    candidatePool = pool
+      .filter(p => ![...route, ...removed].some(s => isSameStop(s, p)))
+      .sort((a, b) => normalPointPickScore(start, routeCentroid(route), a) - normalPointPickScore(start, routeCentroid(route), b));
     const extra = findBestReplacementForSlot(start, route, candidatePool, Math.max(0, route.length - 2), route.length - 1, route);
     if (!extra || route.some(r => isSameStop(r, extra))) break;
     route.splice(Math.max(0, route.length - 1), 0, extra);
+  }
+
+  route = route.slice(0, targetStops);
+
+  // Feedback ล่าสุด: จุดที่ 1 → 2 ใช้ได้ แต่ “จุดที่ 3” ควรตัดและหาจุดใหม่ที่อยู่บนวงระหว่าง 2 → 4
+  if (route.length >= 5) {
+    const badPoint3 = route[2];
+    const routeWithoutPoint3 = route.filter((_, idx) => idx !== 2);
+    const replacementPool3 = pool
+      .filter(p => !routeWithoutPoint3.some(s => isSameStop(s, p)))
+      .filter(p => !removed.some(s => isSameStop(s, p)))
+      .filter(p => !isSameStop(p, badPoint3))
+      .sort((a, b) => insertionCandidateScore(routeWithoutPoint3[1], routeWithoutPoint3[2], a, routeWithoutPoint3, start) - insertionCandidateScore(routeWithoutPoint3[1], routeWithoutPoint3[2], b, routeWithoutPoint3, start))
+      .slice(0, 36);
+    const replacement3 = replacementPool3[0] || null;
+    if (replacement3) route = [...routeWithoutPoint3.slice(0, 2), replacement3, ...routeWithoutPoint3.slice(2)].slice(0, targetStops);
+  }
+
+  // Feedback ล่าสุด: ช่วงจุด 4 → 5 ถ้าอ้อมเข้าตัวอำเภอมาก ให้ลองเปลี่ยน “จุดที่ 5” เพียง 1 จุดแบบเบา
+  // ไม่เรียงใหม่ทั้งสายและไม่ลองหลาย combination เพื่อไม่ให้เกิด Page Unresponsive
+  if (route.length >= 7) {
+    const point4Index = 3;
+    const point5Index = 4;
+    const nextIndex = 5;
+    const currentPoint5 = route[point5Index];
+    const currentScore = insertionCandidateScore(route[point4Index], route[nextIndex], currentPoint5, route, start);
+    const replacementPool5 = pool
+      .filter(p => !route.some(s => isSameStop(s, p)))
+      .filter(p => !removed.some(s => isSameStop(s, p)))
+      .sort((a, b) => insertionCandidateScore(route[point4Index], route[nextIndex], a, route, start) - insertionCandidateScore(route[point4Index], route[nextIndex], b, route, start))
+      .slice(0, 24);
+    const bestPoint5 = replacementPool5[0] || null;
+    if (bestPoint5) {
+      const bestScore = insertionCandidateScore(route[point4Index], route[nextIndex], bestPoint5, route, start);
+      const currentLeg = haversine(coordPoint(route[point4Index]), coordPoint(currentPoint5));
+      const betterEnough = bestScore + 8 < currentScore;
+      const currentLegLooksLong = currentLeg > 12;
+      if (betterEnough || currentLegLooksLong) {
+        route[point5Index] = bestPoint5;
+      }
+    }
   }
 
   return route.slice(0, targetStops);
