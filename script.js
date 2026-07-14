@@ -2018,16 +2018,27 @@ function reorderByIndexPattern(order, pattern) {
 }
 
 function buildNormalST55ReferenceRoute(start, list) {
-  // ทดลองเฉพาะ ST สาย 55 ตามภาพอ้างอิงที่ผู้ใช้ยืนยันว่าเคยดีที่สุด
-  // ใช้ข้อมูลชุดเดิม 16 จุดแรกเหมือน logic เก่า แล้วจัดลำดับ 9 จุดแรกตาม pattern เดิม
+  // ทดลองเฉพาะ ST สาย 55 ให้กลับไปใช้สูตรที่เคยได้รูปวงกลมตามภาพอ้างอิง
+  // จุดสำคัญ: ใช้ chunk 16 จุดแรกแบบเดิม → คัดเหลือ 9 จุดด้วย buildCircularMarketPlanRoute แบบเดิม
+  // แล้วค่อยเรียง pattern 1,2,3,6,7,8,9,5,4 เพื่อไม่ให้วนหน้าวนหลัง
   // ไม่กระทบวันปกติสายอื่น และไม่กระทบโหมดปรับปรุงปั๊ม/ตารางซ่อม
   const chunk = uniqueRowsByIdName(list || []).filter(validCoord).slice(0, MAX_STOPS_PER_DAY);
   if (chunk.length < NORMAL_ROUTE_TARGET_STOPS) {
     return buildNormalCircularMarketRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
   }
+
+  const circularSeed = buildCircularMarketPlanRoute(
+    start,
+    [],
+    chunk,
+    MAX_ROUTE_CUSTOMER_STOPS,
+    false
+  );
+
   const orderedBase = hasMarketStatusFilterSelected()
-    ? orderStatusFilterRoute(start, chunk)
-    : orderNormalMarketRoute(start, chunk);
+    ? orderStatusFilterRoute(start, circularSeed)
+    : orderNormalMarketRoute(start, circularSeed);
+
   const ordered = reorderByIndexPattern(orderedBase, [0, 1, 2, 5, 6, 7, 8, 4, 3]);
   return ordered.slice(0, NORMAL_ROUTE_TARGET_STOPS);
 }
