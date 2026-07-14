@@ -2306,11 +2306,15 @@ const NORMAL_MANUAL_ROUTE_RULES = {
   "55": { removeIndexes: [7], note: "ตัดจุด 8 ที่อยู่นอกวง" },
   "60": { removeIndexes: [3], note: "ตัดจุด 4 ที่อยู่นอกวง" },
   "67": { removeIndexes: [6, 7, 8], note: "ตัดจุด 7-9 ที่อยู่นอกวง" },
-  "69": { removeIndexes: [0], reorderAfter: true, note: "ตัดจุด 1 และเรียงวงใหม่" },
-  "72": { rebuild: true, note: "ออกแบบใหม่ทั้งชุด" },
-  // ผู้ใช้ให้ pattern สาย 57 โดยพิมพ์เดิมจุด 8 ซ้ำ 2 ครั้ง จึงตีความตำแหน่งที่ 4 เป็นเดิมจุด 2 เพื่อให้ครบ 1-9 ไม่ซ้ำ
+  // สาย 69: ตัดเดิมจุด 1 และย้ายเดิมจุด 7-8 ให้อยู่ท้ายก่อนกลับฐาน เพื่อลดการขี่เลยกลับไปเก็บเดิมจุด 9
+  "69": { pattern: [2, 3, 4, 5, 6, 9, "NEW", 7, 8], excludeOldIndexes: [0], note: "ตัดจุด 1 แล้วเรียงใหม่ให้ 7-8 อยู่ท้ายก่อนกลับฐาน" },
+  // สาย 72: ตาม feedback ล่าสุด ตัดเดิมจุด 4 และเรียง 9→1→2→3→5→6→7→8→จุดใหม่
+  "72": { pattern: [9, 1, 2, 3, 5, 6, 7, 8, "NEW"], excludeOldIndexes: [3], note: "ตัดจุด 4 แล้วเรียงลำดับใหม่ตาม feedback" },
+  // สาย 57: ใช้ลำดับที่ผู้ใช้ให้มาเดิม 8→7→1→2→6→5→4→3→9
   "57": { pattern: [8, 7, 1, 2, 6, 5, 4, 3, 9], note: "เรียงลำดับใหม่ตาม feedback" },
-  "65": { pattern: [9, 2, 3, 4, 5, 6, 7, 8, "NEW"], excludeOldIndexes: [0], note: "เอาเดิมจุด 9 เป็นจุด 1 และแทนเดิมจุด 1" },
+  // สาย 65: feedback ล่าสุดให้ตัดเดิมจุด 9 ออกและหาจุดใหม่แทน
+  "65": { removeIndexes: [8], note: "ตัดจุด 9 ที่อยู่นอกวง" },
+  "66": { rebuild: true, reorderAfter: true, note: "ออกแบบใหม่ทั้งชุด" },
   "61": { removeIndexes: [4, 5], note: "ตัดจุด 5-6 ที่อยู่นอกวง" },
   "71": { removeIndexes: [3, 8], note: "ตัดจุด 4 และ 9 ที่อยู่นอกวง" }
 };
@@ -2544,8 +2548,14 @@ function buildNormalPlanRows(marketRows) {
     const meta = { routeId, start, list, bu, meterKey, planDate };
     normalRouteLazyPools.set(routeId, meta);
 
-    // สร้างแผนเบื้องต้นแบบเบาเพื่อให้เปิดหน้าเร็ว แล้วค่อย optimize เฉพาะสายที่คลิกดู
-    const ordered = buildNormalInitialRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
+    // สร้างแผนเบื้องต้นแบบเบาเพื่อให้เปิดหน้าเร็ว
+    // ถ้าสายนี้มี manual feedback รายสาย ให้ใช้กติกานั้นทันทีทั้งในการ์ดและแผนที่
+    // เพื่อให้ผู้ใช้เห็นผลทันทีโดยไม่ต้องพึ่งการ optimize หนักตอนคลิก
+    let ordered = buildNormalInitialRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
+    if (normalManualRuleForMeta(meta)) {
+      ordered = applyNormalManualFeedback(meta, ordered);
+      normalRouteOptimizedKeys.add(routeId);
+    }
     output.push(...buildRowsForNormalRoute(ordered, meta));
   });
   return output;
