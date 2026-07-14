@@ -1994,6 +1994,45 @@ function applyNormalRouteFieldFeedback(start, order, sourcePoints) {
   return orderNormalMarketRoute(start, order || sourcePoints || []);
 }
 
+function isNormalST55Route(points) {
+  const valid = (points || []).filter(Boolean);
+  if (!valid.length) return false;
+  return valid.some(p => cleanText(p.bu).toUpperCase() === "ST") &&
+         valid.some(p => normalizeMeter(p.meter || p.meterKey) === "55");
+}
+
+function reorderByIndexPattern(order, pattern) {
+  if (!order || order.length < pattern.length) return order;
+  const out = [];
+  const used = new Set();
+  pattern.forEach(idx => {
+    if (idx >= 0 && idx < order.length && !used.has(idx)) {
+      out.push(order[idx]);
+      used.add(idx);
+    }
+  });
+  order.forEach((p, idx) => {
+    if (!used.has(idx)) out.push(p);
+  });
+  return out;
+}
+
+function buildNormalST55ReferenceRoute(start, list) {
+  // ทดลองเฉพาะ ST สาย 55 ตามภาพอ้างอิงที่ผู้ใช้ยืนยันว่าเคยดีที่สุด
+  // ใช้ข้อมูลชุดเดิม 16 จุดแรกเหมือน logic เก่า แล้วจัดลำดับ 9 จุดแรกตาม pattern เดิม
+  // ไม่กระทบวันปกติสายอื่น และไม่กระทบโหมดปรับปรุงปั๊ม/ตารางซ่อม
+  const chunk = uniqueRowsByIdName(list || []).filter(validCoord).slice(0, MAX_STOPS_PER_DAY);
+  if (chunk.length < NORMAL_ROUTE_TARGET_STOPS) {
+    return buildNormalCircularMarketRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
+  }
+  const orderedBase = hasMarketStatusFilterSelected()
+    ? orderStatusFilterRoute(start, chunk)
+    : orderNormalMarketRoute(start, chunk);
+  const ordered = reorderByIndexPattern(orderedBase, [0, 1, 2, 5, 6, 7, 8, 4, 3]);
+  return ordered.slice(0, NORMAL_ROUTE_TARGET_STOPS);
+}
+
+
 
 function scoreNormalCandidateForPool(start, center, row) {
   const dStart = haversine(start, coordPoint(row));
@@ -2082,158 +2121,52 @@ function improveNormalRouteSetByReplacement(start, route, pool, targetStops = NO
   return best ? best.ordered : current;
 }
 
-function normalPercentile(values, q) {
-  const nums = (values || []).filter(Number.isFinite).sort((a, b) => a - b);
-  if (!nums.length) return 0;
-  const pos = Math.min(nums.length - 1, Math.max(0, (nums.length - 1) * q));
-  const lo = Math.floor(pos);
-  const hi = Math.ceil(pos);
-  const frac = pos - lo;
-  return nums[lo] + ((nums[hi] - nums[lo]) * frac);
-}
-
-function normalRingPickScore(start, center, row, radiusInfo) {
-  const dStart = haversine(start, coordPoint(row));
-  const r = haversine(center, coordPoint(row));
-  const target = radiusInfo && radiusInfo.target ? radiusInfo.target : r;
-  const q90 = radiusInfo && radiusInfo.q90 ? radiusInfo.q90 : target;
-
-  // วันปกติ: เลือกจุดรอบนอกของวงมากขึ้น ไม่เลือกจุดกลางวง/จุดไกลหลุดวงง่ายเกินไป
-  // ภาพอ้างอิงที่ผู้ใช้ต้องการคือวิ่งวนรอบพื้นที่ 9 จุด ไม่ใช่จุดกระจุกตรงกลางแล้วแหย่ออกไปเก็บทีหลัง
-  let score = candidateBaseScore(row) * 0.68;
-  score += Math.abs(r - target) * 0.78;
-  score -= Math.min(r, q90) * 0.20;
-  score += dStart * 0.035;
-  if (r < target * 0.45) score += (target * 0.45 - r) * 3.2;       // จุดกลางวงเกินไป
-  if (q90 > 0 && r > q90 * 1.38) score += (r - q90 * 1.38) * 4.4;  // จุดหลุดวงไกลเกินไป
-  return score;
-}
-
-function buildNormalRingSectorSets(start, poolAll, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
-  const all = uniqueRowsByIdName(poolAll || []).filter(validCoord);
-  if (all.length <= targetStops) return [all];
-
-  // ลดงานหนัก แต่ยังต้องเหลือจุดรอบวงเพียงพอ: เอาทั้งจุดคะแนนดี + จุดรอบนอกแต่ไม่ไกลหลุดวง
-  const overallCenter = routeCentroid(all);
-  const radiiAll = all.map(p => haversine(overallCenter, coordPoint(p))).filter(Number.isFinite);
-  const q70All = normalPercentile(radiiAll, 0.70);
-  const q90All = normalPercentile(radiiAll, 0.90);
-  const candidateLimit = Math.min(all.length, Math.max(NORMAL_ROUTE_POOL_LIMIT, targetStops * 5));
-  const limited = [...all]
-    .sort((a, b) => normalRingPickScore(start, overallCenter, a, { target: q70All, q90: q90All }) - normalRingPickScore(start, overallCenter, b, { target: q70All, q90: q90All }))
-    .slice(0, candidateLimit);
-
-  const centers = [
-    routeCentroid(limited),
-    overallCenter,
-    routeCentroid(limited.slice(0, Math.min(limited.length, 24))),
-    { lat: (overallCenter.lat * 0.72) + (Number(start.lat) * 0.28), lng: (overallCenter.lng * 0.72) + (Number(start.lng) * 0.28) }
-  ].filter(c => c && Number.isFinite(Number(c.lat)) && Number.isFinite(Number(c.lng)));
-  const offsets = [0, 0.33, 0.66];
-  const sets = [];
-
-  const addSet = (rows) => {
-    const selected = uniqueRowsByIdName(rows || []).filter(validCoord).slice(0, targetStops);
-    if (selected.length >= Math.min(targetStops, MIN_ROUTE_CUSTOMER_STOPS)) sets.push(selected);
-  };
-
-  centers.forEach(center => {
-    const radii = limited.map(p => haversine(center, coordPoint(p))).filter(Number.isFinite);
-    const radiusInfo = {
-      target: Math.max(4, normalPercentile(radii, 0.74)),
-      q90: Math.max(4, normalPercentile(radii, 0.90))
-    };
-
-    offsets.forEach(offset => {
-      const sectors = Array.from({ length: targetStops }, () => []);
-      limited.forEach(p => {
-        const angle = (angleAround(center, p) + Math.PI * 2 + offset * Math.PI * 2 / targetStops) % (Math.PI * 2);
-        const sector = Math.min(targetStops - 1, Math.floor(angle / (Math.PI * 2 / targetStops)));
-        sectors[sector].push({ p, score: normalRingPickScore(start, center, p, radiusInfo) });
-      });
-      sectors.forEach(sec => sec.sort((a, b) => a.score - b.score));
-
-      // ชุดหลัก: จุดอันดับดีที่สุดของแต่ละ sector
-      const main = [];
-      sectors.forEach(sec => {
-        const hit = sec.find(x => !main.some(s => isSameStop(s, x.p)));
-        if (hit) main.push(hit.p);
-      });
-      for (const p of limited) {
-        if (main.length >= targetStops) break;
-        if (!main.some(s => isSameStop(s, p))) main.push(p);
-      }
-      addSet(main);
-
-      // ชุดสำรองแบบเปลี่ยน sector ทีละช่อง เพื่อหาจุดที่ต่อวงดีกว่า แต่จำกัดจำนวนไม่ให้ค้าง
-      sectors.forEach((sec, idx) => {
-        const alt = sec.slice(1, 3).find(x => !main.some(s => isSameStop(s, x.p)));
-        if (!alt) return;
-        const variant = [...main];
-        if (idx < variant.length) variant[idx] = alt.p;
-        addSet(variant);
-      });
-    });
-  });
-
-  // ชุด fallback: จุดที่อยู่รอบนอกตามคะแนน ring ดีที่สุด
-  addSet(limited);
-
-  const seen = new Set();
-  return sets.filter(set => {
-    const key = routeKeyForSet(set);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  }).slice(0, 30);
-}
-
-function normalReferenceLoopScore(start, ordered) {
-  const valid = (ordered || []).filter(validCoord);
-  if (!valid.length) return 999999;
-  const km = approxRoadDistanceKm(start, valid);
-  const center = routeCentroid(valid);
-  const radii = valid.map(p => haversine(center, coordPoint(p))).filter(Number.isFinite);
-  const rAvg = radii.reduce((sum, r) => sum + r, 0) / Math.max(1, radii.length);
-  const rMin = Math.min(...radii, 0);
-  const rMax = Math.max(...radii, 0);
-
-  let score = normalMarketRouteScore(start, valid);
-  // ภาพอ้างอิง: จุดควรอยู่บนวงรอบพื้นที่ ไม่ใช่กลางวงหลายจุดหรือจุดแหย่ไกลออกไป
-  if (rAvg > 0 && rMin < rAvg * 0.42) score += (rAvg * 0.42 - rMin) * 45;
-  if (rAvg > 0 && rMax > rAvg * 2.25) score += (rMax - rAvg * 2.25) * 36;
-  const stats = angleStatsForRows(center, valid);
-  const coverageDeg = stats.coverage * 180 / Math.PI;
-  if (coverageDeg < 230) score += (230 - coverageDeg) * 2.8;
-  if (km > MAX_ROUTE_DISTANCE_KM) score += (km - MAX_ROUTE_DISTANCE_KM) * 28;
-  return score;
-}
-
 function buildNormalCircularMarketRoute(start, candidateRows, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
-  // วันปกติ/ออกตลาดทั่วไป: คง 9 จุดทุกสาย และออกแบบให้เหมือนภาพอ้างอิง
-  // แนวคิดใหม่: เลือก “จุดรอบวง” ก่อน แล้วค่อยเรียงลำดับเป็นวง เพื่อลดจุดกลางวง/จุดแหย่/การย้อนเก็บจุด
+  // จุดสำคัญของเวอร์ชันนี้: โหมดวันปกติห้ามคำนวณหนักจน Browser ค้าง
+  // ใช้การเลือกจุดแบบแบ่งมุมรอบศูนย์กลาง 9 โซน แล้วเรียงเป็นวงกลมทันที
   const poolAll = uniqueRowsByIdName(candidateRows || []).filter(validCoord);
   if (!poolAll.length) return [];
   if (poolAll.length <= targetStops) return orderNormalMarketRoute(start, poolAll).slice(0, targetStops);
 
-  const sets = buildNormalRingSectorSets(start, poolAll, targetStops);
-  let best = null;
-  sets.forEach(set => {
-    let ordered = orderNormalMarketRoute(start, set).slice(0, targetStops);
-    if (ordered.length < Math.min(targetStops, MIN_ROUTE_CUSTOMER_STOPS)) return;
-    for (let round = 0; round < 2 && approxRoadDistanceKm(start, ordered) > MAX_ROUTE_DISTANCE_KM; round++) {
-      ordered = replaceWorstNormalStopLight(start, ordered, poolAll, targetStops);
-    }
-    const score = normalReferenceLoopScore(start, ordered);
-    if (!best || score < best.score) best = { ordered, score };
+  const overallCenter = routeCentroid(poolAll);
+  const limitedPool = [...poolAll]
+    .sort((a, b) => normalPointPickScore(start, overallCenter, a) - normalPointPickScore(start, overallCenter, b))
+    .slice(0, Math.min(poolAll.length, Math.max(NORMAL_ROUTE_POOL_LIMIT, targetStops * 4)));
+
+  const center = routeCentroid(limitedPool);
+  const sectors = Array.from({ length: targetStops }, () => []);
+  limitedPool.forEach(p => {
+    const angle = (angleAround(center, p) + Math.PI * 2) % (Math.PI * 2);
+    const sector = Math.min(targetStops - 1, Math.floor(angle / (Math.PI * 2 / targetStops)));
+    sectors[sector].push(p);
+  });
+  sectors.forEach(sec => sec.sort((a, b) => normalPointPickScore(start, center, a) - normalPointPickScore(start, center, b)));
+
+  let selected = [];
+  sectors.forEach(sec => {
+    const hit = sec.find(p => !selected.some(s => isSameStop(s, p)));
+    if (hit) selected.push(hit);
   });
 
-  let ordered = best ? best.ordered : orderNormalMarketRoute(start, poolAll.slice(0, targetStops)).slice(0, targetStops);
+  // เติมให้ครบ 9 จุดจากจุดที่ยังอยู่ในวงและคะแนนดีที่สุด
+  for (const p of limitedPool) {
+    if (selected.length >= targetStops) break;
+    if (!selected.some(s => isSameStop(s, p))) selected.push(p);
+  }
 
-  // ปรับจุดหลุดวง/แหย่ 1 รอบ แม้ไม่เกิน 350 กม. เพื่อให้ทุกสายวนเหมือนภาพอ้างอิงขึ้น
-  const improved = replaceWorstNormalStopLight(start, ordered, poolAll, targetStops);
-  if (normalReferenceLoopScore(start, improved) + 0.5 < normalReferenceLoopScore(start, ordered)) ordered = improved;
-  return ordered.slice(0, targetStops);
+  // ถ้ายังไม่ครบ ให้ใช้ pool ทั้งหมดเป็นสำรอง
+  for (const p of poolAll) {
+    if (selected.length >= targetStops) break;
+    if (!selected.some(s => isSameStop(s, p))) selected.push(p);
+  }
+
+  let ordered = orderNormalMarketRoute(start, selected.slice(0, targetStops)).slice(0, targetStops);
+
+  // ปรับจุดที่ทำให้ระยะเกิน 350 กม. แบบเบา: ลองแทนเฉพาะจุดที่ทำให้ระยะอ้อมมากที่สุด 1-2 รอบ
+  for (let round = 0; round < 2 && approxRoadDistanceKm(start, ordered) > MAX_ROUTE_DISTANCE_KM; round++) {
+    ordered = replaceWorstNormalStopLight(start, ordered, limitedPool, targetStops);
+  }
+  return ordered;
 }
 
 function buildNormalPlanRows(marketRows) {
@@ -2264,7 +2197,9 @@ function buildNormalPlanRows(marketRows) {
     const planDate = today;
     const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
     const start = startForRoute(list);
-    const ordered = buildNormalCircularMarketRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
+    const ordered = isNormalST55Route(list)
+      ? buildNormalST55ReferenceRoute(start, list)
+      : buildNormalCircularMarketRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
     ordered.forEach((row, idx) => output.push({
       ...row,
       plan_day: 1,
