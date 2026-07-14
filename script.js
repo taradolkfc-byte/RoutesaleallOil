@@ -1933,6 +1933,78 @@ function isNormalST55Key(bu, meterKey) {
   return cleanText(bu).toUpperCase() === "ST" && normalizeMeter(meterKey) === "55";
 }
 
+function isNormalWNN58Key(bu, meterKey) {
+  return cleanText(bu).toUpperCase() === "WNN" && normalizeMeter(meterKey) === "58";
+}
+
+function insertionCandidateScore(prev, next, row, routeRows, start) {
+  const prevPoint = prev && validCoord(prev) ? coordPoint(prev) : start;
+  const nextPoint = next && validCoord(next) ? coordPoint(next) : start;
+  const rowPoint = coordPoint(row);
+  const direct = haversine(prevPoint, nextPoint);
+  const detour = haversine(prevPoint, rowPoint) + haversine(rowPoint, nextPoint) - direct;
+  const proj = pointSegmentProjection(prevPoint, nextPoint, row);
+  const center = routeCentroid(routeRows || []);
+  const centerDist = center ? haversine(center, rowPoint) : 0;
+  const routeDists = (routeRows || []).filter(validCoord).map(r => haversine(center, coordPoint(r))).filter(Number.isFinite);
+  const avgRadius = routeDists.length ? routeDists.reduce((a,b)=>a+b,0) / routeDists.length : centerDist;
+  let score = detour * 8 + normalPointPickScore(start, center, row) * 0.35;
+  if (proj) {
+    score += proj.distKm * 7;
+    if (proj.t < 0.05 || proj.t > 0.95) score += 35;
+  } else {
+    score += 120;
+  }
+  if (avgRadius > 0 && centerDist > avgRadius * 1.45) score += (centerDist - avgRadius * 1.45) * 9;
+  return score;
+}
+
+function findBestReplacementForSlot(start, routeRows, pool, prevIndex, nextIndex, usedRows) {
+  const prev = routeRows[prevIndex] || null;
+  const next = routeRows[nextIndex] || null;
+  const candidates = uniqueRowsByIdName(pool || [])
+    .filter(validCoord)
+    .filter(p => !(usedRows || []).some(s => isSameStop(s, p)))
+    .slice(0, 48);
+  if (!candidates.length) return null;
+  return candidates
+    .map(p => ({ p, score: insertionCandidateScore(prev, next, p, routeRows, start) }))
+    .sort((a, b) => a.score - b.score)[0].p;
+}
+
+function buildWNN58TemplateRoute(start, list, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
+  // WNN สาย 58: ปรับแบบเบาเฉพาะสายนี้ตาม feedback ล่าสุด
+  // คงลำดับเดิมที่ดี: 1→2→3 และ 5→6→7, ตัดจุดเดิมลำดับ 4 และ 8 แล้วหาจุดที่อยู่บนวงมาแทน
+  const pool = uniqueRowsByIdName(list || []).filter(validCoord);
+  if (pool.length <= targetStops) return orderNormalMarketRoute(start, pool).slice(0, targetStops);
+
+  const base = buildNormalInitialRoute(start, pool, targetStops).slice(0, targetStops);
+  if (base.length < targetStops) return base;
+
+  const removeIndexes = new Set([3, 7]); // 0-based: จุดที่ 4 และ 8
+  let route = base.filter((_, idx) => !removeIndexes.has(idx));
+  const removed = base.filter((_, idx) => removeIndexes.has(idx));
+  const used = [...route, ...removed];
+  const candidatePool = pool
+    .filter(p => !used.some(s => isSameStop(s, p)))
+    .sort((a, b) => normalPointPickScore(start, routeCentroid(route), a) - normalPointPickScore(start, routeCentroid(route), b));
+
+  const replacement4 = findBestReplacementForSlot(start, route, candidatePool, 2, 3, [...route]);
+  if (replacement4) route.splice(3, 0, replacement4);
+
+  const replacement8 = findBestReplacementForSlot(start, route, candidatePool, 6, 7, [...route, replacement4].filter(Boolean));
+  if (replacement8) route.splice(7, 0, replacement8);
+
+  // ถ้ายังไม่ครบ 9 จุด เติมด้วยจุดที่ fit กับช่องก่อนกลับฐานมากที่สุด แต่ไม่ลอง combination หนัก
+  while (route.length < targetStops) {
+    const extra = findBestReplacementForSlot(start, route, candidatePool, Math.max(0, route.length - 2), route.length - 1, route);
+    if (!extra || route.some(r => isSameStop(r, extra))) break;
+    route.splice(Math.max(0, route.length - 1), 0, extra);
+  }
+
+  return route.slice(0, targetStops);
+}
+
 function buildRowsForNormalRoute(ordered, meta) {
   return (ordered || []).filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS).map((row, idx) => ({
     ...row,
@@ -2032,6 +2104,9 @@ function buildOptimizedNormalRouteForGroup(meta) {
   if (!meta || !Array.isArray(meta.list)) return [];
   if (isNormalST55Key(meta.bu, meta.meterKey)) {
     return buildST55TemplateRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
+  }
+  if (isNormalWNN58Key(meta.bu, meta.meterKey)) {
+    return buildWNN58TemplateRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
   }
   // ทุกสายอื่นยังใช้ logic เบาและมีขอบเขต ไม่ลอง combination หนัก
   const startedAt = performance && performance.now ? performance.now() : Date.now();
