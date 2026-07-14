@@ -2195,20 +2195,116 @@ function buildST55TemplateRoute(start, list, targetStops = NORMAL_ROUTE_TARGET_S
   return orderNormalMarketRoute(start, selected.slice(0, targetStops)).slice(0, targetStops);
 }
 
+
+function normalRouteSlotBadness(start, route, index) {
+  const rows = (route || []).filter(validCoord);
+  if (!rows[index] || !validCoord(rows[index])) return 0;
+  const prevPoint = index === 0 ? start : coordPoint(rows[index - 1]);
+  const rowPoint = coordPoint(rows[index]);
+  const nextPoint = index === rows.length - 1 ? start : coordPoint(rows[index + 1]);
+  const direct = haversine(prevPoint, nextPoint);
+  const via = haversine(prevPoint, rowPoint) + haversine(rowPoint, nextPoint);
+  const detour = Math.max(0, via - direct);
+  const center = routeCentroid(rows);
+  const dCenter = haversine(center, rowPoint);
+  const allCenter = rows.map(r => haversine(center, coordPoint(r))).filter(Number.isFinite);
+  const avgRadius = allCenter.length ? allCenter.reduce((a, b) => a + b, 0) / allCenter.length : dCenter;
+  const outlier = avgRadius > 0 ? Math.max(0, dCenter - avgRadius * 1.45) : 0;
+  const prevLeg = haversine(prevPoint, rowPoint);
+  const nextLeg = haversine(rowPoint, nextPoint);
+  const longLeg = Math.max(prevLeg, nextLeg);
+  const proj = pointSegmentProjection(prevPoint, nextPoint, rows[index]);
+  const offLine = proj ? Math.max(0, proj.distKm - Math.max(2.5, direct * 0.22)) : 8;
+  const middleBacktrack = (index > 0 && index < rows.length - 1) ? loopBacktrackPenalty(start, rows.slice(Math.max(0, index - 2), Math.min(rows.length, index + 3))) : 0;
+  return detour * 13 + outlier * 9 + longLeg * 0.9 + offLine * 10 + middleBacktrack * 0.45;
+}
+
+function routeScoreForNormalSlotPlan(start, route) {
+  const rows = (route || []).filter(validCoord);
+  return normalRouteLightScore(start, rows) + routeSpikePenalty(start, rows, []) * 0.9 + revisitPassedPointPenalty(start, rows) * 0.55;
+}
+
+function findBestGenericNormalReplacement(start, routeWithoutBad, pool, insertIndex, blockedRows, beforeScore) {
+  const prev = insertIndex <= 0 ? null : routeWithoutBad[insertIndex - 1];
+  const next = insertIndex >= routeWithoutBad.length ? null : routeWithoutBad[insertIndex];
+  const candidates = uniqueRowsByIdName(pool || [])
+    .filter(validCoord)
+    .filter(p => !(blockedRows || []).some(s => isSameStop(s, p)))
+    .filter(p => !routeWithoutBad.some(s => isSameStop(s, p)))
+    .sort((a, b) => insertionCandidateScore(prev, next, a, routeWithoutBad, start) - insertionCandidateScore(prev, next, b, routeWithoutBad, start))
+    .slice(0, 22);
+
+  let best = null;
+  for (const cand of candidates) {
+    const trial = [...routeWithoutBad.slice(0, insertIndex), cand, ...routeWithoutBad.slice(insertIndex)];
+    if (trial.length !== routeWithoutBad.length + 1) continue;
+    if (approxRoadDistanceKm(start, trial) > MAX_ROUTE_DISTANCE_KM) continue;
+    const score = routeScoreForNormalSlotPlan(start, trial);
+    if (!best || score < best.score) best = { row: cand, score, trial };
+  }
+  if (!best) return null;
+  if (best.score + 2.5 < beforeScore) return best;
+  return null;
+}
+
+function buildGenericNormalLoopLikeWNN58Route(start, list, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
+  // ใช้แนวคิดเดียวกับ WNN58 ที่ทำได้ดี: แผนเริ่มต้นแบบเร็ว → หา slot ที่ทำให้วงเสีย → แทนเฉพาะ 1-2 จุด
+  // ไม่ลอง combination จำนวนมาก และไม่คำนวณทุกสายพร้อมกัน เพราะถูกเรียกผ่าน lazy compute ตอนคลิกการ์ดเท่านั้น
+  const poolAll = uniqueRowsByIdName(list || []).filter(validCoord);
+  if (poolAll.length <= targetStops) return orderNormalMarketRoute(start, poolAll).slice(0, targetStops);
+
+  const startedAt = performance && performance.now ? performance.now() : Date.now();
+  let route = buildNormalInitialRoute(start, poolAll, targetStops).slice(0, targetStops);
+  if (route.length < Math.min(MIN_ROUTE_CUSTOMER_STOPS, targetStops)) return route;
+
+  const center = routeCentroid(route);
+  const limitedPool = [...poolAll]
+    .sort((a, b) => normalPointPickScore(start, center, a) - normalPointPickScore(start, center, b))
+    .slice(0, Math.min(poolAll.length, NORMAL_ROUTE_POOL_LIMIT));
+
+  const blocked = [];
+  for (let round = 0; round < 2; round++) {
+    const now = performance && performance.now ? performance.now() : Date.now();
+    if (now - startedAt > NORMAL_ROUTE_COMPUTE_DEADLINE_MS) break;
+    if (route.length < targetStops) break;
+
+    let worst = { index: -1, score: -Infinity };
+    // ไม่แตะจุดที่ 1 และจุดสุดท้ายมากเกินไป เพราะเป็นจุดออกจากฐาน/กลับฐานของวันปกติ
+    for (let i = 1; i < route.length - 1; i++) {
+      const badness = normalRouteSlotBadness(start, route, i);
+      if (badness > worst.score) worst = { index: i, score: badness };
+    }
+
+    // ถ้าไม่ได้มีจุดที่ทำให้เส้นทางเสียชัดเจน ไม่ต้องเปลี่ยน เพื่อรักษาความเสถียร
+    if (worst.index < 0 || worst.score < 45) break;
+
+    const currentScore = routeScoreForNormalSlotPlan(start, route);
+    const badRow = route[worst.index];
+    const routeWithoutBad = route.filter((_, i) => i !== worst.index);
+    const replacement = findBestGenericNormalReplacement(
+      start,
+      routeWithoutBad,
+      limitedPool,
+      worst.index,
+      [...routeWithoutBad, ...blocked, badRow],
+      currentScore
+    );
+    if (!replacement) break;
+    route = replacement.trial.slice(0, targetStops);
+    blocked.push(badRow);
+  }
+
+  return route.slice(0, targetStops);
+}
+
 function buildOptimizedNormalRouteForGroup(meta) {
   if (!meta || !Array.isArray(meta.list)) return [];
-  if (isNormalST55Key(meta.bu, meta.meterKey)) {
-    return buildST55TemplateRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
-  }
   if (isNormalWNN58Key(meta.bu, meta.meterKey)) {
     return buildWNN58TemplateRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
   }
-  // ทุกสายอื่นยังใช้ logic เบาและมีขอบเขต ไม่ลอง combination หนัก
-  const startedAt = performance && performance.now ? performance.now() : Date.now();
-  const route = buildNormalInitialRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
-  const elapsed = (performance && performance.now ? performance.now() : Date.now()) - startedAt;
-  if (elapsed > NORMAL_ROUTE_COMPUTE_DEADLINE_MS) return route.slice(0, NORMAL_ROUTE_TARGET_STOPS);
-  return route;
+  // ทุกสายใช้ logic กลางแบบเดียวกับแนว WNN58: lazy + เลือกจุดในวง + แทนเฉพาะจุดที่ทำให้วงเสีย 1-2 จุด
+  // ไม่ใช้ ST55 hard-code และไม่ลอง combination จำนวนมาก เพื่อกัน Page Unresponsive
+  return buildGenericNormalLoopLikeWNN58Route(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
 }
 
 function replacePlannedRowsForRoute(routeKey, rows) {
