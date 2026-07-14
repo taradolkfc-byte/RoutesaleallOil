@@ -66,6 +66,7 @@ const ROAD_DISTANCE_FACTOR = 1.22;
 // โหมดวันปกติ/ออกตลาดทั่วไป: ต้องคง 9 จุด และคัดจากวงเส้นทางที่ดีที่สุดโดยไม่ให้หนักจน Browser ค้าง
 const NORMAL_ROUTE_TARGET_STOPS = 9;
 const NORMAL_ROUTE_POOL_LIMIT = 36;
+const NORMAL_ROUTE_COMPUTE_DEADLINE_MS = 450;
 
 const COORDINATOR_PHONE_MAP = {
   "น้าฮ้อย": "082-1165845"
@@ -1798,22 +1799,6 @@ function normalEndpointPenalty(start, order) {
   return penalty;
 }
 
-function normalMarketRouteScore(start, order) {
-  if (!order || !order.length) return 0;
-  const valid = order.filter(validCoord);
-  const roadKm = approxRoadDistanceKm(start, valid);
-  let score = routeDistanceFromStart(start, valid);
-  score += normalEndpointPenalty(start, valid);
-  score += normalLoopShapePenaltyQuick(start, valid);
-  score += routeTurnPenalty(start, valid) * 1.9;
-  score += loopBacktrackPenalty(start, valid) * 1.65;
-  score += revisitPassedPointPenalty(start, valid) * 1.1;
-  score += routeSpikePenalty(start, valid, []) * 1.35;
-  if (roadKm > MAX_ROUTE_DISTANCE_KM) score += (roadKm - MAX_ROUTE_DISTANCE_KM) * 18;
-  if (valid.length < NORMAL_ROUTE_TARGET_STOPS) score += (NORMAL_ROUTE_TARGET_STOPS - valid.length) * 900;
-  return score;
-}
-
 function normalPointPickScore(start, center, row) {
   const dStart = haversine(start, coordPoint(row));
   const dCenter = center ? haversine(center, coordPoint(row)) : 0;
@@ -1832,39 +1817,6 @@ function normalRouteLightScore(start, order) {
   const road = approxRoadDistanceKm(start, valid);
   if (road > MAX_ROUTE_DISTANCE_KM) score += (road - MAX_ROUTE_DISTANCE_KM) * 22;
   return score;
-}
-
-function replaceWorstNormalStopLight(start, ordered, pool, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
-  const current = (ordered || []).filter(validCoord).slice(0, targetStops);
-  if (current.length < Math.min(targetStops, MIN_ROUTE_CUSTOMER_STOPS)) return current;
-
-  const baseScore = normalRouteLightScore(start, current);
-  const baseKm = routeDistanceFromStart(start, current);
-  let worstIndex = -1;
-  let bestSaving = -Infinity;
-  current.forEach((row, idx) => {
-    const trial = current.filter((_, i) => i !== idx);
-    const saving = baseKm - routeDistanceFromStart(start, trial);
-    if (saving > bestSaving) { bestSaving = saving; worstIndex = idx; }
-  });
-  if (worstIndex < 0) return current;
-
-  const center = routeCentroid(current);
-  const candidates = uniqueRowsByIdName(pool || [])
-    .filter(validCoord)
-    .filter(p => !current.some(r => isSameStop(r, p)))
-    .sort((a, b) => normalPointPickScore(start, center, a) - normalPointPickScore(start, center, b))
-    .slice(0, 16);
-
-  let best = { route: current, score: baseScore };
-  for (const cand of candidates) {
-    const trialSet = current.map((r, idx) => idx === worstIndex ? cand : r);
-    const trial = orderNormalMarketRoute(start, trialSet).slice(0, targetStops);
-    if (trial.length !== current.length) continue;
-    const score = normalRouteLightScore(start, trial);
-    if (score + 0.5 < best.score) best = { route: trial, score };
-  }
-  return best.route;
 }
 
 function orderNormalMarketRoute(start, points) {
@@ -1949,55 +1901,6 @@ function scoreNormalCandidateForPool(start, center, row) {
   return candidateBaseScore(row) * 0.75 + dStart * 0.08 + dCenter * 0.35;
 }
 
-function buildNormalCircularMarketRoute(start, candidateRows, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
-  // จุดสำคัญของเวอร์ชันนี้: โหมดวันปกติห้ามคำนวณหนักจน Browser ค้าง
-  // ใช้การเลือกจุดแบบแบ่งมุมรอบศูนย์กลาง 9 โซน แล้วเรียงเป็นวงกลมทันที
-  const poolAll = uniqueRowsByIdName(candidateRows || []).filter(validCoord);
-  if (!poolAll.length) return [];
-  if (poolAll.length <= targetStops) return orderNormalMarketRoute(start, poolAll).slice(0, targetStops);
-
-  const overallCenter = routeCentroid(poolAll);
-  const limitedPool = [...poolAll]
-    .sort((a, b) => normalPointPickScore(start, overallCenter, a) - normalPointPickScore(start, overallCenter, b))
-    .slice(0, Math.min(poolAll.length, Math.max(NORMAL_ROUTE_POOL_LIMIT, targetStops * 4)));
-
-  const center = routeCentroid(limitedPool);
-  const sectors = Array.from({ length: targetStops }, () => []);
-  limitedPool.forEach(p => {
-    const angle = (angleAround(center, p) + Math.PI * 2) % (Math.PI * 2);
-    const sector = Math.min(targetStops - 1, Math.floor(angle / (Math.PI * 2 / targetStops)));
-    sectors[sector].push(p);
-  });
-  sectors.forEach(sec => sec.sort((a, b) => normalPointPickScore(start, center, a) - normalPointPickScore(start, center, b)));
-
-  let selected = [];
-  sectors.forEach(sec => {
-    const hit = sec.find(p => !selected.some(s => isSameStop(s, p)));
-    if (hit) selected.push(hit);
-  });
-
-  // เติมให้ครบ 9 จุดจากจุดที่ยังอยู่ในวงและคะแนนดีที่สุด
-  for (const p of limitedPool) {
-    if (selected.length >= targetStops) break;
-    if (!selected.some(s => isSameStop(s, p))) selected.push(p);
-  }
-
-  // ถ้ายังไม่ครบ ให้ใช้ pool ทั้งหมดเป็นสำรอง
-  for (const p of poolAll) {
-    if (selected.length >= targetStops) break;
-    if (!selected.some(s => isSameStop(s, p))) selected.push(p);
-  }
-
-  let ordered = orderNormalMarketRoute(start, selected.slice(0, targetStops)).slice(0, targetStops);
-
-  // ปรับจุดที่ทำให้ระยะเกิน 350 กม. แบบเบา: ลองแทนเฉพาะจุดที่ทำให้ระยะอ้อมมากที่สุด 1-2 รอบ
-  for (let round = 0; round < 2 && approxRoadDistanceKm(start, ordered) > MAX_ROUTE_DISTANCE_KM; round++) {
-    ordered = replaceWorstNormalStopLight(start, ordered, limitedPool, targetStops);
-  }
-  return ordered;
-}
-
-
 // ===== Normal route lazy + ST55 template route 20260714 =====
 // เป้าหมาย: ลดการคำนวณตอนเปิดโหมดวันปกติ และทดลองล็อก ST สาย 55 ด้วยแนว Template Route
 const ST55_TEMPLATE_KEEP_TOKENS = [
@@ -2049,7 +1952,7 @@ function buildNormalInitialRoute(start, list, targetStops = NORMAL_ROUTE_TARGET_
   const center = routeCentroid(pool);
   const limited = [...pool]
     .sort((a, b) => normalPointPickScore(start, center, a) - normalPointPickScore(start, center, b))
-    .slice(0, Math.min(pool.length, Math.max(24, targetStops * 3)));
+    .slice(0, Math.min(pool.length, Math.max(18, targetStops * 3)));
   const sectors = Array.from({ length: targetStops }, () => []);
   limited.forEach(p => {
     const angle = (angleAround(center, p) + Math.PI * 2) % (Math.PI * 2);
@@ -2130,8 +2033,12 @@ function buildOptimizedNormalRouteForGroup(meta) {
   if (isNormalST55Key(meta.bu, meta.meterKey)) {
     return buildST55TemplateRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
   }
-  // ทุกสายอื่นยังใช้ logic เบา ไม่ลอง combination หนัก
-  return buildNormalInitialRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
+  // ทุกสายอื่นยังใช้ logic เบาและมีขอบเขต ไม่ลอง combination หนัก
+  const startedAt = performance && performance.now ? performance.now() : Date.now();
+  const route = buildNormalInitialRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
+  const elapsed = (performance && performance.now ? performance.now() : Date.now()) - startedAt;
+  if (elapsed > NORMAL_ROUTE_COMPUTE_DEADLINE_MS) return route.slice(0, NORMAL_ROUTE_TARGET_STOPS);
+  return route;
 }
 
 function replacePlannedRowsForRoute(routeKey, rows) {
@@ -2154,13 +2061,19 @@ function replacePlannedRowsForRoute(routeKey, rows) {
 function ensureNormalRouteComputed(routeKey) {
   if (getPlanSettings().mode !== "normal") return false;
   if (!normalRouteLazyPools.has(routeKey) || normalRouteOptimizedKeys.has(routeKey)) return false;
-  const meta = normalRouteLazyPools.get(routeKey);
-  const ordered = buildOptimizedNormalRouteForGroup(meta);
-  if (!ordered.length) return false;
-  const rows = buildRowsForNormalRoute(ordered, meta);
-  replacePlannedRowsForRoute(routeKey, rows);
-  normalRouteOptimizedKeys.add(routeKey);
-  return true;
+  try {
+    const meta = normalRouteLazyPools.get(routeKey);
+    const ordered = buildOptimizedNormalRouteForGroup(meta);
+    if (!ordered.length) return false;
+    const rows = buildRowsForNormalRoute(ordered, meta);
+    replacePlannedRowsForRoute(routeKey, rows);
+    normalRouteOptimizedKeys.add(routeKey);
+    return true;
+  } catch (err) {
+    console.warn("normal route lazy compute failed", err);
+    normalRouteOptimizedKeys.add(routeKey);
+    return false;
+  }
 }
 
 function buildNormalPlanRows(marketRows) {
@@ -2424,9 +2337,7 @@ function renderRouteSummary(rows) {
   }
   if (!selectedRouteKey || !groups.has(selectedRouteKey)) selectedRouteKey = keys[0];
 
-  if (getPlanSettings().mode === "normal" && ensureNormalRouteComputed(selectedRouteKey)) {
-    return renderRouteSummary(plannedRows);
-  }
+  // โหมดวันปกติ: ยังไม่ optimize ทุกสายตอนเปิดหน้า คำนวณละเอียดเฉพาะเมื่อผู้ใช้คลิกการ์ดสายที่ต้องการ
 
   const visibleKeys = routeCollapsedToSelected && groups.has(selectedRouteKey) ? [selectedRouteKey] : keys;
   const showAllBtn = routeCollapsedToSelected && keys.length > 1
