@@ -1937,6 +1937,46 @@ function isNormalWNN58Key(bu, meterKey) {
   return cleanText(bu).toUpperCase() === "WNN" && normalizeMeter(meterKey) === "58";
 }
 
+
+// WNN สาย 58: จุดหลีกเลี่ยง "ตัวอำเภออากาศอำนวย" สำหรับช่วง 4 → 5
+// ใช้เฉพาะการให้คะแนนจุดทดแทนแบบเบา ไม่ไป query เส้นทางถนนหลายรอบ เพื่อไม่ให้ระบบค้าง
+const WNN58_AKAT_AMNUAI_CORE = { lat: 17.5985, lng: 103.9805 };
+const WNN58_AKAT_AVOID_RADIUS_KM = 5.8;
+
+function segmentAvoidPointPenalty(a, b, avoidPoint, radiusKm = 5) {
+  if (!a || !b || !Number.isFinite(Number(a.lat)) || !Number.isFinite(Number(a.lng)) ||
+      !Number.isFinite(Number(b.lat)) || !Number.isFinite(Number(b.lng))) return 0;
+  const proj = pointSegmentProjection(a, b, avoidPoint);
+  if (!proj) return 0;
+  if (proj.t <= 0.04 || proj.t >= 0.96) return 0;
+  if (proj.distKm >= radiusKm) return 0;
+  const inside = radiusKm - proj.distKm;
+  return 180 + inside * 55 + (0.5 - Math.abs(proj.t - 0.5)) * 90;
+}
+
+function wnn58AvoidAkatPenalty(prev, row, next) {
+  if (!row || !validCoord(row)) return 9999;
+  const avoid = WNN58_AKAT_AMNUAI_CORE;
+  const rowPoint = coordPoint(row);
+  let penalty = 0;
+  penalty += segmentAvoidPointPenalty(prev, rowPoint, avoid, WNN58_AKAT_AVOID_RADIUS_KM);
+  penalty += segmentAvoidPointPenalty(rowPoint, next, avoid, WNN58_AKAT_AVOID_RADIUS_KM);
+  const dTown = haversine(rowPoint, avoid);
+  if (dTown < WNN58_AKAT_AVOID_RADIUS_KM) {
+    penalty += (WNN58_AKAT_AVOID_RADIUS_KM - dTown) * 70;
+  }
+  return penalty;
+}
+
+function wnn58Point5CandidateScore(prev, next, row, routeRows, start) {
+  const base = insertionCandidateScore(prev, next, row, routeRows, start);
+  const avoid = wnn58AvoidAkatPenalty(coordPoint(prev), row, coordPoint(next));
+  const direct = haversine(coordPoint(prev), coordPoint(next));
+  const via = haversine(coordPoint(prev), coordPoint(row)) + haversine(coordPoint(row), coordPoint(next));
+  const detour = via - direct;
+  return base + avoid + Math.max(0, detour - 2) * 18;
+}
+
 function insertionCandidateScore(prev, next, row, routeRows, start) {
   const prevPoint = prev && validCoord(prev) ? coordPoint(prev) : start;
   const nextPoint = next && validCoord(next) ? coordPoint(next) : start;
@@ -2028,26 +2068,30 @@ function buildWNN58TemplateRoute(start, list, targetStops = NORMAL_ROUTE_TARGET_
     if (replacement3) route = [...routeWithoutPoint3.slice(0, 2), replacement3, ...routeWithoutPoint3.slice(2)].slice(0, targetStops);
   }
 
-  // Feedback ล่าสุด: ช่วงจุด 4 → 5 ถ้าอ้อมเข้าตัวอำเภอมาก ให้ลองเปลี่ยน “จุดที่ 5” เพียง 1 จุดแบบเบา
+  // Feedback ล่าสุด: ช่วงจุด 4 → 5 ห้ามเลือกจุดที่ทำให้ต้องอ้อมเข้า “ตัวอำเภออากาศอำนวย”
+  // แก้เฉพาะจุดที่ 5 แบบเบา โดยให้คะแนนลงโทษเส้น 4→5 และ 5→6 ที่พาดผ่านโซนตัวอำเภอ
   // ไม่เรียงใหม่ทั้งสายและไม่ลองหลาย combination เพื่อไม่ให้เกิด Page Unresponsive
   if (route.length >= 7) {
     const point4Index = 3;
     const point5Index = 4;
     const nextIndex = 5;
     const currentPoint5 = route[point5Index];
-    const currentScore = insertionCandidateScore(route[point4Index], route[nextIndex], currentPoint5, route, start);
+    const currentScore = wnn58Point5CandidateScore(route[point4Index], route[nextIndex], currentPoint5, route, start);
     const replacementPool5 = pool
       .filter(p => !route.some(s => isSameStop(s, p)))
       .filter(p => !removed.some(s => isSameStop(s, p)))
-      .sort((a, b) => insertionCandidateScore(route[point4Index], route[nextIndex], a, route, start) - insertionCandidateScore(route[point4Index], route[nextIndex], b, route, start))
-      .slice(0, 24);
+      .sort((a, b) => wnn58Point5CandidateScore(route[point4Index], route[nextIndex], a, route, start) - wnn58Point5CandidateScore(route[point4Index], route[nextIndex], b, route, start))
+      .slice(0, 18);
     const bestPoint5 = replacementPool5[0] || null;
     if (bestPoint5) {
-      const bestScore = insertionCandidateScore(route[point4Index], route[nextIndex], bestPoint5, route, start);
+      const bestScore = wnn58Point5CandidateScore(route[point4Index], route[nextIndex], bestPoint5, route, start);
       const currentLeg = haversine(coordPoint(route[point4Index]), coordPoint(currentPoint5));
-      const betterEnough = bestScore + 8 < currentScore;
+      const currentAkatPenalty = wnn58AvoidAkatPenalty(coordPoint(route[point4Index]), currentPoint5, coordPoint(route[nextIndex]));
+      const bestAkatPenalty = wnn58AvoidAkatPenalty(coordPoint(route[point4Index]), bestPoint5, coordPoint(route[nextIndex]));
+      const avoidsTownBetter = bestAkatPenalty + 35 < currentAkatPenalty;
+      const betterEnough = bestScore + 10 < currentScore;
       const currentLegLooksLong = currentLeg > 12;
-      if (betterEnough || currentLegLooksLong) {
+      if (avoidsTownBetter || betterEnough || currentLegLooksLong) {
         route[point5Index] = bestPoint5;
       }
     }
