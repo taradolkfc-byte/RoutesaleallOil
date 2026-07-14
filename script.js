@@ -56,7 +56,6 @@ function applySelectedRouteToForm(form) {
 }
 
 const CHECKIN_RADIUS_METER = 100;
-const MAX_STOPS_PER_DAY = 16;
 // จำกัดจำนวนจุดที่ส่งเข้า Map และ Google Maps ให้ตรงกัน ไม่เกิน 9 จุด ตามเงื่อนไขใช้งานจริง
 const MAX_ROUTE_CUSTOMER_STOPS = 9;
 // โหมดปรับปรุงปั๊มและตารางซ่อมใช้วงหลัก 7 จุด เพื่อตัดจุด 8-9 ที่หลุดวง/ทำให้ย้อนกลับ
@@ -83,6 +82,8 @@ let visitedSet = { ids: new Set(), names: new Set() };
 let customerMasterRows = [];
 let savedVisitRowsRaw = [];
 let savedHeaderMap = {};
+let normalRouteLazyPools = new Map();
+let normalRouteOptimizedKeys = new Set();
 
 /* ===== Fast load optimization 20260713 =====
    คงเงื่อนไขเส้นทางเดิม แต่ลดงานซ้ำระหว่างโหลด/เปลี่ยนตัวกรอง
@@ -479,10 +480,6 @@ function marketStatusFilterMatch(row, filterValue) {
   return true;
 }
 
-function hasMarketStatusFilterSelected() {
-  return !!getMarketStatusFilterValue();
-}
-
 function angleFromCenter(center, p) {
   return Math.atan2(toNumber(p.lat) - center.lat, toNumber(p.lng) - center.lng);
 }
@@ -505,47 +502,6 @@ function statusLoopRoutePenalty(start, route) {
   return penalty;
 }
 
-function orderStatusFilterRoute(start, points) {
-  // ใช้เฉพาะเมื่อเลือก Dropdown "เลือกสถานะ"
-  // หลักคือเรียงแบบกวาดรอบกลุ่มลูกค้าเป็นวงกลม ไม่ใช้การหาจุดใกล้สุดที่มักทำให้วกกลับไปมา
-  const valid = (points || []).filter(validCoord).map(p => ({ ...p }));
-  const noCoord = (points || []).filter(p => !validCoord(p));
-  if (valid.length <= 2) return [...valid, ...noCoord];
-
-  const center = {
-    lat: valid.reduce((sum, p) => sum + toNumber(p.lat), 0) / valid.length,
-    lng: valid.reduce((sum, p) => sum + toNumber(p.lng), 0) / valid.length
-  };
-
-  const baseAsc = [...valid].sort((a, b) => angleFromCenter(center, a) - angleFromCenter(center, b));
-  const baseDesc = [...baseAsc].reverse();
-  const candidates = [];
-
-  [baseAsc, baseDesc].forEach(base => {
-    for (let i = 0; i < base.length; i++) {
-      const rotated = [...base.slice(i), ...base.slice(0, i)];
-      candidates.push(rotated);
-      candidates.push(pullPointsThatAreOnTheWay(start, rotated));
-    }
-  });
-
-  const seen = new Set();
-  const unique = candidates.filter(route => {
-    const key = uniqueRouteCandidateKey(route);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
-  const best = (unique.length ? unique : [baseAsc])
-    .sort((a, b) => {
-      const sa = routeDistanceFromStart(start, a) + statusLoopRoutePenalty(start, a);
-      const sb = routeDistanceFromStart(start, b) + statusLoopRoutePenalty(start, b);
-      return sa - sb;
-    })[0] || baseAsc;
-
-  return [...best, ...noCoord];
-}
 function getUrgencyScore(urgency, dateObj) {
   const u = cleanText(urgency);
   const d = dateObj ? Math.ceil((dateObj - thaiNow()) / 86400000) : 99999;
@@ -1987,297 +1943,10 @@ function loopBacktrackPenalty(start, route) {
   return penalty;
 }
 
-function applyNormalRouteFieldFeedback(start, order, sourcePoints) {
-  // วันปกติ/ออกตลาดทั่วไปทุกสายใช้กติกาเดียวกัน:
-  // คัด 9 จุดให้เป็นวง, เรียงจุด 1 เป็นลูกค้าหลังออกจากฐาน และจุด 9 ก่อนกลับฐาน
-  // ไม่ใช้ hard-code เฉพาะสาย เพื่อไม่ให้สายอื่นเสียรูปเส้นทาง
-  return orderNormalMarketRoute(start, order || sourcePoints || []);
-}
-
-function isNormalST55Route(points) {
-  const valid = (points || []).filter(Boolean);
-  if (!valid.length) return false;
-  return valid.some(p => cleanText(p.bu).toUpperCase() === "ST") &&
-         valid.some(p => normalizeMeter(p.meter || p.meterKey) === "55");
-}
-
-function reorderByIndexPattern(order, pattern) {
-  if (!order || order.length < pattern.length) return order;
-  const out = [];
-  const used = new Set();
-  pattern.forEach(idx => {
-    if (idx >= 0 && idx < order.length && !used.has(idx)) {
-      out.push(order[idx]);
-      used.add(idx);
-    }
-  });
-  order.forEach((p, idx) => {
-    if (!used.has(idx)) out.push(p);
-  });
-  return out;
-}
-
-function st55LegacyReferenceRoute(start, list) {
-  // ฐานเดิมที่เคยใช้กับ ST สาย 55 ก่อนคัดจุดเสียออก
-  const chunk = uniqueRowsByIdName(list || []).filter(validCoord).slice(0, MAX_STOPS_PER_DAY);
-  if (chunk.length < NORMAL_ROUTE_TARGET_STOPS) {
-    return buildNormalCircularMarketRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
-  }
-
-  const circularSeed = buildCircularMarketPlanRoute(
-    start,
-    [],
-    chunk,
-    MAX_ROUTE_CUSTOMER_STOPS,
-    false
-  );
-
-  const orderedBase = hasMarketStatusFilterSelected()
-    ? orderStatusFilterRoute(start, circularSeed)
-    : orderNormalMarketRoute(start, circularSeed);
-
-  return reorderByIndexPattern(orderedBase, [0, 1, 2, 5, 6, 7, 8, 4, 3]).slice(0, NORMAL_ROUTE_TARGET_STOPS);
-}
-
-function st55ReplacementCandidateScore(start, center, keptRows, row) {
-  const dStart = haversine(start, coordPoint(row));
-  const dCenter = center ? haversine(center, coordPoint(row)) : 0;
-  const nearestKept = Math.min(...keptRows.map(k => haversine(coordPoint(k), coordPoint(row))));
-  const keptRadiusList = keptRows.map(k => center ? haversine(center, coordPoint(k)) : 0).sort((a, b) => a - b);
-  const medianRadius = keptRadiusList[Math.floor(keptRadiusList.length / 2)] || 1;
-  let ringPenalty = 0;
-  if (medianRadius > 1) {
-    if (dCenter > medianRadius * 1.60) ringPenalty += (dCenter - medianRadius * 1.60) * 7;
-    if (dCenter < medianRadius * 0.25) ringPenalty += (medianRadius * 0.25 - dCenter) * 10;
-  }
-  return candidateBaseScore(row) * 0.75 + dStart * 0.08 + dCenter * 0.28 + nearestKept * 0.20 + ringPenalty;
-}
-
-function limitedCombinations(items, choose, limit = 5000) {
-  const result = [];
-  const combo = [];
-  function walk(startIndex) {
-    if (result.length >= limit) return;
-    if (combo.length === choose) {
-      result.push([...combo]);
-      return;
-    }
-    const need = choose - combo.length;
-    for (let i = startIndex; i <= items.length - need; i++) {
-      combo.push(items[i]);
-      walk(i + 1);
-      combo.pop();
-      if (result.length >= limit) return;
-    }
-  }
-  walk(0);
-  return result;
-}
-
-function orderST55AnchoredTail(start, firstTwo, restRows) {
-  // บังคับจุด 1 และ 2 ตามที่ผู้ใช้ยืนยันว่า “ได้” แล้ว
-  // จากนั้นค่อยเรียงจุดที่เหลือให้วิ่งวนเป็นวง ไม่ย้อนกลับไปมา
-  const fixed = uniqueRowsByIdName(firstTwo || []).filter(validCoord).slice(0, 2);
-  const rest = uniqueRowsByIdName(restRows || [])
-    .filter(validCoord)
-    .filter(p => !fixed.some(f => isSameStop(f, p)));
-  if (fixed.length < 2 || rest.length <= 1) return [...fixed, ...rest];
-
-  const candidates = [];
-  const add = (tail) => {
-    const cleanTail = uniqueRowsByIdName(tail || []).filter(validCoord).filter(p => !fixed.some(f => isSameStop(f, p)));
-    if (cleanTail.length !== rest.length) return;
-    const route = [...fixed, ...cleanTail];
-    const key = uniqueRouteCandidateKey(route);
-    if (!candidates.some(c => uniqueRouteCandidateKey(c) === key)) candidates.push(route);
-  };
-
-  const centers = [routeCentroid([...fixed, ...rest]), routeCentroid(rest), coordPoint(fixed[1]), start];
-  centers.forEach(center => {
-    if (!center || !Number.isFinite(Number(center.lat)) || !Number.isFinite(Number(center.lng))) return;
-    const asc = [...rest].sort((a, b) => angleAround(center, a) - angleAround(center, b));
-    const desc = [...asc].reverse();
-    [asc, desc].forEach(base => {
-      for (let i = 0; i < base.length; i++) {
-        add([...base.slice(i), ...base.slice(0, i)]);
-      }
-    });
-  });
-
-  add(nearestNeighborOrder(coordPoint(fixed[1]), rest));
-  add(farthestInsertionOrder(coordPoint(fixed[1]), rest));
-  add(orderNormalMarketRoute(start, [...fixed, ...rest]).filter(p => !fixed.some(f => isSameStop(f, p))));
-
-  return (candidates.length ? candidates : [[...fixed, ...rest]])
-    .sort((a, b) => st55ExactRouteScore(start, a, fixed, []) - st55ExactRouteScore(start, b, fixed, []))[0];
-}
-
-function st55ExactRouteScore(start, route, fixedFirstTwo = [], bannedRows = []) {
-  const rows = (route || []).filter(validCoord);
-  if (rows.length !== NORMAL_ROUTE_TARGET_STOPS) return 999999;
-  let score = normalMarketRouteScore(start, rows);
-  score += routeSelectionScore(start, rows, fixedFirstTwo) * 0.45;
-  score += revisitPassedPointPenalty(start, rows) * 1.35;
-  score += routeSpikePenalty(start, rows, fixedFirstTwo) * 1.10;
-  score += normalEndpointPenalty(start, rows) * 1.20;
-
-  // จุด 1 และ 2 ต้องไม่เปลี่ยน เพราะผู้ใช้ยืนยันว่าได้แล้ว
-  if (fixedFirstTwo[0] && !isSameStop(rows[0], fixedFirstTwo[0])) score += 100000;
-  if (fixedFirstTwo[1] && !isSameStop(rows[1], fixedFirstTwo[1])) score += 100000;
-
-  // ห้ามใช้จุดเดิมที่ผู้ใช้ระบุให้ตัดออก: 3, 9, 6, 7 ของผลรอบก่อน
-  bannedRows.forEach(b => {
-    if (rows.some(r => isSameStop(r, b))) score += 100000;
-  });
-
-  if (approxRoadDistanceKm(start, rows) > MAX_ROUTE_DISTANCE_KM) score += (approxRoadDistanceKm(start, rows) - MAX_ROUTE_DISTANCE_KM) * 35;
-
-  // ลดเคสที่จุด 3 เป็นต้นไปวกกลับเข้ากลางเส้นทางก่อนออกไปใหม่
-  const ds = rows.map(p => haversine(start, coordPoint(p)));
-  const maxD = Math.max(...ds, 1);
-  for (let i = 2; i < rows.length - 2; i++) {
-    if (ds[i] < maxD * 0.32 && ds[i + 1] > ds[i] + maxD * 0.20) score += 140;
-  }
-  return score;
-}
-
-function buildNormalST55ReferenceRoute(start, list) {
-  // แก้เฉพาะ ST สาย 55 ตามคำสั่งล่าสุด:
-  // คงจุดเดิมที่ผู้ใช้บอกว่า “ได้” = จุด 1, 2, 8, 4, 5 ของผลรอบก่อน
-  // ตัดจุดเดิม 3, 9, 6, 7 ออก แล้วหาจุดใหม่จาก ST สาย 55 มาแทน
-  // เป้าหมายคือยังคง 9 จุด แต่ให้เส้นทางวนเป็นวง ไม่วิ่งย้อนกลับไปมา
-  const allPool = uniqueRowsByIdName(list || []).filter(validCoord);
-  if (allPool.length < NORMAL_ROUTE_TARGET_STOPS) {
-    return buildNormalCircularMarketRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
-  }
-
-  const legacy = st55LegacyReferenceRoute(start, list).filter(validCoord).slice(0, NORMAL_ROUTE_TARGET_STOPS);
-  if (legacy.length < NORMAL_ROUTE_TARGET_STOPS) return legacy;
-
-  // index จากผลล่าสุด: keep 1,2,8,4,5 / remove 3,9,6,7
-  const keepIndexes = [0, 1, 7, 3, 4];
-  const bannedIndexes = [2, 8, 5, 6];
-  const kept = uniqueRowsByIdName(keepIndexes.map(i => legacy[i]).filter(Boolean)).filter(validCoord);
-  const banned = uniqueRowsByIdName(bannedIndexes.map(i => legacy[i]).filter(Boolean)).filter(validCoord);
-
-  if (kept.length < 5) return legacy;
-
-  const firstTwo = [legacy[0], legacy[1]];
-  const keptRest = [legacy[7], legacy[3], legacy[4]].filter(Boolean);
-  const need = NORMAL_ROUTE_TARGET_STOPS - kept.length;
-  const center = routeCentroid(kept);
-  const pool = allPool
-    .filter(p => !kept.some(k => isSameStop(k, p)))
-    .filter(p => !banned.some(b => isSameStop(b, p)))
-    .sort((a, b) => st55ReplacementCandidateScore(start, center, kept, a) - st55ReplacementCandidateScore(start, center, kept, b))
-    .slice(0, 20);
-
-  if (pool.length < need) {
-    return orderST55AnchoredTail(start, firstTwo, [...keptRest, ...pool]).slice(0, NORMAL_ROUTE_TARGET_STOPS);
-  }
-
-  const combos = limitedCombinations(pool, need, 5000);
-  let best = null;
-
-  combos.forEach(combo => {
-    const tailRows = [...keptRest, ...combo];
-    const route = orderST55AnchoredTail(start, firstTwo, tailRows).slice(0, NORMAL_ROUTE_TARGET_STOPS);
-    if (route.length !== NORMAL_ROUTE_TARGET_STOPS) return;
-    const mustKeep = kept.every(k => route.some(r => isSameStop(r, k)));
-    if (!mustKeep) return;
-    const score = st55ExactRouteScore(start, route, firstTwo, banned);
-    if (!best || score < best.score) best = { route, score };
-  });
-
-  return best ? best.route : orderST55AnchoredTail(start, firstTwo, [...keptRest, ...pool.slice(0, need)]).slice(0, NORMAL_ROUTE_TARGET_STOPS);
-}
-
-
 function scoreNormalCandidateForPool(start, center, row) {
   const dStart = haversine(start, coordPoint(row));
   const dCenter = center ? haversine(center, coordPoint(row)) : 0;
   return candidateBaseScore(row) * 0.75 + dStart * 0.08 + dCenter * 0.35;
-}
-
-function buildNormalSectorSets(start, pool, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
-  const cleanPool = uniqueRowsByIdName(pool || []).filter(validCoord)
-    .sort((a, b) => (candidateBaseScore(a) + haversine(start, coordPoint(a)) * 0.06) - (candidateBaseScore(b) + haversine(start, coordPoint(b)) * 0.06))
-    .slice(0, NORMAL_ROUTE_POOL_LIMIT);
-  if (cleanPool.length <= targetStops) return [cleanPool];
-
-  const centers = [routeCentroid(cleanPool.slice(0, Math.min(30, cleanPool.length))), routeCentroid(cleanPool), start];
-  const offsets = [0, 0.38, 0.76];
-  const sets = [];
-  const addSet = (rows) => {
-    const selected = uniqueRowsByIdName(rows || []).filter(validCoord).slice(0, targetStops);
-    if (selected.length >= Math.min(targetStops, MIN_ROUTE_CUSTOMER_STOPS)) sets.push(selected);
-  };
-
-  centers.forEach(center => {
-    if (!center || !Number.isFinite(Number(center.lat)) || !Number.isFinite(Number(center.lng))) return;
-    offsets.forEach(offset => {
-      const sectors = Array.from({ length: targetStops }, () => []);
-      cleanPool.forEach(p => {
-        const angle = (angleAround(center, p) + Math.PI * 2 + offset * Math.PI * 2 / targetStops) % (Math.PI * 2);
-        const sector = Math.min(targetStops - 1, Math.floor(angle / (Math.PI * 2 / targetStops)));
-        sectors[sector].push({ p, score: scoreNormalCandidateForPool(start, center, p) });
-      });
-      sectors.forEach(sec => sec.sort((a, b) => a.score - b.score));
-      const picked = [];
-      sectors.forEach(sec => {
-        const hit = sec.find(x => !picked.some(s => isSameStop(s, x.p)));
-        if (hit) picked.push(hit.p);
-      });
-      for (const p of cleanPool) {
-        if (picked.length >= targetStops) break;
-        if (!picked.some(s => isSameStop(s, p))) picked.push(p);
-      }
-      addSet(picked);
-    });
-  });
-
-  // ชุดสำรอง: ใกล้ฐาน + คะแนนลูกค้าดี แต่ยังให้ orderNormalMarketRoute จัดเป็นวงอีกครั้ง
-  addSet(cleanPool.slice(0, targetStops));
-
-  const seen = new Set();
-  return sets.filter(set => {
-    const key = routeKeyForSet(set);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  }).slice(0, 10);
-}
-
-function improveNormalRouteSetByReplacement(start, route, pool, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
-  let current = orderNormalMarketRoute(start, route).slice(0, targetStops);
-  let currentScore = normalMarketRouteScore(start, current);
-  const candidates = uniqueRowsByIdName(pool || [])
-    .filter(validCoord)
-    .filter(p => !current.some(r => isSameStop(r, p)))
-    .sort((a, b) => (candidateBaseScore(a) + haversine(start, coordPoint(a)) * 0.06) - (candidateBaseScore(b) + haversine(start, coordPoint(b)) * 0.06))
-    .slice(0, 24);
-
-  // เปลี่ยนจุดที่ทำให้เส้นทางแย่ที่สุด 1 จุดพอ เพื่อคงความเร็ว
-  let worstIndex = -1;
-  let bestSaving = -Infinity;
-  const base = routeDistanceFromStart(start, current);
-  current.forEach((row, idx) => {
-    const trial = current.filter((_, i) => i !== idx);
-    const saving = base - routeDistanceFromStart(start, trial);
-    if (saving > bestSaving) { bestSaving = saving; worstIndex = idx; }
-  });
-  if (worstIndex < 0) return current;
-
-  let best = null;
-  for (const cand of candidates) {
-    const trialSet = current.map((r, idx) => idx === worstIndex ? cand : r);
-    const ordered = orderNormalMarketRoute(start, trialSet).slice(0, targetStops);
-    if (ordered.length !== current.length) continue;
-    if (approxRoadDistanceKm(start, ordered) > MAX_ROUTE_DISTANCE_KM) continue;
-    const score = normalMarketRouteScore(start, ordered);
-    if (score + 0.5 < currentScore && (!best || score < best.score)) best = { ordered, score };
-  }
-  return best ? best.ordered : current;
 }
 
 function buildNormalCircularMarketRoute(start, candidateRows, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
@@ -2328,15 +1997,182 @@ function buildNormalCircularMarketRoute(start, candidateRows, targetStops = NORM
   return ordered;
 }
 
+
+// ===== Normal route lazy + ST55 template route 20260714 =====
+// เป้าหมาย: ลดการคำนวณตอนเปิดโหมดวันปกติ และทดลองล็อก ST สาย 55 ด้วยแนว Template Route
+const ST55_TEMPLATE_KEEP_TOKENS = [
+  "ST60061",
+  "ST60136",
+  "ST60027",
+  "ST680417",
+  "แม่พันธ์ ปั๊มหลอด"
+];
+const ST55_TEMPLATE_EXCLUDE_TOKENS = [
+  "ST55006",
+  "ST60028",
+  "ST60005",
+  "พ.ทรัพย์เจริญ แม่พัน"
+];
+
+function rowTextForTemplate(row) {
+  return norm(`${row && row.customer_id || ""} ${row && row.customer_name || ""}`);
+}
+
+function rowMatchesAnyTemplateToken(row, tokens) {
+  const text = rowTextForTemplate(row);
+  return (tokens || []).some(token => {
+    const t = norm(token);
+    return t && text.includes(t);
+  });
+}
+
+function isNormalST55Key(bu, meterKey) {
+  return cleanText(bu).toUpperCase() === "ST" && normalizeMeter(meterKey) === "55";
+}
+
+function buildRowsForNormalRoute(ordered, meta) {
+  return (ordered || []).filter(validCoord).slice(0, MAX_ROUTE_CUSTOMER_STOPS).map((row, idx) => ({
+    ...row,
+    plan_day: 1,
+    plan_date: meta.planDate || thaiNow(),
+    route_group: meta.routeId,
+    stop_no: `${idx + 1}/${ordered.length}`,
+    start_name: meta.start.name,
+    priorityLabel: row.priorityLabel || statusGroup(row.status)
+  }));
+}
+
+function buildNormalInitialRoute(start, list, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
+  // แผนเริ่มต้นแบบเร็ว: เลือกจาก pool จำกัด แล้วเรียงเป็นวง ไม่ลองแทนจุดหลายรอบ
+  const pool = uniqueRowsByIdName(list || []).filter(validCoord);
+  if (pool.length <= targetStops) return orderNormalMarketRoute(start, pool).slice(0, targetStops);
+  const center = routeCentroid(pool);
+  const limited = [...pool]
+    .sort((a, b) => normalPointPickScore(start, center, a) - normalPointPickScore(start, center, b))
+    .slice(0, Math.min(pool.length, Math.max(24, targetStops * 3)));
+  const sectors = Array.from({ length: targetStops }, () => []);
+  limited.forEach(p => {
+    const angle = (angleAround(center, p) + Math.PI * 2) % (Math.PI * 2);
+    const sector = Math.min(targetStops - 1, Math.floor(angle / (Math.PI * 2 / targetStops)));
+    sectors[sector].push(p);
+  });
+  sectors.forEach(sec => sec.sort((a, b) => normalPointPickScore(start, center, a) - normalPointPickScore(start, center, b)));
+  const selected = [];
+  sectors.forEach(sec => {
+    const hit = sec.find(p => !selected.some(s => isSameStop(s, p)));
+    if (hit) selected.push(hit);
+  });
+  for (const p of limited) {
+    if (selected.length >= targetStops) break;
+    if (!selected.some(s => isSameStop(s, p))) selected.push(p);
+  }
+  return orderNormalMarketRoute(start, selected.slice(0, targetStops)).slice(0, targetStops);
+}
+
+function buildST55TemplateRoute(start, list, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
+  // ST55 template: ล็อกจุดที่ผู้ใช้ยืนยันว่า “ได้” และตัดจุดที่ระบุว่าไม่เอาออก
+  // จากนั้นเติมจุดใหม่จากสายเดียวกันด้วยวิธีเบา ไม่ลอง combination จำนวนมาก
+  const pool = uniqueRowsByIdName(list || []).filter(validCoord);
+  const selected = [];
+
+  ST55_TEMPLATE_KEEP_TOKENS.forEach(token => {
+    const hit = pool.find(p => !selected.some(s => isSameStop(s, p)) && rowMatchesAnyTemplateToken(p, [token]));
+    if (hit) selected.push(hit);
+  });
+
+  const usable = pool
+    .filter(p => !selected.some(s => isSameStop(s, p)))
+    .filter(p => !rowMatchesAnyTemplateToken(p, ST55_TEMPLATE_EXCLUDE_TOKENS));
+
+  const center = routeCentroid(selected.length ? [...selected, ...usable.slice(0, 16)] : usable);
+  const sectors = Array.from({ length: targetStops }, () => []);
+  usable.forEach(p => {
+    const angle = (angleAround(center, p) + Math.PI * 2) % (Math.PI * 2);
+    const sector = Math.min(targetStops - 1, Math.floor(angle / (Math.PI * 2 / targetStops)));
+    const score = normalPointPickScore(start, center, p) + routeSpikePenalty(start, [...selected, p], []) * 0.35;
+    sectors[sector].push({ p, score });
+  });
+  sectors.forEach(sec => sec.sort((a, b) => a.score - b.score));
+
+  // เติมจาก sector ที่ยังไม่มีจุดก่อน เพื่อให้กระจายเป็นวง
+  const usedSector = (row) => {
+    const angle = (angleAround(center, row) + Math.PI * 2) % (Math.PI * 2);
+    return Math.min(targetStops - 1, Math.floor(angle / (Math.PI * 2 / targetStops)));
+  };
+  const occupied = new Set(selected.map(usedSector));
+  for (let i = 0; i < sectors.length && selected.length < targetStops; i++) {
+    if (occupied.has(i)) continue;
+    const hit = sectors[i].find(x => !selected.some(s => isSameStop(s, x.p)));
+    if (hit) {
+      selected.push(hit.p);
+      occupied.add(i);
+    }
+  }
+
+  // เติมให้ครบ 9 จุดจากจุดที่ดีที่สุดที่เหลือ
+  const flat = sectors.flat().sort((a, b) => a.score - b.score).map(x => x.p);
+  for (const p of flat) {
+    if (selected.length >= targetStops) break;
+    if (!selected.some(s => isSameStop(s, p))) selected.push(p);
+  }
+
+  // ถ้ายังไม่ครบ ใช้ pool ทั้งสายเป็นสำรอง แต่ยังตัดจุด bad ก่อน
+  for (const p of usable) {
+    if (selected.length >= targetStops) break;
+    if (!selected.some(s => isSameStop(s, p))) selected.push(p);
+  }
+
+  return orderNormalMarketRoute(start, selected.slice(0, targetStops)).slice(0, targetStops);
+}
+
+function buildOptimizedNormalRouteForGroup(meta) {
+  if (!meta || !Array.isArray(meta.list)) return [];
+  if (isNormalST55Key(meta.bu, meta.meterKey)) {
+    return buildST55TemplateRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
+  }
+  // ทุกสายอื่นยังใช้ logic เบา ไม่ลอง combination หนัก
+  return buildNormalInitialRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
+}
+
+function replacePlannedRowsForRoute(routeKey, rows) {
+  let inserted = false;
+  const next = [];
+  for (const row of plannedRows) {
+    if (row.route_group === routeKey) {
+      if (!inserted) {
+        next.push(...rows);
+        inserted = true;
+      }
+      continue;
+    }
+    next.push(row);
+  }
+  if (!inserted) next.push(...rows);
+  plannedRows = next;
+}
+
+function ensureNormalRouteComputed(routeKey) {
+  if (getPlanSettings().mode !== "normal") return false;
+  if (!normalRouteLazyPools.has(routeKey) || normalRouteOptimizedKeys.has(routeKey)) return false;
+  const meta = normalRouteLazyPools.get(routeKey);
+  const ordered = buildOptimizedNormalRouteForGroup(meta);
+  if (!ordered.length) return false;
+  const rows = buildRowsForNormalRoute(ordered, meta);
+  replacePlannedRowsForRoute(routeKey, rows);
+  normalRouteOptimizedKeys.add(routeKey);
+  return true;
+}
+
 function buildNormalPlanRows(marketRows) {
   const today = thaiNow();
   const selectedBU = getSelectedStartBU();
   const selectedMarketStatus = getMarketStatusFilterValue();
+  normalRouteLazyPools = new Map();
+  normalRouteOptimizedKeys = new Set();
+
   const candidates = marketRows
     .filter(r => !selectedBU || cleanText(r.bu).toUpperCase() === selectedBU.toUpperCase())
-    /* ใช้เฉพาะ Dropdown "เลือกสถานะ" เท่านั้น ไม่กระทบโหมดวางแผนอื่น */
     .filter(r => marketStatusFilterMatch(r, selectedMarketStatus))
-    /* แสดงจุดที่เช็คอินสำเร็จไว้ในแผน เพื่อให้ขึ้นเครื่องหมายถูก */
     .filter(validCoord)
     .sort((a,b) => (marketScore(a.status) - marketScore(b.status)) || cleanText(a.bu).localeCompare(cleanText(b.bu), "th") || cleanText(a.meterKey).localeCompare(cleanText(b.meterKey), "th"));
 
@@ -2350,27 +2186,20 @@ function buildNormalPlanRows(marketRows) {
   const output = [];
   groups.forEach((list, key) => {
     const [bu, meterKey] = key.split("|");
-    // ยกเลิกวันล่วงหน้า: คำนวณเฉพาะชุดแรกของวันปัจจุบัน
-    // ใช้ pool ทั้งสายในการคัด 9 จุด ไม่ใช่ slice แค่ 16 จุดแรก เพื่อให้ระบบเลือกจุดที่อยู่ในวงได้ดีกว่า
     if (!list.length) return;
     const planDate = today;
     const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
     const start = startForRoute(list);
-    const ordered = isNormalST55Route(list)
-      ? buildNormalST55ReferenceRoute(start, list)
-      : buildNormalCircularMarketRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
-    ordered.forEach((row, idx) => output.push({
-      ...row,
-      plan_day: 1,
-      plan_date: planDate,
-      route_group: routeId,
-      stop_no: `${idx + 1}/${ordered.length}`,
-      start_name: start.name,
-      priorityLabel: row.priorityLabel || statusGroup(row.status)
-    }));
+    const meta = { routeId, start, list, bu, meterKey, planDate };
+    normalRouteLazyPools.set(routeId, meta);
+
+    // สร้างแผนเบื้องต้นแบบเบาเพื่อให้เปิดหน้าเร็ว แล้วค่อย optimize เฉพาะสายที่คลิกดู
+    const ordered = buildNormalInitialRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
+    output.push(...buildRowsForNormalRoute(ordered, meta));
   });
   return output;
 }
+
 
 function nearestStartPointForRow(row) {
   if (!validCoord(row)) return START_POINTS[0];
@@ -2595,6 +2424,10 @@ function renderRouteSummary(rows) {
   }
   if (!selectedRouteKey || !groups.has(selectedRouteKey)) selectedRouteKey = keys[0];
 
+  if (getPlanSettings().mode === "normal" && ensureNormalRouteComputed(selectedRouteKey)) {
+    return renderRouteSummary(plannedRows);
+  }
+
   const visibleKeys = routeCollapsedToSelected && groups.has(selectedRouteKey) ? [selectedRouteKey] : keys;
   const showAllBtn = routeCollapsedToSelected && keys.length > 1
     ? `<button id="showRouteCardsBtn" class="route-show-all" type="button">แสดงแผนทั้งหมด</button>`
@@ -2618,6 +2451,7 @@ function renderRouteSummary(rows) {
   box.querySelectorAll(".route-button").forEach(btn => btn.addEventListener("click", () => {
     selectedRouteKey = btn.dataset.routeKey;
     routeCollapsedToSelected = true;
+    ensureNormalRouteComputed(selectedRouteKey);
     renderRouteSummary(plannedRows);
   }));
   renderRouteDetail(groups.get(selectedRouteKey) || []);
