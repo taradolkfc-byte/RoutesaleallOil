@@ -2303,21 +2303,21 @@ function buildGenericNormalLoopLikeWNN58Route(start, list, targetStops = NORMAL_
 // ใช้เฉพาะโหมดวันปกติ/ออกตลาดทั่วไป และคำนวณเฉพาะสายที่ผู้ใช้คลิกผ่าน lazy compute
 // เป้าหมาย: นำ feedback รายสายจากแผนที่มาใช้แบบเบา ไม่ลอง combination จำนวนมาก และไม่กระทบโหมดปรับปรุงปั๊ม/ตารางซ่อม
 const NORMAL_MANUAL_ROUTE_RULES = {
-  "55": { removeIndexes: [7], note: "ตัดจุด 8 ที่อยู่นอกวง" },
-  "60": { removeIndexes: [3], note: "ตัดจุด 4 ที่อยู่นอกวง" },
-  "67": { removeIndexes: [6, 7, 8], note: "ตัดจุด 7-9 ที่อยู่นอกวง" },
-  // สาย 69: ตัดเดิมจุด 1 และย้ายเดิมจุด 7-8 ให้อยู่ท้ายก่อนกลับฐาน เพื่อลดการขี่เลยกลับไปเก็บเดิมจุด 9
-  "69": { pattern: [2, 3, 4, 5, 6, 9, "NEW", 7, 8], excludeOldIndexes: [0], note: "ตัดจุด 1 แล้วเรียงใหม่ให้ 7-8 อยู่ท้ายก่อนกลับฐาน" },
-  // สาย 72: ตาม feedback ล่าสุด ตัดเดิมจุด 4 และเรียง 9→1→2→3→5→6→7→8→จุดใหม่
-  "72": { pattern: [9, 1, 2, 3, 5, 6, 7, 8, "NEW"], excludeOldIndexes: [3], note: "ตัดจุด 4 แล้วเรียงลำดับใหม่ตาม feedback" },
-  // สาย 57: ใช้ลำดับที่ผู้ใช้ให้มาเดิม 8→7→1→2→6→5→4→3→9
-  "57": { pattern: [8, 7, 1, 2, 6, 5, 4, 3, 9], note: "เรียงลำดับใหม่ตาม feedback" },
-  // สาย 65: feedback ล่าสุดให้ตัดเดิมจุด 9 ออกและหาจุดใหม่แทน
-  "65": { removeIndexes: [8], note: "ตัดจุด 9 ที่อยู่นอกวง" },
-  "66": { rebuild: true, reorderAfter: true, note: "ออกแบบใหม่ทั้งชุด" },
-  "61": { removeIndexes: [4, 5], note: "ตัดจุด 5-6 ที่อยู่นอกวง" },
-  "71": { removeIndexes: [3, 8], note: "ตัดจุด 4 และ 9 ที่อยู่นอกวง" }
-};
+  // คงสายที่ผู้ใช้ยืนยันว่าดีไว้ตามฐาน v1 / lazy ไม่บังคับทับทุกสายตอนโหลดหน้า
+  "55": { removeIndexes: [7], note: "คงกติกาเดิม: ตัดจุด 8 ที่อยู่นอกวง" },
+  "58": { keepWNN58Special: true, note: "คง logic เฉพาะ WNN58 ที่ผู้ใช้ยืนยันว่าดี" },
+
+  // ปรับเฉพาะสายที่ยังต้องแก้ตาม feedback ล่าสุด
+  "60": { removeIndexes: [3], reorderAfter: true, note: "ตัดจุด 4 และเรียงใหม่เพื่อลดเส้นทางเกิน" },
+  "67": { pattern: [1, 2, 3, 4, 5, 6, 7, 9, 8], note: "เรียงลำดับท้ายใหม่: เดิม 7→7, เดิม 9→8, เดิม 8→9" },
+  "69": { removeIndexes: [0], reorderAfter: true, note: "ย้อนกลับใช้กติกาก่อนหน้า: ตัดจุด 1 และเรียงวงใหม่" },
+  "61": { removeIndexes: [3], reorderAfter: true, note: "ตัดจุด 4 ที่เป็นจุดนอกเส้นทาง" },
+  "72": { rebuild: true, note: "ย้อนกลับใช้กติกาก่อนหน้า: ออกแบบใหม่ทั้งชุดแบบเบา" },
+  "57": { pattern: [8, 7, 1, 2, 6, 5, 4, 3, 9], note: "ย้อนกลับใช้ pattern ก่อนหน้าแบบ lazy" },
+  "65": { pattern: [9, 2, 3, 4, 5, 6, 7, 8, "NEW"], excludeOldIndexes: [0], note: "ย้อนกลับใช้กติกาก่อนหน้า: เอาเดิมจุด 9 เป็นจุด 1 และแทนเดิมจุด 1" },
+  "66": { removeIndexes: [8], reorderAfter: true, note: "ตัดจุด 9 ที่อยู่นอกเส้นทาง" }
+  // หมายเหตุ: สาย 71 ไม่ใส่ manual rule แล้ว เพื่อคงผลดีจาก logic กลางเดิมตามที่ผู้ใช้ยืนยัน
+}
 
 function normalManualRuleForMeta(meta) {
   if (!meta || getPlanSettings().mode !== "normal") return null;
@@ -2548,14 +2548,8 @@ function buildNormalPlanRows(marketRows) {
     const meta = { routeId, start, list, bu, meterKey, planDate };
     normalRouteLazyPools.set(routeId, meta);
 
-    // สร้างแผนเบื้องต้นแบบเบาเพื่อให้เปิดหน้าเร็ว
-    // ถ้าสายนี้มี manual feedback รายสาย ให้ใช้กติกานั้นทันทีทั้งในการ์ดและแผนที่
-    // เพื่อให้ผู้ใช้เห็นผลทันทีโดยไม่ต้องพึ่งการ optimize หนักตอนคลิก
-    let ordered = buildNormalInitialRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
-    if (normalManualRuleForMeta(meta)) {
-      ordered = applyNormalManualFeedback(meta, ordered);
-      normalRouteOptimizedKeys.add(routeId);
-    }
+    // สร้างแผนเบื้องต้นแบบเบาเพื่อให้เปิดหน้าเร็ว แล้วค่อย optimize เฉพาะสายที่คลิกดู
+    const ordered = buildNormalInitialRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
     output.push(...buildRowsForNormalRoute(ordered, meta));
   });
   return output;
