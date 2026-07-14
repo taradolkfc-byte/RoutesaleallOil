@@ -2297,14 +2297,186 @@ function buildGenericNormalLoopLikeWNN58Route(start, list, targetStops = NORMAL_
   return route.slice(0, targetStops);
 }
 
+
+
+// ===== Normal route manual feedback rules 20260714 =====
+// ใช้เฉพาะโหมดวันปกติ/ออกตลาดทั่วไป และคำนวณเฉพาะสายที่ผู้ใช้คลิกผ่าน lazy compute
+// เป้าหมาย: นำ feedback รายสายจากแผนที่มาใช้แบบเบา ไม่ลอง combination จำนวนมาก และไม่กระทบโหมดปรับปรุงปั๊ม/ตารางซ่อม
+const NORMAL_MANUAL_ROUTE_RULES = {
+  "55": { removeIndexes: [7], note: "ตัดจุด 8 ที่อยู่นอกวง" },
+  "60": { removeIndexes: [3], note: "ตัดจุด 4 ที่อยู่นอกวง" },
+  "67": { removeIndexes: [6, 7, 8], note: "ตัดจุด 7-9 ที่อยู่นอกวง" },
+  "69": { removeIndexes: [0], reorderAfter: true, note: "ตัดจุด 1 และเรียงวงใหม่" },
+  "72": { rebuild: true, note: "ออกแบบใหม่ทั้งชุด" },
+  // ผู้ใช้ให้ pattern สาย 57 โดยพิมพ์เดิมจุด 8 ซ้ำ 2 ครั้ง จึงตีความตำแหน่งที่ 4 เป็นเดิมจุด 2 เพื่อให้ครบ 1-9 ไม่ซ้ำ
+  "57": { pattern: [8, 7, 1, 2, 6, 5, 4, 3, 9], note: "เรียงลำดับใหม่ตาม feedback" },
+  "65": { pattern: [9, 2, 3, 4, 5, 6, 7, 8, "NEW"], excludeOldIndexes: [0], note: "เอาเดิมจุด 9 เป็นจุด 1 และแทนเดิมจุด 1" },
+  "61": { removeIndexes: [4, 5], note: "ตัดจุด 5-6 ที่อยู่นอกวง" },
+  "71": { removeIndexes: [3, 8], note: "ตัดจุด 4 และ 9 ที่อยู่นอกวง" }
+};
+
+function normalManualRuleForMeta(meta) {
+  if (!meta || getPlanSettings().mode !== "normal") return null;
+  return NORMAL_MANUAL_ROUTE_RULES[normalizeMeter(meta.meterKey)] || null;
+}
+
+function routeWithoutSameStops(rows, stops) {
+  return (rows || []).filter(r => !(stops || []).some(s => isSameStop(r, s)));
+}
+
+function manualReplacementScore(start, routeRows, insertIndex, row) {
+  const prev = insertIndex <= 0 ? null : routeRows[insertIndex - 1];
+  const next = insertIndex >= routeRows.length ? null : routeRows[insertIndex];
+  const base = insertionCandidateScore(prev, next, row, routeRows, start);
+  const trial = [...routeRows.slice(0, insertIndex), row, ...routeRows.slice(insertIndex)];
+  const localScore = routeScoreForNormalSlotPlan(start, trial) * 0.08;
+  const center = routeCentroid(routeRows.length ? routeRows : trial);
+  const centerDist = center ? haversine(center, coordPoint(row)) : 0;
+  const startDist = haversine(start, coordPoint(row));
+  return base + localScore + centerDist * 0.18 + startDist * 0.04;
+}
+
+function findManualReplacementPoint(start, routeRows, pool, insertIndex, blockedRows = []) {
+  const candidates = uniqueRowsByIdName(pool || [])
+    .filter(validCoord)
+    .filter(p => !(blockedRows || []).some(s => isSameStop(s, p)))
+    .filter(p => !(routeRows || []).some(s => isSameStop(s, p)))
+    .sort((a, b) => manualReplacementScore(start, routeRows, insertIndex, a) - manualReplacementScore(start, routeRows, insertIndex, b))
+    .slice(0, 24);
+  return candidates[0] || null;
+}
+
+function refillRouteToTarget(start, routeRows, pool, targetStops = NORMAL_ROUTE_TARGET_STOPS, blockedRows = []) {
+  let route = uniqueRowsByIdName(routeRows || []).filter(validCoord).slice(0, targetStops);
+  const blocked = uniqueRowsByIdName([...(blockedRows || []), ...route]);
+  while (route.length < targetStops) {
+    const insertIndex = Math.max(0, route.length - 1);
+    const hit = findManualReplacementPoint(start, route, pool, insertIndex, blocked);
+    if (!hit) break;
+    route.splice(insertIndex, 0, hit);
+    blocked.push(hit);
+  }
+  return route.slice(0, targetStops);
+}
+
+function removeIndexesAndRefillNormalRoute(start, routeRows, pool, removeIndexes, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
+  const original = (routeRows || []).filter(validCoord).slice(0, targetStops);
+  const removeSet = new Set((removeIndexes || []).filter(i => Number.isFinite(Number(i))).map(Number));
+  const removed = original.filter((_, idx) => removeSet.has(idx));
+  let route = original.filter((_, idx) => !removeSet.has(idx));
+  const sortedIndexes = Array.from(removeSet).sort((a, b) => a - b);
+  const blocked = [...original];
+
+  sortedIndexes.forEach(originalIndex => {
+    const insertIndex = Math.min(Math.max(0, originalIndex), route.length);
+    const hit = findManualReplacementPoint(start, route, pool, insertIndex, blocked);
+    if (hit) {
+      route.splice(insertIndex, 0, hit);
+      blocked.push(hit);
+    }
+  });
+
+  route = refillRouteToTarget(start, route, pool, targetStops, blocked);
+  return route.slice(0, targetStops);
+}
+
+function applyOldPositionPatternWithReplacement(start, routeRows, pool, pattern, excludeOldIndexes = [], targetStops = NORMAL_ROUTE_TARGET_STOPS) {
+  const original = (routeRows || []).filter(validCoord).slice(0, targetStops);
+  const excludedOld = new Set((excludeOldIndexes || []).map(Number));
+  const selected = [];
+  const blocked = [...original.filter((_, idx) => excludedOld.has(idx))];
+
+  (pattern || []).forEach(item => {
+    if (typeof item === "string" && item.toUpperCase() === "NEW") {
+      const hit = findManualReplacementPoint(start, selected, pool, selected.length, [...blocked, ...selected]);
+      if (hit) {
+        selected.push(hit);
+        blocked.push(hit);
+      }
+      return;
+    }
+    const idx = Number(item) - 1;
+    const row = original[idx];
+    if (!row || excludedOld.has(idx) || selected.some(s => isSameStop(s, row))) return;
+    selected.push(row);
+  });
+
+  return refillRouteToTarget(start, selected, pool, targetStops, [...blocked, ...selected]);
+}
+
+function buildManualOuterLoopRoute(start, pool, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
+  const all = uniqueRowsByIdName(pool || []).filter(validCoord);
+  if (all.length <= targetStops) return orderNormalMarketRoute(start, all).slice(0, targetStops);
+
+  const center = routeCentroid(all);
+  const distances = all.map(p => haversine(center, coordPoint(p))).filter(Number.isFinite).sort((a, b) => a - b);
+  const medianRadius = distances[Math.floor(distances.length / 2)] || 0;
+  const limited = [...all]
+    .sort((a, b) => {
+      const da = haversine(center, coordPoint(a));
+      const db = haversine(center, coordPoint(b));
+      const scoreA = normalPointPickScore(start, center, a) + Math.abs(da - medianRadius) * 0.75;
+      const scoreB = normalPointPickScore(start, center, b) + Math.abs(db - medianRadius) * 0.75;
+      return scoreA - scoreB;
+    })
+    .slice(0, Math.min(all.length, NORMAL_ROUTE_POOL_LIMIT));
+
+  const sectors = Array.from({ length: targetStops }, () => []);
+  limited.forEach(p => {
+    const angle = (angleAround(center, p) + Math.PI * 2) % (Math.PI * 2);
+    const sector = Math.min(targetStops - 1, Math.floor(angle / (Math.PI * 2 / targetStops)));
+    const dCenter = haversine(center, coordPoint(p));
+    const score = normalPointPickScore(start, center, p) + Math.abs(dCenter - medianRadius) * 0.75;
+    sectors[sector].push({ p, score });
+  });
+  sectors.forEach(sec => sec.sort((a, b) => a.score - b.score));
+
+  const selected = [];
+  sectors.forEach(sec => {
+    const hit = sec.find(x => !selected.some(s => isSameStop(s, x.p)));
+    if (hit) selected.push(hit.p);
+  });
+  const flat = sectors.flat().sort((a, b) => a.score - b.score).map(x => x.p);
+  for (const p of flat) {
+    if (selected.length >= targetStops) break;
+    if (!selected.some(s => isSameStop(s, p))) selected.push(p);
+  }
+  return orderNormalMarketRoute(start, selected.slice(0, targetStops)).slice(0, targetStops);
+}
+
+function applyNormalManualFeedback(meta, ordered) {
+  const rule = normalManualRuleForMeta(meta);
+  if (!rule) return ordered;
+  const start = meta.start;
+  const pool = uniqueRowsByIdName(meta.list || []).filter(validCoord);
+  let route = (ordered || []).filter(validCoord).slice(0, NORMAL_ROUTE_TARGET_STOPS);
+
+  if (rule.rebuild) {
+    route = buildManualOuterLoopRoute(start, pool, NORMAL_ROUTE_TARGET_STOPS);
+  }
+  if (rule.pattern) {
+    route = applyOldPositionPatternWithReplacement(start, route, pool, rule.pattern, rule.excludeOldIndexes || [], NORMAL_ROUTE_TARGET_STOPS);
+  }
+  if (rule.removeIndexes) {
+    route = removeIndexesAndRefillNormalRoute(start, route, pool, rule.removeIndexes, NORMAL_ROUTE_TARGET_STOPS);
+  }
+  if (rule.reorderAfter) {
+    route = orderNormalMarketRoute(start, route).slice(0, NORMAL_ROUTE_TARGET_STOPS);
+  }
+  return route.slice(0, NORMAL_ROUTE_TARGET_STOPS);
+}
+
 function buildOptimizedNormalRouteForGroup(meta) {
   if (!meta || !Array.isArray(meta.list)) return [];
+  let ordered;
   if (isNormalWNN58Key(meta.bu, meta.meterKey)) {
-    return buildWNN58TemplateRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
+    ordered = buildWNN58TemplateRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
+  } else {
+    // ทุกสายใช้ logic กลางแบบเดียวกับแนว WNN58: lazy + เลือกจุดในวง + แทนเฉพาะจุดที่ทำให้วงเสีย 1-2 จุด
+    // จากนั้นค่อยใช้ manual feedback รายสายแบบเบา โดยไม่ลอง combination จำนวนมาก
+    ordered = buildGenericNormalLoopLikeWNN58Route(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
   }
-  // ทุกสายใช้ logic กลางแบบเดียวกับแนว WNN58: lazy + เลือกจุดในวง + แทนเฉพาะจุดที่ทำให้วงเสีย 1-2 จุด
-  // ไม่ใช้ ST55 hard-code และไม่ลอง combination จำนวนมาก เพื่อกัน Page Unresponsive
-  return buildGenericNormalLoopLikeWNN58Route(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
+  return applyNormalManualFeedback(meta, ordered);
 }
 
 function replacePlannedRowsForRoute(routeKey, rows) {
