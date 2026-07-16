@@ -2303,16 +2303,40 @@ function buildGenericNormalLoopLikeWNN58Route(start, list, targetStops = NORMAL_
 // ใช้เฉพาะโหมดวันปกติ/ออกตลาดทั่วไป และคำนวณเฉพาะสายที่ผู้ใช้คลิกผ่าน lazy compute
 // เป้าหมาย: นำ feedback รายสายจากแผนที่มาใช้แบบเบา ไม่ลอง combination จำนวนมาก และไม่กระทบโหมดปรับปรุงปั๊ม/ตารางซ่อม
 const NORMAL_MANUAL_ROUTE_RULES = {
-  "55": { removeIndexes: [7], note: "ตัดจุด 8 ที่อยู่นอกวง" },
-  "60": { removeIndexes: [3], note: "ตัดจุด 4 ที่อยู่นอกวง" },
-  "67": { removeIndexes: [6, 7, 8], note: "ตัดจุด 7-9 ที่อยู่นอกวง" },
-  "69": { removeIndexes: [0], reorderAfter: true, note: "ตัดจุด 1 และเรียงวงใหม่" },
-  "72": { rebuild: true, note: "ออกแบบใหม่ทั้งชุด" },
-  // ผู้ใช้ให้ pattern สาย 57 โดยพิมพ์เดิมจุด 8 ซ้ำ 2 ครั้ง จึงตีความตำแหน่งที่ 4 เป็นเดิมจุด 2 เพื่อให้ครบ 1-9 ไม่ซ้ำ
-  "57": { pattern: [8, 7, 1, 2, 6, 5, 4, 3, 9], note: "เรียงลำดับใหม่ตาม feedback" },
-  "65": { pattern: [9, 2, 3, 4, 5, 6, 7, 8, "NEW"], excludeOldIndexes: [0], note: "เอาเดิมจุด 9 เป็นจุด 1 และแทนเดิมจุด 1" },
-  "61": { removeIndexes: [4, 5], note: "ตัดจุด 5-6 ที่อยู่นอกวง" },
-  "71": { removeIndexes: [3, 8], note: "ตัดจุด 4 และ 9 ที่อยู่นอกวง" }
+  // สายที่ผู้ใช้ระบุว่า “ดีแล้ว” ให้คง logic เดิมไว้ ห้ามแก้เพิ่ม: 55, 60, 61, 65, 71, 58
+  "55": { removeIndexes: [7], note: "ดีแล้ว: คงกติกาตัดจุด 8 ที่อยู่นอกวง" },
+  "60": { removeIndexes: [3], note: "ดีแล้ว: คงกติกาตัดจุด 4 ที่อยู่นอกวง" },
+  "61": { removeIndexes: [4, 5], note: "ดีแล้ว: คงกติกาตัดจุด 5-6 ที่อยู่นอกวง" },
+  "65": { pattern: [9, 2, 3, 4, 5, 6, 7, 8, "NEW"], excludeOldIndexes: [0], note: "ดีแล้ว: คงลำดับเดิมที่ผ่านแล้ว" },
+  "71": { removeIndexes: [3, 8], note: "ดีแล้ว: คงกติกาตัดจุด 4 และ 9 ที่อยู่นอกวง" },
+
+  // แก้ตาม feedback ล่าสุดเท่านั้น
+  "67": {
+    removeIndexes: [7],
+    excludeTokens: ["KN58475", "น้องพลอย"],
+    note: "ตัดจุด 8 น้องพลอย KN58475 แล้วหาจุดใหม่ในวงเส้นทาง"
+  },
+  "69": {
+    removeIndexes: [8],
+    excludeTokens: ["ปั๊ม ANG บ้านฝาง", "บ้านฝาง", "กระนวน"],
+    note: "ตัดจุด 9 ปั๊ม ANG บ้านฝาง อ.กระนวน แล้วหาจุดใหม่ในวงเส้นทาง"
+  },
+  "72": {
+    pattern: [9, 1, 2, 3, "NEW", 5, 6, 7, 8],
+    excludeOldIndexes: [3],
+    excludeTokens: ["แก้วภัชระ พืชผล", "แก้วภัชระ"],
+    note: "เรียงใหม่ 9→1, 1→2, 2→3, 3→4, ตัดเดิมจุด 4 แล้วเติมจุดใหม่เป็นจุด 5"
+  },
+  "57": {
+    removeIndexes: [6],
+    excludeTokens: ["ST57247", "ปั๊มคำภา", "คำภา"],
+    note: "ตัดจุด 7 ปั๊มคำภา ST57247 แล้วหาจุดใหม่ในวงเส้นทาง"
+  },
+  "66": {
+    removeIndexes: [0, 8],
+    excludeTokens: ["ST51165-1", "บจก.สหเมืองท่า", "สหเมืองท่า", "KCL660069-1", "บจก.สินธุ์ชัยไอซ์", "สินธุ์ชัยไอซ์"],
+    note: "ตัดจุด 1 บจก.สหเมืองท่า และจุด 9 บจก.สินธุ์ชัยไอซ์ แล้วหาจุดใหม่ในวงเส้นทาง"
+  }
 };
 
 function normalManualRuleForMeta(meta) {
@@ -2324,7 +2348,16 @@ function routeWithoutSameStops(rows, stops) {
   return (rows || []).filter(r => !(stops || []).some(s => isSameStop(r, s)));
 }
 
-function manualReplacementScore(start, routeRows, insertIndex, row) {
+function manualExcludedRowsFromTokens(pool, tokens) {
+  if (!tokens || !tokens.length) return [];
+  return uniqueRowsByIdName(pool || []).filter(row => rowMatchesAnyTemplateToken(row, tokens));
+}
+
+function manualTokenPenalty(row, tokens) {
+  return rowMatchesAnyTemplateToken(row, tokens || []) ? 999999 : 0;
+}
+
+function manualReplacementScore(start, routeRows, insertIndex, row, excludeTokens = []) {
   const prev = insertIndex <= 0 ? null : routeRows[insertIndex - 1];
   const next = insertIndex >= routeRows.length ? null : routeRows[insertIndex];
   const base = insertionCandidateScore(prev, next, row, routeRows, start);
@@ -2333,25 +2366,25 @@ function manualReplacementScore(start, routeRows, insertIndex, row) {
   const center = routeCentroid(routeRows.length ? routeRows : trial);
   const centerDist = center ? haversine(center, coordPoint(row)) : 0;
   const startDist = haversine(start, coordPoint(row));
-  return base + localScore + centerDist * 0.18 + startDist * 0.04;
+  return base + localScore + centerDist * 0.18 + startDist * 0.04 + manualTokenPenalty(row, excludeTokens);
 }
 
-function findManualReplacementPoint(start, routeRows, pool, insertIndex, blockedRows = []) {
+function findManualReplacementPoint(start, routeRows, pool, insertIndex, blockedRows = [], excludeTokens = []) {
   const candidates = uniqueRowsByIdName(pool || [])
     .filter(validCoord)
     .filter(p => !(blockedRows || []).some(s => isSameStop(s, p)))
     .filter(p => !(routeRows || []).some(s => isSameStop(s, p)))
-    .sort((a, b) => manualReplacementScore(start, routeRows, insertIndex, a) - manualReplacementScore(start, routeRows, insertIndex, b))
+    .sort((a, b) => manualReplacementScore(start, routeRows, insertIndex, a, excludeTokens) - manualReplacementScore(start, routeRows, insertIndex, b, excludeTokens))
     .slice(0, 24);
   return candidates[0] || null;
 }
 
-function refillRouteToTarget(start, routeRows, pool, targetStops = NORMAL_ROUTE_TARGET_STOPS, blockedRows = []) {
+function refillRouteToTarget(start, routeRows, pool, targetStops = NORMAL_ROUTE_TARGET_STOPS, blockedRows = [], excludeTokens = []) {
   let route = uniqueRowsByIdName(routeRows || []).filter(validCoord).slice(0, targetStops);
   const blocked = uniqueRowsByIdName([...(blockedRows || []), ...route]);
   while (route.length < targetStops) {
     const insertIndex = Math.max(0, route.length - 1);
-    const hit = findManualReplacementPoint(start, route, pool, insertIndex, blocked);
+    const hit = findManualReplacementPoint(start, route, pool, insertIndex, blocked, excludeTokens);
     if (!hit) break;
     route.splice(insertIndex, 0, hit);
     blocked.push(hit);
@@ -2359,36 +2392,36 @@ function refillRouteToTarget(start, routeRows, pool, targetStops = NORMAL_ROUTE_
   return route.slice(0, targetStops);
 }
 
-function removeIndexesAndRefillNormalRoute(start, routeRows, pool, removeIndexes, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
+function removeIndexesAndRefillNormalRoute(start, routeRows, pool, removeIndexes, targetStops = NORMAL_ROUTE_TARGET_STOPS, extraBlockedRows = [], excludeTokens = []) {
   const original = (routeRows || []).filter(validCoord).slice(0, targetStops);
   const removeSet = new Set((removeIndexes || []).filter(i => Number.isFinite(Number(i))).map(Number));
   const removed = original.filter((_, idx) => removeSet.has(idx));
   let route = original.filter((_, idx) => !removeSet.has(idx));
   const sortedIndexes = Array.from(removeSet).sort((a, b) => a - b);
-  const blocked = [...original];
+  const blocked = uniqueRowsByIdName([...original, ...(extraBlockedRows || [])]);
 
   sortedIndexes.forEach(originalIndex => {
     const insertIndex = Math.min(Math.max(0, originalIndex), route.length);
-    const hit = findManualReplacementPoint(start, route, pool, insertIndex, blocked);
+    const hit = findManualReplacementPoint(start, route, pool, insertIndex, blocked, excludeTokens);
     if (hit) {
       route.splice(insertIndex, 0, hit);
       blocked.push(hit);
     }
   });
 
-  route = refillRouteToTarget(start, route, pool, targetStops, blocked);
+  route = refillRouteToTarget(start, route, pool, targetStops, blocked, excludeTokens);
   return route.slice(0, targetStops);
 }
 
-function applyOldPositionPatternWithReplacement(start, routeRows, pool, pattern, excludeOldIndexes = [], targetStops = NORMAL_ROUTE_TARGET_STOPS) {
+function applyOldPositionPatternWithReplacement(start, routeRows, pool, pattern, excludeOldIndexes = [], targetStops = NORMAL_ROUTE_TARGET_STOPS, extraBlockedRows = [], excludeTokens = []) {
   const original = (routeRows || []).filter(validCoord).slice(0, targetStops);
   const excludedOld = new Set((excludeOldIndexes || []).map(Number));
   const selected = [];
-  const blocked = [...original.filter((_, idx) => excludedOld.has(idx))];
+  const blocked = uniqueRowsByIdName([...original.filter((_, idx) => excludedOld.has(idx)), ...(extraBlockedRows || [])]);
 
   (pattern || []).forEach(item => {
     if (typeof item === "string" && item.toUpperCase() === "NEW") {
-      const hit = findManualReplacementPoint(start, selected, pool, selected.length, [...blocked, ...selected]);
+      const hit = findManualReplacementPoint(start, selected, pool, selected.length, [...blocked, ...selected], excludeTokens);
       if (hit) {
         selected.push(hit);
         blocked.push(hit);
@@ -2401,7 +2434,7 @@ function applyOldPositionPatternWithReplacement(start, routeRows, pool, pattern,
     selected.push(row);
   });
 
-  return refillRouteToTarget(start, selected, pool, targetStops, [...blocked, ...selected]);
+  return refillRouteToTarget(start, selected, pool, targetStops, [...blocked, ...selected], excludeTokens);
 }
 
 function buildManualOuterLoopRoute(start, pool, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
@@ -2450,15 +2483,16 @@ function applyNormalManualFeedback(meta, ordered) {
   const start = meta.start;
   const pool = uniqueRowsByIdName(meta.list || []).filter(validCoord);
   let route = (ordered || []).filter(validCoord).slice(0, NORMAL_ROUTE_TARGET_STOPS);
+  const excludeTokenRows = manualExcludedRowsFromTokens(pool, rule.excludeTokens || []);
 
   if (rule.rebuild) {
-    route = buildManualOuterLoopRoute(start, pool, NORMAL_ROUTE_TARGET_STOPS);
+    route = buildManualOuterLoopRoute(start, routeWithoutSameStops(pool, excludeTokenRows), NORMAL_ROUTE_TARGET_STOPS);
   }
   if (rule.pattern) {
-    route = applyOldPositionPatternWithReplacement(start, route, pool, rule.pattern, rule.excludeOldIndexes || [], NORMAL_ROUTE_TARGET_STOPS);
+    route = applyOldPositionPatternWithReplacement(start, route, pool, rule.pattern, rule.excludeOldIndexes || [], NORMAL_ROUTE_TARGET_STOPS, excludeTokenRows, rule.excludeTokens || []);
   }
   if (rule.removeIndexes) {
-    route = removeIndexesAndRefillNormalRoute(start, route, pool, rule.removeIndexes, NORMAL_ROUTE_TARGET_STOPS);
+    route = removeIndexesAndRefillNormalRoute(start, route, pool, rule.removeIndexes, NORMAL_ROUTE_TARGET_STOPS, excludeTokenRows, rule.excludeTokens || []);
   }
   if (rule.reorderAfter) {
     route = orderNormalMarketRoute(start, route).slice(0, NORMAL_ROUTE_TARGET_STOPS);
