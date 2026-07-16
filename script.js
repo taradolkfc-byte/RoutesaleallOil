@@ -2303,21 +2303,17 @@ function buildGenericNormalLoopLikeWNN58Route(start, list, targetStops = NORMAL_
 // ใช้เฉพาะโหมดวันปกติ/ออกตลาดทั่วไป และคำนวณเฉพาะสายที่ผู้ใช้คลิกผ่าน lazy compute
 // เป้าหมาย: นำ feedback รายสายจากแผนที่มาใช้แบบเบา ไม่ลอง combination จำนวนมาก และไม่กระทบโหมดปรับปรุงปั๊ม/ตารางซ่อม
 const NORMAL_MANUAL_ROUTE_RULES = {
-  // สายที่ผู้ใช้ยืนยันว่าดีแล้ว: คงกติกาเดิม ไม่เพิ่ม logic ใหม่
-  "55": { removeIndexes: [7], useInitialBase: true, note: "ดีแล้ว: ตัดจุด 8 ที่อยู่นอกวง และหาจุดใหม่แทน" },
-  "58": { keepWNN58Special: true, note: "ดีแล้ว: คง logic เฉพาะ WNN58" },
-  "61": { removeIndexes: [3], reorderAfter: true, useInitialBase: true, note: "ดีแล้วจากรอบก่อน: ตัดจุด 4 ที่อยู่นอกเส้นทาง" },
-
-  // สายที่ต้องแก้ตาม feedback ล่าสุด
-  "60": { removeIndexes: [3], reorderAfter: true, useInitialBase: true, note: "ตัดจุด 4 และหาจุดใหม่ในวงแทน" },
-  "67": { removeIndexes: [6, 7, 8], reorderAfter: true, useInitialBase: true, note: "ตัดจุด 7, 8, 9 และหาจุดใหม่ในวงแทน" },
-  "69": { removeIndexes: [0], reorderAfter: true, useInitialBase: true, note: "ตัดจุด 1 และเรียงลำดับใหม่ทั้งสาย" },
-  "72": { pattern: [9, 1, 2, 3, 5, 6, 7, 8, "NEW"], excludeOldIndexes: [3], useInitialBase: true, note: "ตัดจุด 4 แล้วเรียงตาม pattern ล่าสุด" },
-  "57": { pattern: [8, 7, 1, 2, 6, 5, 4, 3, 9], useInitialBase: true, note: "เรียงลำดับใหม่ตาม pattern ที่ระบุ" },
-  "65": { removeIndexes: [8], useInitialBase: true, note: "ตัดจุด 9 ที่เป็นจุดนอกเส้นทาง แล้วหาจุดใหม่แทน" },
-  "66": { removeIndexes: [8], reorderAfter: true, useInitialBase: true, note: "ตัดจุด 9 ที่เป็นจุดนอกเส้นทาง" }
-  // สาย 71: ไม่ใส่ manual rule เพราะผู้ใช้ยืนยันว่าดีถูกต้องแล้ว
-}
+  "55": { removeIndexes: [7], note: "ตัดจุด 8 ที่อยู่นอกวง" },
+  "60": { removeIndexes: [3], note: "ตัดจุด 4 ที่อยู่นอกวง" },
+  "67": { removeIndexes: [6, 7, 8], note: "ตัดจุด 7-9 ที่อยู่นอกวง" },
+  "69": { removeIndexes: [0], reorderAfter: true, note: "ตัดจุด 1 และเรียงวงใหม่" },
+  "72": { rebuild: true, note: "ออกแบบใหม่ทั้งชุด" },
+  // ผู้ใช้ให้ pattern สาย 57 โดยพิมพ์เดิมจุด 8 ซ้ำ 2 ครั้ง จึงตีความตำแหน่งที่ 4 เป็นเดิมจุด 2 เพื่อให้ครบ 1-9 ไม่ซ้ำ
+  "57": { pattern: [8, 7, 1, 2, 6, 5, 4, 3, 9], note: "เรียงลำดับใหม่ตาม feedback" },
+  "65": { pattern: [9, 2, 3, 4, 5, 6, 7, 8, "NEW"], excludeOldIndexes: [0], note: "เอาเดิมจุด 9 เป็นจุด 1 และแทนเดิมจุด 1" },
+  "61": { removeIndexes: [4, 5], note: "ตัดจุด 5-6 ที่อยู่นอกวง" },
+  "71": { removeIndexes: [3, 8], note: "ตัดจุด 4 และ 9 ที่อยู่นอกวง" }
+};
 
 function normalManualRuleForMeta(meta) {
   if (!meta || getPlanSettings().mode !== "normal") return null;
@@ -2472,19 +2468,14 @@ function applyNormalManualFeedback(meta, ordered) {
 
 function buildOptimizedNormalRouteForGroup(meta) {
   if (!meta || !Array.isArray(meta.list)) return [];
-  const rule = normalManualRuleForMeta(meta);
   let ordered;
-
   if (isNormalWNN58Key(meta.bu, meta.meterKey)) {
     ordered = buildWNN58TemplateRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
-  } else if (rule && rule.useInitialBase && Array.isArray(meta.initialOrder) && meta.initialOrder.length) {
-    // กติกาที่ผู้ใช้ระบุเป็น “เดิมจุดที่...” ต้องอ้างอิงจากแผนเดิมที่เห็นบนหน้าจอ
-    // จึงใช้ initialOrder เป็นฐานก่อน แล้วค่อยตัด/เรียง/แทนตาม manual rule
-    ordered = meta.initialOrder.slice(0, NORMAL_ROUTE_TARGET_STOPS);
   } else {
+    // ทุกสายใช้ logic กลางแบบเดียวกับแนว WNN58: lazy + เลือกจุดในวง + แทนเฉพาะจุดที่ทำให้วงเสีย 1-2 จุด
+    // จากนั้นค่อยใช้ manual feedback รายสายแบบเบา โดยไม่ลอง combination จำนวนมาก
     ordered = buildGenericNormalLoopLikeWNN58Route(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
   }
-
   return applyNormalManualFeedback(meta, ordered);
 }
 
@@ -2550,14 +2541,11 @@ function buildNormalPlanRows(marketRows) {
     const planDate = today;
     const routeId = `วันปกติ ${thaiDateLabel(planDate)} ${bu} สาย ${meterKey}`;
     const start = startForRoute(list);
-    const initialOrder = buildNormalInitialRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
-    const meta = { routeId, start, list, bu, meterKey, planDate, initialOrder };
+    const meta = { routeId, start, list, bu, meterKey, planDate };
     normalRouteLazyPools.set(routeId, meta);
 
-    // สร้างแผนเบื้องต้นแบบเบา และถ้ามี manual rule รายสาย ให้ใช้ตั้งแต่การ์ดแรกทันที
-    // เพื่อไม่ให้ผู้ใช้เห็นแผนเดิมที่ยังไม่ได้ตัด/เรียงตาม feedback
-    const rule = normalManualRuleForMeta(meta);
-    const ordered = rule ? applyNormalManualFeedback(meta, initialOrder) : initialOrder;
+    // สร้างแผนเบื้องต้นแบบเบาเพื่อให้เปิดหน้าเร็ว แล้วค่อย optimize เฉพาะสายที่คลิกดู
+    const ordered = buildNormalInitialRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
     output.push(...buildRowsForNormalRoute(ordered, meta));
   });
   return output;
