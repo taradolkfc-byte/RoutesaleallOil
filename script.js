@@ -2325,17 +2325,20 @@ const NORMAL_MANUAL_ROUTE_RULES = {
     pattern: [9, 1, 2, 3, "NEW", 5, 6, 7, 8],
     excludeOldIndexes: [3],
     excludeTokens: ["แก้วภัชระ พืชผล", "แก้วภัชระ"],
-    note: "เรียงใหม่ 9→1, 1→2, 2→3, 3→4, ตัดเดิมจุด 4 แล้วเติมจุดใหม่เป็นจุด 5"
+    reorderAfter: true,
+    note: "คงชุดจุดตามกติกาเดิม แล้วเรียงลำดับตัวเลขใหม่ให้วิ่งวนดีขึ้น"
   },
   "57": {
     removeIndexes: [6],
     excludeTokens: ["ST57247", "ปั๊มคำภา", "คำภา"],
-    note: "ตัดจุด 7 ปั๊มคำภา ST57247 แล้วหาจุดใหม่ในวงเส้นทาง"
+    reorderAfter: true,
+    note: "ตัดจุด 7 ปั๊มคำภา ST57247 แล้วเรียงลำดับตัวเลขใหม่"
   },
   "66": {
     removeIndexes: [0, 8],
     excludeTokens: ["ST51165-1", "บจก.สหเมืองท่า", "สหเมืองท่า", "KCL660069-1", "บจก.สินธุ์ชัยไอซ์", "สินธุ์ชัยไอซ์"],
-    note: "ตัดจุด 1 บจก.สหเมืองท่า และจุด 9 บจก.สินธุ์ชัยไอซ์ แล้วหาจุดใหม่ในวงเส้นทาง"
+    reorderAfter: true,
+    note: "ตัดจุด 1/9 ตามเดิม แล้วเรียงลำดับตัวเลขใหม่"
   }
 };
 
@@ -3134,21 +3137,29 @@ function normalizeDashboardJobType(v) {
   return s;
 }
 
+function getDashboardDaysFilter() {
+  const raw = cleanText(document.getElementById("dashboardDays")?.value || "all").toLowerCase();
+  const isAll = !raw || raw === "all" || raw === "ทั้งหมด" || raw === "alltime";
+  const days = isAll ? null : Math.max(1, Number(raw) || 7);
+  return { isAll, days, label: isAll ? "ข้อมูลทั้งหมด" : `${days} วันย้อนหลัง` };
+}
+
 function renderVisitDashboard() {
   if (!isDashboardPageVisible()) return;
   const body = document.getElementById("dashboardBody");
   if (!body) return;
-  const days = Math.max(1, Number(document.getElementById("dashboardDays")?.value || 7));
+  const daysFilter = getDashboardDaysFilter();
   const selectedBU = cleanText(document.getElementById("dashboardBU")?.value || "").toUpperCase();
   const today = thaiNow();
   today.setHours(23, 59, 59, 999);
-  const start = addDaysTH(today, -(days - 1));
-  start.setHours(0, 0, 0, 0);
+  const start = daysFilter.isAll ? null : addDaysTH(today, -(daysFilter.days - 1));
+  if (start) start.setHours(0, 0, 0, 0);
 
   let rows = (savedVisitRowsRaw || [])
     .slice(1)
     .map(normalizeSavedVisitRow)
-    .filter(r => r.visitDate && r.visitDate >= start && r.visitDate <= today)
+    .filter(r => r.visitDate)
+    .filter(r => daysFilter.isAll || (r.visitDate >= start && r.visitDate <= today))
     .filter(r => !selectedBU || cleanText(r.bu).toUpperCase() === selectedBU)
     .map(r => ({ ...r, jobTypeGroup: normalizeDashboardJobType(r.jobType) }))
     .sort((a, b) => b.visitDate - a.visitDate || cleanText(a.bu).localeCompare(cleanText(b.bu), "th"));
@@ -3185,13 +3196,13 @@ function renderVisitDashboard() {
   setText("dashActive", countGroup("ลูกค้าปัจจุบัน"));
   setText("dashNew", countGroup("ลูกค้าใหม่"));
 
-  renderVisitDashboardCharts(rows, { total, success, pct, days });
+  renderVisitDashboardCharts(rows, { total, success, pct, days: daysFilter.days, isAllDays: daysFilter.isAll, label: daysFilter.label });
 
   const note = document.getElementById("dashboardListNote");
-  if (note) note.textContent = `แสดง ${Math.min(rows.length, 80)} รายการล่าสุด จากทั้งหมด ${rows.length} จุด`;
+  if (note) note.textContent = `แสดง ${Math.min(rows.length, 80)} รายการล่าสุด จากทั้งหมด ${rows.length} จุด • ${daysFilter.label}${selectedBU ? ` • BU ${selectedBU}` : " • ทุก BU"}`;
 
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="6" class="loading">ยังไม่พบข้อมูลการออกตลาดในช่วง ${days} วันย้อนหลัง</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="loading">ยังไม่พบข้อมูลการออกตลาดในช่วง ${escapeHtml(daysFilter.label)}</td></tr>`;
     return;
   }
   body.innerHTML = rows.slice(0, 80).map((r, i) => `
@@ -3275,7 +3286,11 @@ function renderVisitDashboardCharts(rows, summary) {
   setDashboardBars("dashStatusBars", statusRows, total);
 
   const strip = document.getElementById("dashboardSummaryStrip");
-  if (strip) strip.textContent = `แผนที่วางไว้ ${total} จุด • เข้าพบสำเร็จ ${summary.success || 0} จุด • อัตราสำเร็จ ${summary.pct || 0}% • เฉลี่ย ${(total / Math.max(1, summary.days || 1)).toFixed(1)} จุด/วัน`;
+  if (strip) {
+    const scopeText = summary.isAllDays ? "ข้อมูลทั้งหมด" : `${summary.days || 1} วันย้อนหลัง`;
+    const avgText = summary.isAllDays ? "" : ` • เฉลี่ย ${(total / Math.max(1, summary.days || 1)).toFixed(1)} จุด/วัน`;
+    strip.textContent = `แผนที่วางไว้ ${total} จุด • เข้าพบสำเร็จ ${summary.success || 0} จุด • อัตราสำเร็จ ${summary.pct || 0}% • ${scopeText}${avgText}`;
+  }
 }
 
 function dashboardJobClass(job) {
