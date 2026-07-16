@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="preconnect" href="https://router.project-osrm.org" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="style.css?v=20260716-normal-manual-rules-v7" />
+  <link rel="stylesheet" href="style.css?v=20260716-dashboard-all-default-v9" />
 </head>
 <body>
   <header class="app-header">
@@ -147,8 +147,9 @@
         <div class="dashboard-controls">
           <label>ดูย้อนหลัง
             <select id="dashboardDays">
+              <option value="all" selected>ข้อมูลทั้งหมด</option>
               <option value="1">1 วันย้อนหลัง</option>
-              <option value="7" selected>7 วันย้อนหลัง</option>
+              <option value="7">7 วันย้อนหลัง</option>
               <option value="15">15 วันย้อนหลัง</option>
               <option value="30">30 วันย้อนหลัง</option>
             </select>
@@ -268,6 +269,6 @@
   </main>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="script.js?v=20260716-normal-manual-rules-v7"></script>
+  <script src="script.js?v=20260716-dashboard-all-default-v9"></script>
 </body>
 </html>
