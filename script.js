@@ -2303,36 +2303,39 @@ function buildGenericNormalLoopLikeWNN58Route(start, list, targetStops = NORMAL_
 // ใช้เฉพาะโหมดวันปกติ/ออกตลาดทั่วไป และคำนวณเฉพาะสายที่ผู้ใช้คลิกผ่าน lazy compute
 // เป้าหมาย: นำ feedback รายสายจากแผนที่มาใช้แบบเบา ไม่ลอง combination จำนวนมาก และไม่กระทบโหมดปรับปรุงปั๊ม/ตารางซ่อม
 const NORMAL_MANUAL_ROUTE_RULES = {
-  // สายที่ผู้ใช้ระบุว่า “ดีแล้ว” ให้คง logic เดิมไว้ ห้ามแก้เพิ่ม: 55, 60, 61, 65, 71, 58 และ 67 ตาม feedback ล่าสุด
+  // สายที่ระบุว่า "ดีแล้ว" ให้คง logic เดิมไว้ ห้ามแก้เพิ่ม: 60, 61, 55, 65, 71, 58
   "55": { removeIndexes: [7], note: "ดีแล้ว: คงกติกาตัดจุด 8 ที่อยู่นอกวง" },
   "60": { removeIndexes: [3], note: "ดีแล้ว: คงกติกาตัดจุด 4 ที่อยู่นอกวง" },
   "61": { removeIndexes: [4, 5], note: "ดีแล้ว: คงกติกาตัดจุด 5-6 ที่อยู่นอกวง" },
   "65": { pattern: [9, 2, 3, 4, 5, 6, 7, 8, "NEW"], excludeOldIndexes: [0], note: "ดีแล้ว: คงลำดับเดิมที่ผ่านแล้ว" },
   "71": { removeIndexes: [3, 8], note: "ดีแล้ว: คงกติกาตัดจุด 4 และ 9 ที่อยู่นอกวง" },
+
+  // แก้ตาม feedback ล่าสุดเท่านั้น
   "67": {
     removeIndexes: [7],
     excludeTokens: ["KN58475", "น้องพลอย"],
-    note: "ดีแล้ว: คงกติกาตัดจุด 8 น้องพลอย KN58475 แล้วหาจุดใหม่ในวงเส้นทาง"
+    note: "ตัดจุด 8 น้องพลอย KN58475 แล้วหาจุดใหม่ในวงเส้นทาง"
   },
-
-  // แก้ตาม feedback ล่าสุดเท่านั้น
   "69": {
-    removeIndexes: [0],
-    forceRemoveTokens: true,
-    excludeTokens: ["KCL660025", "หจก.ป.รุ่งเรืองชัยบริการ", "ป.รุ่งเรืองชัย"],
-    note: "ตัดจุด 1 หจก.ป.รุ่งเรืองชัยบริการ KCL660025 แล้วหาจุดใหม่ในวงเส้นทาง"
+    removeIndexes: [8],
+    excludeTokens: ["ปั๊ม ANG บ้านฝาง", "ANG บ้านฝาง", "บ้านฝาง", "กระนวน"],
+    note: "ตัดจุด 9 ปั๊ม ANG บ้านฝาง อ.กระนวน แล้วหาจุดใหม่ในวงเส้นทาง"
   },
   "72": {
-    likeWNN58: true,
-    note: "ออกแบบ/เรียงลำดับใหม่ให้ใช้แนวคิดเดียวกับสาย 58: เลือกจุดให้อยู่ในวง แล้วแทนจุดที่ทำให้วงเสียแบบเบา"
+    pattern: [9, 1, 2, 3, "NEW", 5, 6, 7, 8],
+    excludeOldIndexes: [3],
+    excludeTokens: ["แก้วภัชระ พืชผล", "แก้วภัชระ"],
+    note: "เรียงใหม่ 9→1, 1→2, 2→3, 3→4, ตัดเดิมจุด 4 แล้วเติมจุดใหม่เป็นจุด 5"
   },
   "57": {
-    reorderAfter: true,
-    note: "จุดดีแล้ว: เรียงลำดับตัวเลขใหม่เท่านั้น ไม่เปลี่ยนชุดจุด"
+    removeIndexes: [6],
+    excludeTokens: ["ST57247", "ปั๊มคำภา", "คำภา"],
+    note: "ตัดจุด 7 ปั๊มคำภา ST57247 แล้วหาจุดใหม่ในวงเส้นทาง"
   },
   "66": {
-    reorderAfter: true,
-    note: "จุดดีแล้ว: เรียงลำดับตัวเลขใหม่เท่านั้น ไม่เปลี่ยนชุดจุด"
+    removeIndexes: [0, 8],
+    excludeTokens: ["ST51165-1", "บจก.สหเมืองท่า", "สหเมืองท่า", "KCL660069-1", "บจก.สินธุ์ชัยไอซ์", "สินธุ์ชัยไอซ์"],
+    note: "ตัดจุด 1 บจก.สหเมืองท่า และจุด 9 บจก.สินธุ์ชัยไอซ์ แล้วหาจุดใหม่ในวงเส้นทาง"
   }
 };
 
@@ -2474,74 +2477,6 @@ function buildManualOuterLoopRoute(start, pool, targetStops = NORMAL_ROUTE_TARGE
   return orderNormalMarketRoute(start, selected.slice(0, targetStops)).slice(0, targetStops);
 }
 
-
-function findBestManualReplacementByRouteScore(start, routeWithoutBad, pool, insertIndex, blockedRows = [], excludeTokens = [], beforeScore = Infinity) {
-  const candidates = uniqueRowsByIdName(pool || [])
-    .filter(validCoord)
-    .filter(p => !(blockedRows || []).some(s => isSameStop(s, p)))
-    .filter(p => !(routeWithoutBad || []).some(s => isSameStop(s, p)))
-    .sort((a, b) => manualReplacementScore(start, routeWithoutBad, insertIndex, a, excludeTokens) - manualReplacementScore(start, routeWithoutBad, insertIndex, b, excludeTokens))
-    .slice(0, 22);
-
-  let best = null;
-  for (const cand of candidates) {
-    const trial = [...routeWithoutBad.slice(0, insertIndex), cand, ...routeWithoutBad.slice(insertIndex)].slice(0, NORMAL_ROUTE_TARGET_STOPS);
-    if (trial.length !== NORMAL_ROUTE_TARGET_STOPS) continue;
-    if (approxRoadDistanceKm(start, trial) > MAX_ROUTE_DISTANCE_KM) continue;
-    const score = routeScoreForNormalSlotPlan(start, trial) + normalLoopShapePenaltyQuick(start, trial) * 0.35;
-    if (!best || score < best.score) best = { row: cand, score, trial };
-  }
-  if (!best) return null;
-  return best.score + 1.5 < beforeScore ? best : null;
-}
-
-function buildManualLikeWNN58Route(start, pool, targetStops = NORMAL_ROUTE_TARGET_STOPS, blockedRows = [], excludeTokens = []) {
-  // ใช้เฉพาะสายที่ขอ “ทำให้ได้เหมือนสาย 58”
-  // หลักการ: เลือกชุดจุดแบบวงกลมก่อน แล้วค่อยแทนเฉพาะจุดที่ทำให้วงเสีย 2-3 จุดแบบเบา
-  const usable = routeWithoutSameStops(uniqueRowsByIdName(pool || []).filter(validCoord), blockedRows || []);
-  if (usable.length <= targetStops) return orderNormalMarketRoute(start, usable).slice(0, targetStops);
-
-  let route = buildGenericNormalLoopLikeWNN58Route(start, usable, targetStops).slice(0, targetStops);
-  if (route.length < targetStops) {
-    route = refillRouteToTarget(start, route, usable, targetStops, blockedRows, excludeTokens);
-  }
-  route = orderNormalMarketRoute(start, route).slice(0, targetStops);
-
-  const blocked = uniqueRowsByIdName([...(blockedRows || []), ...route.filter(r => rowMatchesAnyTemplateToken(r, excludeTokens || []))]);
-  const startedAt = performance && performance.now ? performance.now() : Date.now();
-
-  for (let round = 0; round < 3; round++) {
-    const now = performance && performance.now ? performance.now() : Date.now();
-    if (now - startedAt > NORMAL_ROUTE_COMPUTE_DEADLINE_MS) break;
-
-    let worst = { index: -1, score: -Infinity };
-    // พิจารณาทุกตำแหน่ง รวมจุดต้น/ท้าย เพราะสายที่ขอ rebuild อาจต้องเปลี่ยนหัววงหรือท้ายวงใหม่
-    for (let i = 0; i < route.length; i++) {
-      const badness = normalRouteSlotBadness(start, route, i);
-      if (badness > worst.score) worst = { index: i, score: badness };
-    }
-    if (worst.index < 0 || worst.score < 38) break;
-
-    const currentScore = routeScoreForNormalSlotPlan(start, route);
-    const badRow = route[worst.index];
-    const routeWithoutBad = route.filter((_, i) => i !== worst.index);
-    const replacement = findBestManualReplacementByRouteScore(
-      start,
-      routeWithoutBad,
-      usable,
-      Math.min(worst.index, routeWithoutBad.length),
-      [...blocked, ...routeWithoutBad, badRow],
-      excludeTokens,
-      currentScore
-    );
-    if (!replacement) break;
-    route = orderNormalMarketRoute(start, replacement.trial).slice(0, targetStops);
-    blocked.push(badRow);
-  }
-
-  return route.slice(0, targetStops);
-}
-
 function applyNormalManualFeedback(meta, ordered) {
   const rule = normalManualRuleForMeta(meta);
   if (!rule) return ordered;
@@ -2550,14 +2485,6 @@ function applyNormalManualFeedback(meta, ordered) {
   let route = (ordered || []).filter(validCoord).slice(0, NORMAL_ROUTE_TARGET_STOPS);
   const excludeTokenRows = manualExcludedRowsFromTokens(pool, rule.excludeTokens || []);
 
-  // บางรอบผู้ใช้ระบุชื่อ/รหัสจุดที่ต้องตัดออกชัดเจน ให้กันจุดนั้นออกจาก route ปัจจุบันก่อนเติมจุดใหม่
-  if (rule.forceRemoveTokens && excludeTokenRows.length) {
-    route = routeWithoutSameStops(route, excludeTokenRows);
-    route = refillRouteToTarget(start, route, pool, NORMAL_ROUTE_TARGET_STOPS, excludeTokenRows, rule.excludeTokens || []);
-  }
-  if (rule.likeWNN58) {
-    route = buildManualLikeWNN58Route(start, pool, NORMAL_ROUTE_TARGET_STOPS, excludeTokenRows, rule.excludeTokens || []);
-  }
   if (rule.rebuild) {
     route = buildManualOuterLoopRoute(start, routeWithoutSameStops(pool, excludeTokenRows), NORMAL_ROUTE_TARGET_STOPS);
   }
@@ -2652,7 +2579,10 @@ function buildNormalPlanRows(marketRows) {
     normalRouteLazyPools.set(routeId, meta);
 
     // สร้างแผนเบื้องต้นแบบเบาเพื่อให้เปิดหน้าเร็ว แล้วค่อย optimize เฉพาะสายที่คลิกดู
-    const ordered = buildNormalInitialRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
+    let ordered = buildNormalInitialRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
+    if (normalManualRuleForMeta(meta)) {
+      ordered = applyNormalManualFeedback(meta, ordered);
+    }
     output.push(...buildRowsForNormalRoute(ordered, meta));
   });
   return output;
