@@ -85,6 +85,8 @@ let savedVisitRowsRaw = [];
 let savedHeaderMap = {};
 let normalRouteLazyPools = new Map();
 let normalRouteOptimizedKeys = new Set();
+let normalRoadRefinedKeys = new Set();
+let normalRoadRefiningKeys = new Set();
 
 /* ===== Fast load optimization 20260713 =====
    คงเงื่อนไขเส้นทางเดิม แต่ลดงานซ้ำระหว่างโหลด/เปลี่ยนตัวกรอง
@@ -2402,6 +2404,271 @@ function buildST55NearestFirstRoute(start, list, targetStops = NORMAL_ROUTE_TARG
 }
 
 
+function selectNormalGreedyNearPoints(start, pool, targetStops = NORMAL_ROUTE_TARGET_STOPS, excludeTokens = []) {
+  // ใช้กับทุกสายของโหมดวันปกติ: เลือกจุดใกล้และต่อเนื่องก่อน แต่ยังรักษาการกระจายให้เป็นวง
+  const all = uniqueRowsByIdName(pool || [])
+    .filter(validCoord)
+    .filter(p => !rowMatchesAnyTemplateToken(p, excludeTokens));
+  if (all.length <= targetStops) return all;
+
+  const center = routeCentroid(all);
+  const limited = [...all]
+    .sort((a, b) => {
+      const daStart = haversine(start, coordPoint(a));
+      const dbStart = haversine(start, coordPoint(b));
+      const daCenter = haversine(center, coordPoint(a));
+      const dbCenter = haversine(center, coordPoint(b));
+      const scoreA = normalPointPickScore(start, center, a) * 0.78 + daStart * 0.30 + daCenter * 0.16;
+      const scoreB = normalPointPickScore(start, center, b) * 0.78 + dbStart * 0.30 + dbCenter * 0.16;
+      return scoreA - scoreB;
+    })
+    .slice(0, Math.min(all.length, Math.max(30, targetStops * 4)));
+
+  const selected = [];
+  let current = { lat: start.lat, lng: start.lng };
+  let farthestFromStart = 0;
+
+  while (selected.length < targetStops && limited.length) {
+    let bestIndex = -1;
+    let bestScore = Infinity;
+    const routeCenter = routeCentroid(selected.length ? selected : limited.slice(0, targetStops));
+    const phase = selected.length / Math.max(1, targetStops);
+
+    limited.forEach((p, idx) => {
+      if (selected.some(s => isSameStop(s, p))) return;
+      const dCurrent = haversine(current, coordPoint(p));
+      const dStart = haversine(start, coordPoint(p));
+      const dCenter = routeCenter ? haversine(routeCenter, coordPoint(p)) : 0;
+      const insertionFit = selected.length >= 2
+        ? normalRouteSlotBadness(start, [...selected, p], selected.length)
+        : 0;
+      let score = dCurrent * 1.08 + dStart * 0.20 + dCenter * 0.18 + candidateBaseScore(p) * 0.18 + insertionFit * 0.05;
+
+      // จุดแรกต้องออกจากฐานแบบใกล้และต่อเนื่อง ไม่กระโดดข้ามไปไกล
+      if (!selected.length) score += dStart * 1.35;
+
+      // ช่วงต้น: เก็บจุดที่อยู่ใกล้เส้นทางต่อเนื่องก่อน ลดการออกไกลแล้ววกกลับมาเก็บจุดใกล้
+      if (phase < 0.58 && dStart + 4 < farthestFromStart) {
+        score += (farthestFromStart - dStart) * 6.8;
+      }
+
+      // ช่วงท้าย: ให้เริ่มวนกลับฐาน ห้ามกระโดดออกนอกวงเพิ่มโดยไม่จำเป็น
+      if (phase >= 0.58 && dStart > farthestFromStart + 13) {
+        score += (dStart - farthestFromStart - 13) * 5.2;
+      }
+
+      if (score < bestScore) {
+        bestScore = score;
+        bestIndex = idx;
+      }
+    });
+
+    if (bestIndex < 0) break;
+    const hit = limited.splice(bestIndex, 1)[0];
+    selected.push(hit);
+    current = coordPoint(hit);
+    farthestFromStart = Math.max(farthestFromStart, haversine(start, current));
+  }
+
+  if (selected.length < targetStops) {
+    for (const p of all) {
+      if (selected.length >= targetStops) break;
+      if (!selected.some(s => isSameStop(s, p))) selected.push(p);
+    }
+  }
+  return selected.slice(0, targetStops);
+}
+
+function normalBestRouteScore(start, route) {
+  const rows = (route || []).filter(validCoord);
+  if (!rows.length) return 999999;
+  const ds = rows.map(p => haversine(start, coordPoint(p)));
+  const peakIndex = ds.indexOf(Math.max(...ds));
+  const legs = routeLegsKm(start, rows);
+  const avgLeg = legs.reduce((a, b) => a + b, 0) / Math.max(1, legs.length);
+  let score = routeDistanceFromStart(start, rows);
+
+  // เป้าหมาย: ใกล้ก่อน → ไกลขึ้นอย่างต่อเนื่อง → วนกลับฐาน โดยไม่ย้อนเก็บจุด
+  score += (legs[0] || 0) * 1.20;
+  if (legs[1]) score += legs[1] * 0.25;
+  legs.forEach((leg, idx) => {
+    const limit = Math.max(20, avgLeg * 1.75);
+    if (leg > limit) score += (leg - limit) * (idx <= 2 ? 6.2 : 3.8);
+  });
+
+  for (let i = 1; i <= peakIndex; i++) {
+    if (ds[i] + 3 < ds[i - 1]) score += (ds[i - 1] - ds[i]) * 7.8;
+  }
+  for (let i = peakIndex + 1; i < ds.length; i++) {
+    if (ds[i] > ds[i - 1] + 8) score += (ds[i] - ds[i - 1] - 8) * 5.0;
+  }
+
+  score += normalLoopShapePenaltyQuick(start, rows) * 0.85;
+  score += routeTurnPenalty(start, rows) * 1.35;
+  score += loopBacktrackPenalty(start, rows) * 1.70;
+  score += revisitPassedPointPenalty(start, rows) * 1.15;
+  score += routeSpikePenalty(start, rows, []) * 0.95;
+  const roadApprox = approxRoadDistanceKm(start, rows);
+  if (roadApprox > MAX_ROUTE_DISTANCE_KM) score += (roadApprox - MAX_ROUTE_DISTANCE_KM) * 20;
+  return score;
+}
+
+function buildNormalBestAllLinesRoute(start, list, targetStops = NORMAL_ROUTE_TARGET_STOPS, meta = {}) {
+  // ตัวจัดเส้นทางหลักสำหรับทุกสายของโหมด “วันปกติ/ออกตลาดทั่วไป”
+  // รวม 3 แนวคิด: เลือกจุดให้อยู่ในวง, เก็บจุดใกล้ก่อนแล้วค่อยออกไกล, ลดการย้อนกลับไปมา
+  // ยังเป็น heuristic แบบเบา เพื่อไม่ให้ Browser Page Unresponsive
+  const meterKey = normalizeMeter(meta.meterKey || meta.meter || "");
+  const bu = cleanText(meta.bu || "").toUpperCase();
+  const excludeTokens = isNormalST55Key(bu, meterKey) ? ST55_TEMPLATE_EXCLUDE_TOKENS : [];
+  const pool = uniqueRowsByIdName(list || [])
+    .filter(validCoord)
+    .filter(p => !rowMatchesAnyTemplateToken(p, excludeTokens));
+  if (pool.length <= targetStops) return twoOptNormalRoute(start, progressiveNearOrder(start, pool)).slice(0, targetStops);
+
+  const seedSets = [];
+  const addSet = (rows) => {
+    const clean = uniqueRowsByIdName(rows || []).filter(validCoord).slice(0, targetStops);
+    if (clean.length < Math.min(MIN_ROUTE_CUSTOMER_STOPS, targetStops)) return;
+    const key = routeKeyForSet(clean);
+    if (!seedSets.some(s => s.key === key)) seedSets.push({ key, rows: clean });
+  };
+
+  addSet(selectNormalGreedyNearPoints(start, pool, targetStops, excludeTokens));
+  addSet(buildNormalInitialRoute(start, pool, targetStops));
+  addSet(buildGenericNormalLoopLikeWNN58Route(start, pool, targetStops));
+  addSet(buildManualOuterLoopRoute(start, pool, targetStops));
+  addSet([...pool].sort((a, b) => haversine(start, coordPoint(a)) - haversine(start, coordPoint(b))).slice(0, targetStops));
+
+  if (isNormalST55Key(bu, meterKey)) addSet(buildST55TemplateRoute(start, pool, targetStops));
+  if (isNormalWNN58Key(bu, meterKey)) addSet(buildWNN58TemplateRoute(start, pool, targetStops));
+
+  const routeCandidates = [];
+  const addRoute = (route) => {
+    const clean = uniqueRowsByIdName(route || []).filter(validCoord).slice(0, targetStops);
+    if (clean.length < Math.min(MIN_ROUTE_CUSTOMER_STOPS, targetStops)) return;
+    const key = uniqueRouteCandidateKey(clean);
+    if (!routeCandidates.some(r => r.key === key)) routeCandidates.push({ key, route: clean });
+  };
+
+  seedSets.forEach(set => {
+    const near = progressiveNearOrder(start, set.rows).slice(0, targetStops);
+    const normal = orderNormalMarketRoute(start, set.rows).slice(0, targetStops);
+    const nearest = nearestNeighborOrder(start, set.rows).slice(0, targetStops);
+    addRoute(near);
+    addRoute(twoOptNormalRoute(start, near));
+    addRoute(normal);
+    addRoute(twoOptNormalRoute(start, normal));
+    addRoute(nearest);
+    addRoute(twoOptNormalRoute(start, nearest));
+  });
+
+  const valid = routeCandidates.length ? routeCandidates : [{ route: buildNormalInitialRoute(start, pool, targetStops) }];
+  const best = valid
+    .map(x => ({ route: x.route, score: normalBestRouteScore(start, x.route) }))
+    .sort((a, b) => a.score - b.score)[0];
+  return (best && best.route ? best.route : buildNormalInitialRoute(start, pool, targetStops)).slice(0, targetStops);
+}
+
+function normalRoadCandidateOrders(start, route, maxCandidates = 9) {
+  const base = uniqueRowsByIdName(route || []).filter(validCoord);
+  const out = [];
+  const add = (candidate) => {
+    const clean = uniqueRowsByIdName(candidate || []).filter(validCoord);
+    if (clean.length !== base.length) return;
+    const key = uniqueRouteCandidateKey(clean);
+    if (!out.some(x => x.key === key)) out.push({ key, route: clean });
+  };
+
+  add(base);
+  add(twoOptNormalRoute(start, base));
+  add(progressiveNearOrder(start, base));
+  add(twoOptNormalRoute(start, progressiveNearOrder(start, base)));
+  add(orderNormalMarketRoute(start, base));
+  add(twoOptNormalRoute(start, orderNormalMarketRoute(start, base)));
+  add([...base].reverse());
+  add(twoOptNormalRoute(start, [...base].reverse()));
+
+  const ordered = orderNormalMarketRoute(start, base);
+  const rotations = [];
+  for (let i = 0; i < ordered.length; i++) {
+    const rot = [...ordered.slice(i), ...ordered.slice(0, i)];
+    const firstD = haversine(start, coordPoint(rot[0]));
+    const lastD = haversine(start, coordPoint(rot[rot.length - 1]));
+    rotations.push({ route: rot, score: firstD + lastD + normalBestRouteScore(start, rot) * 0.04 });
+  }
+  rotations.sort((a, b) => a.score - b.score).slice(0, 3).forEach(x => add(x.route));
+  return out.slice(0, maxCandidates).map(x => x.route);
+}
+
+async function osrmDistanceForNormalOrder(start, order) {
+  const points = [
+    { ...start, customer_name: start.name, type: "จุดเริ่มต้น" },
+    ...(order || []).filter(validCoord),
+    { ...start, customer_name: start.name, type: "จุดเริ่มต้น" }
+  ];
+  const routed = await getOsrmRoute(points);
+  if (!routed || !Number.isFinite(routed.distanceKm)) return null;
+  return routed;
+}
+
+function roadRefinedRowsForRoute(routeKey, orderedRows) {
+  return (orderedRows || []).filter(validCoord).map((row, idx) => ({
+    ...row,
+    route_group: routeKey,
+    stop_no: `${idx + 1}/${orderedRows.length}`
+  }));
+}
+
+async function refineNormalRouteByRoadDistance(routeKey) {
+  if (getPlanSettings().mode !== "normal") return false;
+  const key = cleanText(routeKey);
+  const list = plannedRows.filter(r => r.route_group === key).filter(validCoord);
+  if (!key || list.length < 4) return false;
+  const start = getRouteStartForList(list);
+  const current = routeDisplayStops(list);
+  const candidates = normalRoadCandidateOrders(start, current, 8);
+  let best = null;
+  for (const candidate of candidates) {
+    const routed = await osrmDistanceForNormalOrder(start, candidate);
+    if (!routed) continue;
+    const score = routed.distanceKm + (routed.durationSec / 3600) * 8 + normalBestRouteScore(start, candidate) * 0.035;
+    if (!best || score < best.score) best = { route: candidate, score, distanceKm: routed.distanceKm, durationSec: routed.durationSec };
+  }
+  if (!best) return false;
+  const currentMetric = await osrmDistanceForNormalOrder(start, current);
+  const currentDistance = currentMetric ? currentMetric.distanceKm : Infinity;
+  const currentScore = currentMetric ? currentMetric.distanceKm + (currentMetric.durationSec / 3600) * 8 + normalBestRouteScore(start, current) * 0.035 : Infinity;
+  const sameOrder = uniqueRouteCandidateKey(best.route) === uniqueRouteCandidateKey(current);
+  const betterByRoad = best.distanceKm + 0.4 < currentDistance;
+  const betterByScore = best.score + 0.8 < currentScore;
+  if (sameOrder || (!betterByRoad && !betterByScore)) return false;
+
+  replacePlannedRowsForRoute(key, roadRefinedRowsForRoute(key, best.route));
+  return true;
+}
+
+function scheduleNormalRoadRefinement(routeKey) {
+  const key = cleanText(routeKey);
+  if (getPlanSettings().mode !== "normal" || !key) return;
+  if (normalRoadRefinedKeys.has(key) || normalRoadRefiningKeys.has(key)) return;
+  normalRoadRefiningKeys.add(key);
+  setTimeout(async () => {
+    try {
+      const changed = await refineNormalRouteByRoadDistance(key);
+      normalRoadRefinedKeys.add(key);
+      if (changed && selectedRouteKey === key) {
+        renderRouteSummary(plannedRows);
+      }
+    } catch (err) {
+      console.warn("normal road refinement failed", err);
+      normalRoadRefinedKeys.add(key);
+    } finally {
+      normalRoadRefiningKeys.delete(key);
+    }
+  }, 120);
+}
+
+
 function normalRouteSlotBadness(start, route, index) {
   const rows = (route || []).filter(validCoord);
   if (!rows[index] || !validCoord(rows[index])) return 0;
@@ -2711,16 +2978,10 @@ function applyNormalManualFeedback(meta, ordered) {
 
 function buildOptimizedNormalRouteForGroup(meta) {
   if (!meta || !Array.isArray(meta.list)) return [];
-  let ordered;
-  if (isNormalWNN58Key(meta.bu, meta.meterKey)) {
-    ordered = buildWNN58TemplateRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
-  } else if (isNormalST55Key(meta.bu, meta.meterKey)) {
-    ordered = buildST55NearestFirstRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
-  } else {
-    // ทุกสายใช้ logic กลางแบบเดียวกับแนว WNN58: lazy + เลือกจุดในวง + แทนเฉพาะจุดที่ทำให้วงเสีย 1-2 จุด
-    // จากนั้นค่อยใช้ manual feedback รายสายแบบเบา โดยไม่ลอง combination จำนวนมาก
-    ordered = buildGenericNormalLoopLikeWNN58Route(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
-  }
+  // ทุกสายของโหมดวันปกติใช้ logic หลักชุดเดียวกัน:
+  // เลือกจุดให้เป็นวงที่สุด + จัดลำดับใกล้ก่อนค่อยออกไกล + ลดการวิ่งย้อนกลับ
+  // WNN58/ST55 ยังถูกนำมาเป็น seed route ภายใน buildNormalBestAllLinesRoute เพื่อรักษาแนวที่เคยทำได้ดี
+  const ordered = buildNormalBestAllLinesRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS, meta);
   return applyNormalManualFeedback(meta, ordered);
 }
 
@@ -2751,6 +3012,7 @@ function ensureNormalRouteComputed(routeKey) {
     const rows = buildRowsForNormalRoute(ordered, meta);
     replacePlannedRowsForRoute(routeKey, rows);
     normalRouteOptimizedKeys.add(routeKey);
+    scheduleNormalRoadRefinement(routeKey);
     return true;
   } catch (err) {
     console.warn("normal route lazy compute failed", err);
@@ -2765,6 +3027,8 @@ function buildNormalPlanRows(marketRows) {
   const selectedMarketStatus = getMarketStatusFilterValue();
   normalRouteLazyPools = new Map();
   normalRouteOptimizedKeys = new Set();
+  normalRoadRefinedKeys = new Set();
+  normalRoadRefiningKeys = new Set();
 
   const candidates = marketRows
     .filter(r => !selectedBU || cleanText(r.bu).toUpperCase() === selectedBU.toUpperCase())
@@ -2789,11 +3053,8 @@ function buildNormalPlanRows(marketRows) {
     const meta = { routeId, start, list, bu, meterKey, planDate };
     normalRouteLazyPools.set(routeId, meta);
 
-    // สร้างแผนเบื้องต้นแบบเบาเพื่อให้เปิดหน้าเร็ว แล้วค่อย optimize เฉพาะสายที่คลิกดู
-    // ยกเว้น ST สาย 55: คำนวณตัวใกล้ก่อน-ไกลขึ้นตั้งแต่ต้น เพราะผู้ใช้ต้องการเห็นลำดับใหม่ทันทีบน Map/Card
-    let ordered = isNormalST55Key(bu, meterKey)
-      ? buildST55NearestFirstRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS)
-      : buildNormalInitialRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
+    // สร้างแผนเบื้องต้นแบบเบาเพื่อให้เปิดหน้าเร็ว แล้วค่อย optimize แบบละเอียดเฉพาะสายที่คลิกดู
+    let ordered = buildNormalInitialRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
     if (normalManualRuleForMeta(meta)) {
       ordered = applyNormalManualFeedback(meta, ordered);
     }
@@ -3090,6 +3351,9 @@ function renderRouteDetail(list) {
     ${hiddenCount ? `<p class="route-limit-note">แสดงใน Map/Google Maps ${MAX_ROUTE_CUSTOMER_STOPS} จุดแรก จากทั้งหมด ${hiddenCount + displayList.length} จุด เพื่อให้จำนวนจุดตรงกันและไม่สับสน</p>` : ""}`;
   hydrateDetailAreas();
   renderMap(list);
+  if (getPlanSettings().mode === "normal" && selectedRouteKey && normalRouteOptimizedKeys.has(selectedRouteKey)) {
+    scheduleNormalRoadRefinement(selectedRouteKey);
+  }
 }
 function isUsefulAreaText(v) {
   const a = cleanText(v);
