@@ -2196,6 +2196,212 @@ function buildST55TemplateRoute(start, list, targetStops = NORMAL_ROUTE_TARGET_S
 }
 
 
+// ===== ST55 nearest-first route improvement 20260716 =====
+// ใช้เฉพาะ “วันปกติ / ออกตลาดทั่วไป” สาย 55 ตาม feedback ล่าสุด
+// เป้าหมาย: เลือกจุดที่อยู่ในวงเส้นทางมากขึ้น และเรียงลำดับจากจุดใกล้/ต่อเนื่องก่อน แล้วค่อยออกไปไกลขึ้น
+// เขียนแบบเบา: จำกัด pool และใช้ greedy + 2-opt เฉพาะ 9 จุด ไม่ใช้ combination หนัก
+function twoOptNormalRoute(start, order, maxPasses = 3) {
+  let route = uniqueRowsByIdName(order || []).filter(validCoord).map(p => ({ ...p }));
+  if (route.length < 4) return route;
+  let bestDistance = routeDistanceFromStart(start, route);
+
+  for (let pass = 0; pass < maxPasses; pass++) {
+    let improved = false;
+    for (let i = 0; i < route.length - 1; i++) {
+      for (let k = i + 1; k < route.length; k++) {
+        // ไม่ reverse ทั้งเส้นโดยไม่จำเป็น เพราะจะทำให้จุดใกล้ฐานไปอยู่ท้ายตั้งแต่ต้น
+        if (i === 0 && k === route.length - 1) continue;
+        const trial = [...route.slice(0, i), ...route.slice(i, k + 1).reverse(), ...route.slice(k + 1)];
+        const d = routeDistanceFromStart(start, trial);
+        if (d + 0.05 < bestDistance) {
+          route = trial;
+          bestDistance = d;
+          improved = true;
+        }
+      }
+    }
+    if (!improved) break;
+  }
+  return route;
+}
+
+function progressiveNearOrder(start, rows) {
+  const remaining = uniqueRowsByIdName(rows || []).filter(validCoord).map(p => ({ ...p }));
+  const ordered = [];
+  let current = { lat: start.lat, lng: start.lng };
+  let farthestFromStart = 0;
+
+  while (remaining.length) {
+    let bestIndex = 0;
+    let bestScore = Infinity;
+    const center = routeCentroid([...ordered, ...remaining]);
+    const phase = ordered.length / Math.max(1, rows.length);
+
+    remaining.forEach((p, i) => {
+      const dCurrent = haversine(current, coordPoint(p));
+      const dStart = haversine(start, coordPoint(p));
+      const dCenter = center ? haversine(center, coordPoint(p)) : 0;
+      let score = dCurrent * 1.18 + dStart * 0.10 + dCenter * 0.10 + candidateBaseScore(p) * 0.18;
+
+      // ช่วงต้นให้เก็บจุดที่ใกล้และต่อเนื่องก่อน ไม่ข้ามไปจุดไกลแล้วค่อยย้อนกลับมาเก็บจุดใกล้
+      if (ordered.length === 0) score += dStart * 1.25;
+      if (phase < 0.62 && dStart + 4 < farthestFromStart) score += (farthestFromStart - dStart) * 7.5;
+
+      // ช่วงท้ายให้เริ่มวนกลับฐานได้ แต่ห้ามกระโดดออกไปไกลกว่าเดิมมากเกินไป
+      if (phase >= 0.62 && dStart > farthestFromStart + 12) score += (dStart - farthestFromStart - 12) * 5.5;
+
+      if (score < bestScore) {
+        bestScore = score;
+        bestIndex = i;
+      }
+    });
+
+    const next = remaining.splice(bestIndex, 1)[0];
+    ordered.push(next);
+    current = coordPoint(next);
+    farthestFromStart = Math.max(farthestFromStart, haversine(start, current));
+  }
+  return ordered;
+}
+
+function st55RouteProgressiveScore(start, route) {
+  const rows = (route || []).filter(validCoord);
+  if (!rows.length) return 999999;
+  const ds = rows.map(p => haversine(start, coordPoint(p)));
+  const peakIndex = ds.indexOf(Math.max(...ds));
+  const legs = routeLegsKm(start, rows);
+  const avgLeg = legs.reduce((a, b) => a + b, 0) / Math.max(1, legs.length);
+  let score = routeDistanceFromStart(start, rows);
+
+  // ให้คะแนนดีกับจุดเริ่มที่ใกล้ฐานและเส้นทางที่ไม่กระโดดไกลตั้งแต่ต้น
+  score += (legs[0] || 0) * 1.35;
+  if (legs[1]) score += legs[1] * 0.25;
+  legs.forEach((leg, idx) => {
+    if (leg > Math.max(22, avgLeg * 1.9)) score += (leg - Math.max(22, avgLeg * 1.9)) * (idx <= 2 ? 5.5 : 3.0);
+  });
+
+  // ให้ลำดับเป็นใกล้ → ไกล → วนกลับ มากกว่าออกไกลแล้วตีกลับมาเก็บใกล้กลางทาง
+  for (let i = 1; i <= peakIndex; i++) {
+    if (ds[i] + 3 < ds[i - 1]) score += (ds[i - 1] - ds[i]) * 8.5;
+  }
+  for (let i = peakIndex + 1; i < ds.length; i++) {
+    if (ds[i] > ds[i - 1] + 8) score += (ds[i] - ds[i - 1] - 8) * 4.5;
+  }
+
+  score += normalLoopShapePenaltyQuick(start, rows) * 0.55;
+  score += routeTurnPenalty(start, rows) * 1.2;
+  score += loopBacktrackPenalty(start, rows) * 1.45;
+  score += revisitPassedPointPenalty(start, rows) * 0.95;
+  if (approxRoadDistanceKm(start, rows) > MAX_ROUTE_DISTANCE_KM) score += (approxRoadDistanceKm(start, rows) - MAX_ROUTE_DISTANCE_KM) * 18;
+  return score;
+}
+
+function selectST55GreedyNearPoints(start, pool, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
+  const all = uniqueRowsByIdName(pool || [])
+    .filter(validCoord)
+    .filter(p => !rowMatchesAnyTemplateToken(p, ST55_TEMPLATE_EXCLUDE_TOKENS));
+  if (all.length <= targetStops) return all;
+
+  const center = routeCentroid(all);
+  const limited = [...all]
+    .sort((a, b) => {
+      const scoreA = haversine(start, coordPoint(a)) * 0.40 + normalPointPickScore(start, center, a) * 0.75;
+      const scoreB = haversine(start, coordPoint(b)) * 0.40 + normalPointPickScore(start, center, b) * 0.75;
+      return scoreA - scoreB;
+    })
+    .slice(0, Math.min(all.length, Math.max(28, targetStops * 4)));
+
+  const selected = [];
+  let current = { lat: start.lat, lng: start.lng };
+  let farthestFromStart = 0;
+
+  while (selected.length < targetStops && limited.length) {
+    let bestIndex = -1;
+    let bestScore = Infinity;
+    const routeCenter = routeCentroid(selected.length ? selected : limited.slice(0, targetStops));
+
+    limited.forEach((p, idx) => {
+      if (selected.some(s => isSameStop(s, p))) return;
+      const dCurrent = haversine(current, coordPoint(p));
+      const dStart = haversine(start, coordPoint(p));
+      const dCenter = routeCenter ? haversine(routeCenter, coordPoint(p)) : 0;
+      let score = dCurrent * 1.12 + dStart * 0.18 + dCenter * 0.18 + candidateBaseScore(p) * 0.20;
+
+      if (!selected.length) score += dStart * 1.15;
+      if (selected.length < Math.ceil(targetStops * 0.62) && dStart + 4 < farthestFromStart) {
+        score += (farthestFromStart - dStart) * 6.5;
+      }
+      if (selected.length >= Math.ceil(targetStops * 0.62) && dStart > farthestFromStart + 14) {
+        score += (dStart - farthestFromStart - 14) * 4.0;
+      }
+      if (score < bestScore) {
+        bestScore = score;
+        bestIndex = idx;
+      }
+    });
+
+    if (bestIndex < 0) break;
+    const hit = limited.splice(bestIndex, 1)[0];
+    selected.push(hit);
+    current = coordPoint(hit);
+    farthestFromStart = Math.max(farthestFromStart, haversine(start, current));
+  }
+
+  if (selected.length < targetStops) {
+    for (const p of all) {
+      if (selected.length >= targetStops) break;
+      if (!selected.some(s => isSameStop(s, p))) selected.push(p);
+    }
+  }
+  return selected.slice(0, targetStops);
+}
+
+function buildST55NearestFirstRoute(start, list, targetStops = NORMAL_ROUTE_TARGET_STOPS) {
+  const pool = uniqueRowsByIdName(list || [])
+    .filter(validCoord)
+    .filter(p => !rowMatchesAnyTemplateToken(p, ST55_TEMPLATE_EXCLUDE_TOKENS));
+  if (pool.length <= targetStops) return twoOptNormalRoute(start, progressiveNearOrder(start, pool)).slice(0, targetStops);
+
+  const seedSets = [];
+  const addSet = (rows) => {
+    const clean = uniqueRowsByIdName(rows || []).filter(validCoord).slice(0, targetStops);
+    if (clean.length < Math.min(MIN_ROUTE_CUSTOMER_STOPS, targetStops)) return;
+    const key = routeKeyForSet(clean);
+    if (!seedSets.some(s => s.key === key)) seedSets.push({ key, rows: clean });
+  };
+
+  addSet(selectST55GreedyNearPoints(start, pool, targetStops));
+  addSet(buildNormalInitialRoute(start, pool, targetStops));
+  addSet(buildGenericNormalLoopLikeWNN58Route(start, pool, targetStops));
+  addSet(buildST55TemplateRoute(start, pool, targetStops));
+  addSet([...pool].sort((a, b) => haversine(start, coordPoint(a)) - haversine(start, coordPoint(b))).slice(0, targetStops));
+
+  const routeCandidates = [];
+  const addRoute = (route) => {
+    const clean = uniqueRowsByIdName(route || []).filter(validCoord).slice(0, targetStops);
+    if (clean.length !== Math.min(targetStops, clean.length) || clean.length < Math.min(MIN_ROUTE_CUSTOMER_STOPS, targetStops)) return;
+    const key = uniqueRouteCandidateKey(clean);
+    if (!routeCandidates.some(r => r.key === key)) routeCandidates.push({ key, route: clean });
+  };
+
+  seedSets.forEach(set => {
+    const near = progressiveNearOrder(start, set.rows).slice(0, targetStops);
+    const normal = orderNormalMarketRoute(start, set.rows).slice(0, targetStops);
+    addRoute(near);
+    addRoute(twoOptNormalRoute(start, near));
+    addRoute(normal);
+    addRoute(twoOptNormalRoute(start, normal));
+    addRoute(twoOptNormalRoute(start, [...set.rows].sort((a, b) => haversine(start, coordPoint(a)) - haversine(start, coordPoint(b)))));
+  });
+
+  const valid = routeCandidates.length ? routeCandidates : [{ route: buildNormalInitialRoute(start, pool, targetStops) }];
+  const best = valid
+    .map(x => ({ route: x.route, score: st55RouteProgressiveScore(start, x.route) }))
+    .sort((a, b) => a.score - b.score)[0];
+  return (best && best.route ? best.route : buildNormalInitialRoute(start, pool, targetStops)).slice(0, targetStops);
+}
+
+
 function normalRouteSlotBadness(start, route, index) {
   const rows = (route || []).filter(validCoord);
   if (!rows[index] || !validCoord(rows[index])) return 0;
@@ -2304,7 +2510,7 @@ function buildGenericNormalLoopLikeWNN58Route(start, list, targetStops = NORMAL_
 // เป้าหมาย: นำ feedback รายสายจากแผนที่มาใช้แบบเบา ไม่ลอง combination จำนวนมาก และไม่กระทบโหมดปรับปรุงปั๊ม/ตารางซ่อม
 const NORMAL_MANUAL_ROUTE_RULES = {
   // สายที่ระบุว่า "ดีแล้ว" ให้คง logic เดิมไว้ ห้ามแก้เพิ่ม: 60, 61, 55, 65, 71, 58
-  "55": { removeIndexes: [7], note: "ดีแล้ว: คงกติกาตัดจุด 8 ที่อยู่นอกวง" },
+  "55": { note: "สาย 55 ใช้ตัวจัดเส้นทางใกล้ก่อน-ไกลขึ้นเฉพาะสาย ไม่ใช้การตัดจุดแบบเดิม" },
   "60": { removeIndexes: [3], note: "ดีแล้ว: คงกติกาตัดจุด 4 ที่อยู่นอกวง" },
   "61": { removeIndexes: [4, 5], note: "ดีแล้ว: คงกติกาตัดจุด 5-6 ที่อยู่นอกวง" },
   "65": { pattern: [9, 2, 3, 4, 5, 6, 7, 8, "NEW"], excludeOldIndexes: [0], note: "ดีแล้ว: คงลำดับเดิมที่ผ่านแล้ว" },
@@ -2508,6 +2714,8 @@ function buildOptimizedNormalRouteForGroup(meta) {
   let ordered;
   if (isNormalWNN58Key(meta.bu, meta.meterKey)) {
     ordered = buildWNN58TemplateRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
+  } else if (isNormalST55Key(meta.bu, meta.meterKey)) {
+    ordered = buildST55NearestFirstRoute(meta.start, meta.list, NORMAL_ROUTE_TARGET_STOPS);
   } else {
     // ทุกสายใช้ logic กลางแบบเดียวกับแนว WNN58: lazy + เลือกจุดในวง + แทนเฉพาะจุดที่ทำให้วงเสีย 1-2 จุด
     // จากนั้นค่อยใช้ manual feedback รายสายแบบเบา โดยไม่ลอง combination จำนวนมาก
@@ -2582,7 +2790,10 @@ function buildNormalPlanRows(marketRows) {
     normalRouteLazyPools.set(routeId, meta);
 
     // สร้างแผนเบื้องต้นแบบเบาเพื่อให้เปิดหน้าเร็ว แล้วค่อย optimize เฉพาะสายที่คลิกดู
-    let ordered = buildNormalInitialRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
+    // ยกเว้น ST สาย 55: คำนวณตัวใกล้ก่อน-ไกลขึ้นตั้งแต่ต้น เพราะผู้ใช้ต้องการเห็นลำดับใหม่ทันทีบน Map/Card
+    let ordered = isNormalST55Key(bu, meterKey)
+      ? buildST55NearestFirstRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS)
+      : buildNormalInitialRoute(start, list, MAX_ROUTE_CUSTOMER_STOPS);
     if (normalManualRuleForMeta(meta)) {
       ordered = applyNormalManualFeedback(meta, ordered);
     }
